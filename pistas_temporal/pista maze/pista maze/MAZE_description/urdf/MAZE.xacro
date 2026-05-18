@@ -1,0 +1,568 @@
+<?xml version="1.0" ?>
+<robot name="MAZE" xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+<xacro:include filename="$(find MAZE_description)/urdf/materials.xacro" />
+<xacro:include filename="$(find MAZE_description)/urdf/MAZE.trans" />
+<xacro:include filename="$(find MAZE_description)/urdf/MAZE.gazebo" />
+<link name="base_link">
+  <inertial>
+    <origin xyz="1.7282403761083236 5.033132986597013 0.8103281022887697" rpy="0 0 0"/>
+    <mass value="15940.074311497588"/>
+    <inertia ixx="159861.759404" iyy="64060.073054" izz="207910.060931" ixy="5196.814701" iyz="-682.80728" ixz="-450.14384"/>
+  </inertial>
+  <visual>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1___1__2">
+  <inertial>
+    <origin xyz="0.015524340697098904 2.105666307983256e-07 0.015524396993600864" rpy="0 0 0"/>
+    <mass value="1.3084394776147668"/>
+    <inertia ixx="0.000956" iyy="0.000777" izz="0.000956" ixy="-0.0" iyz="-0.0" ixz="0.000178"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.088729 -4.89695 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.088729 -4.89695 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1__2">
+  <inertial>
+    <origin xyz="0.0019159660135161377 5.91377700214224e-05 0.001954605856414826" rpy="0 0 0"/>
+    <mass value="0.24050697024652556"/>
+    <inertia ixx="4e-05" iyy="5e-05" izz="4e-05" ixy="-0.0" iyz="-0.0" ixz="-1e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__2.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1__3">
+  <inertial>
+    <origin xyz="-0.1311386848705756 0.12947079134199768 -0.0015580343994353596" rpy="0 0 0"/>
+    <mass value="0.24050697024652556"/>
+    <inertia ixx="5e-05" iyy="4.1e-05" izz="4e-05" ixy="0.0" iyz="-1e-05" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__3.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__3.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1___1__3">
+  <inertial>
+    <origin xyz="-4.2317861579516114e-08 0.0155245935812367 0.015524396993747858" rpy="0 0 0"/>
+    <mass value="1.3084394776147668"/>
+    <inertia ixx="0.000777" iyy="0.000956" izz="0.000956" ixy="0.0" iyz="0.000178" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.011271 -4.99695 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__3.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.011271 -4.99695 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__3.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1__4">
+  <inertial>
+    <origin xyz="-0.13104960816027933 -0.1295027355510543 -0.0015903997411627069" rpy="0 0 0"/>
+    <mass value="0.24050697024652556"/>
+    <inertia ixx="5e-05" iyy="4e-05" izz="4e-05" ixy="0.0" iyz="1e-05" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__4.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__4.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1___1__4">
+  <inertial>
+    <origin xyz="-4.2317861574311944e-08 -0.015524172449398854 0.015524396993159217" rpy="0 0 0"/>
+    <mass value="1.3084394776147668"/>
+    <inertia ixx="0.000777" iyy="0.000956" izz="0.000956" ixy="0.0" iyz="-0.000178" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.011271 -4.79695 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__4.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.011271 -4.79695 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__4.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1__5">
+  <inertial>
+    <origin xyz="-0.1310529697163669 2.486909238541557e-05 0.06562436819996975" rpy="0 0 0"/>
+    <mass value="0.24050697024652556"/>
+    <inertia ixx="5e-05" iyy="5e-05" izz="3.1e-05" ixy="0.0" iyz="-0.0" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__5.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__5.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1___1__5">
+  <inertial>
+    <origin xyz="-4.231786100705737e-08 2.1056579591061109e-07 0.021954806985872932" rpy="0 0 0"/>
+    <mass value="1.3084394776147668"/>
+    <inertia ixx="0.000777" iyy="0.000777" izz="0.001134" ixy="0.0" iyz="0.0" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.011271 -4.89695 -0.7" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__5.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.011271 -4.89695 -0.7" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__5.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1__6">
+  <inertial>
+    <origin xyz="-0.26217192627589625 5.9923261702898856e-05 -1.8014548549993847e-05" rpy="0 0 0"/>
+    <mass value="0.24050697024652556"/>
+    <inertia ixx="4e-05" iyy="5e-05" izz="4e-05" ixy="0.0" iyz="-0.0" ixz="1e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__6.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__6.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1___1__6">
+  <inertial>
+    <origin xyz="-0.01552442533353808 2.1056662813379035e-07 0.015524396993306988" rpy="0 0 0"/>
+    <mass value="1.3084394776147668"/>
+    <inertia ixx="0.000956" iyy="0.000777" izz="0.000956" ixy="0.0" iyz="0.0" ixz="-0.000178"/>
+  </inertial>
+  <visual>
+    <origin xyz="0.111271 -4.89695 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__6.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="0.111271 -4.89695 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__6.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1__7">
+  <inertial>
+    <origin xyz="2.3455974490143747 1.3653670487777418 0.06062436819996753" rpy="0 0 0"/>
+    <mass value="0.24050697024652556"/>
+    <inertia ixx="5e-05" iyy="5e-05" izz="3.1e-05" ixy="0.0" iyz="0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__7.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__7.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1___1__7">
+  <inertial>
+    <origin xyz="3.599045910185339e-07 7.502090859645705e-08 0.021954806985872377" rpy="0 0 0"/>
+    <mass value="1.3084394776147668"/>
+    <inertia ixx="0.000777" iyy="0.000777" izz="0.001134" ixy="0.0" iyz="-0.0" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-2.465495 -6.26235 -0.7" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__7.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-2.465495 -6.26235 -0.7" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__7.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1__8">
+  <inertial>
+    <origin xyz="2.212562582055381 1.3653754164951852 0.0018928363390816605" rpy="0 0 0"/>
+    <mass value="0.24050697024652556"/>
+    <inertia ixx="4e-05" iyy="5e-05" izz="4.1e-05" ixy="-0.0" iyz="0.0" ixz="1e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__8.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__8.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1___1__8">
+  <inertial>
+    <origin xyz="-0.015524023111083807 7.502173904327947e-08 0.015524396993303657" rpy="0 0 0"/>
+    <mass value="1.3084394776147668"/>
+    <inertia ixx="0.000956" iyy="0.000777" izz="0.000956" ixy="0.0" iyz="0.0" ixz="-0.000178"/>
+  </inertial>
+  <visual>
+    <origin xyz="-2.365495 -6.26235 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__8.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-2.365495 -6.26235 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__8.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1__9">
+  <inertial>
+    <origin xyz="2.345713432506085 1.2323692111273985 0.0019527502941568686" rpy="0 0 0"/>
+    <mass value="0.24050697024652556"/>
+    <inertia ixx="5e-05" iyy="4e-05" izz="4e-05" ixy="0.0" iyz="1e-05" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__9.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__9.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1___1__9">
+  <inertial>
+    <origin xyz="3.599045914626231e-07 -0.015524307994283504 0.015524396993159773" rpy="0 0 0"/>
+    <mass value="1.3084394776147668"/>
+    <inertia ixx="0.000777" iyy="0.000956" izz="0.000956" ixy="-0.0" iyz="-0.000178" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-2.465495 -6.16235 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__9.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-2.465495 -6.16235 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__9.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1__10">
+  <inertial>
+    <origin xyz="2.4786591822653294 1.3653754164951861 0.0019777918271378647" rpy="0 0 0"/>
+    <mass value="0.24050697024652556"/>
+    <inertia ixx="4.1e-05" iyy="5e-05" izz="4e-05" ixy="0.0" iyz="0.0" ixz="-1e-05"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__10.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__10.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1___1__10">
+  <inertial>
+    <origin xyz="0.01552474291955308 7.502174081963631e-08 0.01552439699360153" rpy="0 0 0"/>
+    <mass value="1.3084394776147668"/>
+    <inertia ixx="0.000956" iyy="0.000777" izz="0.000956" ixy="-0.0" iyz="-0.0" ixz="0.000178"/>
+  </inertial>
+  <visual>
+    <origin xyz="-2.565495 -6.26235 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__10.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-2.565495 -6.26235 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__10.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1__11">
+  <inertial>
+    <origin xyz="2.345713432506084 1.4984658113373426 0.0019178778720636558" rpy="0 0 0"/>
+    <mass value="0.24050697024652556"/>
+    <inertia ixx="5e-05" iyy="4e-05" izz="4e-05" ixy="-0.0" iyz="-1e-05" ixz="-0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__11.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-0.119842 -4.89695 -0.681113" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1__11.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<link name="B2__1___1__11">
+  <inertial>
+    <origin xyz="3.599045905744447e-07 0.015524458036346722 0.015524396993747525" rpy="0 0 0"/>
+    <mass value="1.3084394776147668"/>
+    <inertia ixx="0.000777" iyy="0.000956" izz="0.000956" ixy="0.0" iyz="0.000178" ixz="0.0"/>
+  </inertial>
+  <visual>
+    <origin xyz="-2.465495 -6.36235 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__11.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+    <material name="silver"/>
+  </visual>
+  <collision>
+    <origin xyz="-2.465495 -6.36235 -0.65" rpy="0 0 0"/>
+    <geometry>
+      <mesh filename="package://MAZE_description/meshes/B2__1___1__11.stl" scale="0.001 0.001 0.001"/>
+    </geometry>
+  </collision>
+</link>
+
+<joint name="Rigid 26" type="fixed">
+  <origin xyz="0.088729 4.89695 0.65" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="B2__1___1__2"/>
+</joint>
+
+<joint name="Cylindrical 27" type="Cylinderical">
+  <origin xyz="0.031113 0.0 0.031113" rpy="0 0 0"/>
+  <parent link="B2__1___1__2"/>
+  <child link="B2__1__2"/>
+</joint>
+
+<joint name="Cylindrical 28" type="Cylinderical">
+  <origin xyz="0.131113 -0.1 0.031113" rpy="0 0 0"/>
+  <parent link="B2__1___1__3"/>
+  <child link="B2__1__3"/>
+</joint>
+
+<joint name="Rigid 29" type="fixed">
+  <origin xyz="-0.011271 4.99695 0.65" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="B2__1___1__3"/>
+</joint>
+
+<joint name="Cylindrical 30" type="Cylinderical">
+  <origin xyz="0.131113 0.1 0.031113" rpy="0 0 0"/>
+  <parent link="B2__1___1__4"/>
+  <child link="B2__1__4"/>
+</joint>
+
+<joint name="Rigid 31" type="fixed">
+  <origin xyz="-0.011271 4.79695 0.65" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="B2__1___1__4"/>
+</joint>
+
+<joint name="Cylindrical 32" type="Cylinderical">
+  <origin xyz="0.131113 0.0 -0.018887" rpy="0 0 0"/>
+  <parent link="B2__1___1__5"/>
+  <child link="B2__1__5"/>
+</joint>
+
+<joint name="Rigid 33" type="fixed">
+  <origin xyz="-0.011271 4.89695 0.7" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="B2__1___1__5"/>
+</joint>
+
+<joint name="Cylindrical 34" type="Cylinderical">
+  <origin xyz="0.231113 0.0 0.031113" rpy="0 0 0"/>
+  <parent link="B2__1___1__6"/>
+  <child link="B2__1__6"/>
+</joint>
+
+<joint name="Rigid 35" type="fixed">
+  <origin xyz="-0.111271 4.89695 0.65" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="B2__1___1__6"/>
+</joint>
+
+<joint name="Cylindrical 36" type="Cylinderical">
+  <origin xyz="-2.345653 -1.3654 -0.018887" rpy="0 0 0"/>
+  <parent link="B2__1___1__7"/>
+  <child link="B2__1__7"/>
+</joint>
+
+<joint name="Rigid 37" type="fixed">
+  <origin xyz="2.465495 6.26235 0.7" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="B2__1___1__7"/>
+</joint>
+
+<joint name="Cylindrical 38" type="Cylinderical">
+  <origin xyz="-2.245653 -1.3654 0.031113" rpy="0 0 0"/>
+  <parent link="B2__1___1__8"/>
+  <child link="B2__1__8"/>
+</joint>
+
+<joint name="Rigid 39" type="fixed">
+  <origin xyz="2.365495 6.26235 0.65" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="B2__1___1__8"/>
+</joint>
+
+<joint name="Cylindrical 40" type="Cylinderical">
+  <origin xyz="-2.345653 -1.2654 0.031113" rpy="0 0 0"/>
+  <parent link="B2__1___1__9"/>
+  <child link="B2__1__9"/>
+</joint>
+
+<joint name="Rigid 41" type="fixed">
+  <origin xyz="2.465495 6.16235 0.65" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="B2__1___1__9"/>
+</joint>
+
+<joint name="Cylindrical 42" type="Cylinderical">
+  <origin xyz="-2.445653 -1.3654 0.031113" rpy="0 0 0"/>
+  <parent link="B2__1___1__10"/>
+  <child link="B2__1__10"/>
+</joint>
+
+<joint name="Rigid 43" type="fixed">
+  <origin xyz="2.565495 6.26235 0.65" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="B2__1___1__10"/>
+</joint>
+
+<joint name="Cylindrical 44" type="Cylinderical">
+  <origin xyz="-2.345653 -1.4654 0.031113" rpy="0 0 0"/>
+  <parent link="B2__1___1__11"/>
+  <child link="B2__1__11"/>
+</joint>
+
+<joint name="Rigid 45" type="fixed">
+  <origin xyz="2.465495 6.36235 0.65" rpy="0 0 0"/>
+  <parent link="base_link"/>
+  <child link="B2__1___1__11"/>
+</joint>
+
+</robot>

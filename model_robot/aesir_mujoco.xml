@@ -1,7 +1,4 @@
 <mujoco model="rescue_robot">
-  <compiler angle="radian" autolimits="true"/>
-
-  <option timestep="0.001" iterations="50" tolerance="1e-10" solver="Newton"/>
 
   <contact>
     <exclude body1="footprint_link" body2="flipper_1_link"/>
@@ -11,15 +8,15 @@
   </contact>
 
   <asset>
-    <mesh name="base_link" content_type="model/stl" file="/home/kfcnef/AESIR/arm/workspace/src/aesir_robot_description/meshes/base_link.stl" scale="0.001 0.001 0.001"/>
-    <mesh name="tracked_1" content_type="model/stl" file="/home/kfcnef/AESIR/arm/workspace/src/aesir_robot_description/meshes/tracked_1.stl" scale="0.001 0.001 0.001"/>
-    <mesh name="tracked_2" content_type="model/stl" file="/home/kfcnef/AESIR/arm/workspace/src/aesir_robot_description/meshes/tracked_2.stl" scale="0.001 0.001 0.001"/>
-    <mesh name="flipper_1_1" content_type="model/stl" file="/home/kfcnef/AESIR/arm/workspace/src/aesir_robot_description/meshes/flipper_1_1.stl" scale="0.001 0.001 0.001"/>
-    <mesh name="flipper_4_1" content_type="model/stl" file="/home/kfcnef/AESIR/arm/workspace/src/aesir_robot_description/meshes/flipper_4_1.stl" scale="0.001 0.001 0.001"/>
-    <mesh name="flipper_3_1" content_type="model/stl" file="/home/kfcnef/AESIR/arm/workspace/src/aesir_robot_description/meshes/flipper_3_1.stl" scale="0.001 0.001 0.001"/>
-    <mesh name="flipper_2_1" content_type="model/stl" file="/home/kfcnef/AESIR/arm/workspace/src/aesir_robot_description/meshes/flipper_2_1.stl" scale="0.001 0.001 0.001"/>
-    <mesh name="lidar" content_type="model/stl" file="/home/kfcnef/AESIR/arm/workspace/src/aesir_robot_description/meshes/lidar.stl" scale="0.001 0.001 0.001"/>
-    <mesh name="logitech_c920" content_type="model/stl" file="/home/kfcnef/AESIR/arm/workspace/src/aesir_robot_description/meshes/logitech_c920.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="base_link" content_type="model/stl" file="meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="tracked_1" content_type="model/stl" file="meshes/tracked_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="tracked_2" content_type="model/stl" file="meshes/tracked_2.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="flipper_1_1" content_type="model/stl" file="meshes/flipper_1_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="flipper_4_1" content_type="model/stl" file="meshes/flipper_4_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="flipper_3_1" content_type="model/stl" file="meshes/flipper_3_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="flipper_2_1" content_type="model/stl" file="meshes/flipper_2_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="lidar" content_type="model/stl" file="meshes/lidar.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="logitech_c920" content_type="model/stl" file="meshes/logitech_c920.stl" scale="0.001 0.001 0.001"/>
 
     <!-- Textura para el suelo -->
     <texture name="texplane" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512"/>

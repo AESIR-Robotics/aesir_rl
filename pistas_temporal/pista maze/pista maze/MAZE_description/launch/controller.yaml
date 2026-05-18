@@ -1,0 +1,47 @@
+MAZE_controller:
+  # Publish all joint states -----------------------------------
+  joint_state_controller:
+    type: joint_state_controller/JointStateController
+    publish_rate: 50
+
+  # Position Controllers --------------------------------------
+  Cylindrical 27_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 27
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Cylindrical 28_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 28
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Cylindrical 30_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 30
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Cylindrical 32_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 32
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Cylindrical 34_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 34
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Cylindrical 36_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 36
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Cylindrical 38_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 38
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Cylindrical 40_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 40
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Cylindrical 42_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 42
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Cylindrical 44_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 44
+    pid: {p: 100.0, i: 0.01, d: 10.0}

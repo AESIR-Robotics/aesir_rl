@@ -1,0 +1,27 @@
+COMPONENTS_controller:
+  # Publish all joint states -----------------------------------
+  joint_state_controller:
+    type: joint_state_controller/JointStateController
+    publish_rate: 50
+
+  # Position Controllers --------------------------------------
+  Cylindrical 1_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 1
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Cylindrical 3_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 3
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Cylindrical 5_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 5
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Cylindrical 7_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 7
+    pid: {p: 100.0, i: 0.01, d: 10.0}
+  Cylindrical 9_position_controller:
+    type: effort_controllers/JointPositionController
+    joint: Cylindrical 9
+    pid: {p: 100.0, i: 0.01, d: 10.0}

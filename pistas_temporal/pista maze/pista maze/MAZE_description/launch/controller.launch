@@ -1,0 +1,9 @@
+<launch>
+
+<rosparam file="$(find MAZE_description)/launch/controller.yaml" command="load"/>
+<node name="controller_spawner" pkg="controller_manager" type="spawner" respawn="false" output="screen" ns="MAZE" args="Cylindrical 27_position_controller Cylindrical 28_position_controller Cylindrical 30_position_controller Cylindrical 32_position_controller Cylindrical 34_position_controller Cylindrical 36_position_controller Cylindrical 38_position_controller Cylindrical 40_position_controller Cylindrical 42_position_controller Cylindrical 44_position_controller joint_state_controller "/>
+<node name="robot_state_publisher" pkg="robot_state_publisher" type="robot_state_publisher" respawn="false" output="screen">
+  <remap from="/joint_states" to="/MAZE/joint_states"/>
+</node>
+
+</launch>
