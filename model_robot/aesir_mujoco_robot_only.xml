@@ -1,14 +1,5 @@
 <mujoco model="rescue_robot">
 
-  <!--
-    INCLUDE-ONLY version of aesir_mujoco.xml — used by aesir_complete.xml.
-    Identical to aesir_mujoco.xml EXCEPT:
-      - texture "texplane" and material "matplane" are removed
-        (mapa_completo.xml already defines them; duplicates cause a load error)
-      - test-only worldbody elements removed: light, floor geom, escalon geom
-    All joints, bodies, actuators and sensors are untouched.
-  -->
-
   <contact>
     <exclude body1="footprint_link" body2="flipper_1_link"/>
     <exclude body1="footprint_link" body2="flipper_2_link"/>
@@ -17,54 +8,50 @@
   </contact>
 
   <asset>
-    <mesh name="base_link"    content_type="model/stl" file="meshes/base_link.stl"    scale="0.001 0.001 0.001"/>
-    <mesh name="tracked_1"    content_type="model/stl" file="meshes/tracked_1.stl"    scale="0.001 0.001 0.001"/>
-    <mesh name="tracked_2"    content_type="model/stl" file="meshes/tracked_2.stl"    scale="0.001 0.001 0.001"/>
-    <mesh name="flipper_1_1"  content_type="model/stl" file="meshes/flipper_1_1.stl"  scale="0.001 0.001 0.001"/>
-    <mesh name="flipper_4_1"  content_type="model/stl" file="meshes/flipper_4_1.stl"  scale="0.001 0.001 0.001"/>
-    <mesh name="flipper_3_1"  content_type="model/stl" file="meshes/flipper_3_1.stl"  scale="0.001 0.001 0.001"/>
-    <mesh name="flipper_2_1"  content_type="model/stl" file="meshes/flipper_2_1.stl"  scale="0.001 0.001 0.001"/>
-    <mesh name="lidar"        content_type="model/stl" file="meshes/lidar.stl"        scale="0.001 0.001 0.001"/>
+    <mesh name="base_link" content_type="model/stl" file="meshes/base_link.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="tracked_1" content_type="model/stl" file="meshes/tracked_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="tracked_2" content_type="model/stl" file="meshes/tracked_2.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="flipper_1_1" content_type="model/stl" file="meshes/flipper_1_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="flipper_4_1" content_type="model/stl" file="meshes/flipper_4_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="flipper_3_1" content_type="model/stl" file="meshes/flipper_3_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="flipper_2_1" content_type="model/stl" file="meshes/flipper_2_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="lidar" content_type="model/stl" file="meshes/lidar.stl" scale="0.001 0.001 0.001"/>
     <mesh name="logitech_c920" content_type="model/stl" file="meshes/logitech_c920.stl" scale="0.001 0.001 0.001"/>
   </asset>
 
   <worldbody>
-
     <body name="footprint_link" pos="0 0 0.1">
       <freejoint name="base_freejoint"/>
+
       <inertial pos="0 0 0.06" mass="25.0" diaginertia="1.2 1.6 2.7"/>
 
-      <geom pos="0 0.55 0"  quat="1 0 0 0" type="mesh" rgba="0.75 0.75 0.75 1" mesh="base_link"  contype="0" conaffinity="0"/>
-      <geom pos="0 0.55 0"  quat="1 0 0 0" type="mesh" rgba="0.75 0.75 0.75 1" mesh="tracked_1"  contype="0" conaffinity="0"/>
-      <geom pos="0 0.562 0" quat="1 0 0 0" type="mesh" rgba="0.75 0.75 0.75 1" mesh="tracked_2"  contype="0" conaffinity="0"/>
+      <geom pos="0 0.55 0" quat="1 0 0 0" type="mesh" rgba="0.75 0.75 0.75 1" mesh="base_link" contype="0" conaffinity="0"/>
+      <geom pos="0 0.55 0" quat="1 0 0 0" type="mesh" rgba="0.75 0.75 0.75 1" mesh="tracked_1" contype="0" conaffinity="0"/>
+      <geom pos="0 0.562 0" quat="1 0 0 0" type="mesh" rgba="0.75 0.75 0.75 1" mesh="tracked_2" contype="0" conaffinity="0"/>
       <geom size="0.06 0.07915" pos="0.12 0 0.13915" type="cylinder" rgba="0.2 0.2 0.2 1"/>
-
-      <!-- SENSOR LIDAR -->
+      
       <body name="sensor_lidar" pos="0.32 0 0.105" euler="0 0.7854 0">
         <joint name="lidar_spin" type="hinge" axis="0 0 1" damping="0.1" armature="0.01"/>
         <geom type="mesh" rgba="0.2 0.2 0.2 1" mesh="lidar"/>
-        <site name="ray_0" pos="0.03 0 0.037" euler="0 0 0"      type="sphere" size="0.005"/>
-        <site name="ray_1" pos="0.03 0 0.037" euler="0 0.2793 0" type="sphere" size="0.005"/>
-        <site name="ray_2" pos="0.03 0 0.037" euler="0 0.5585 0" type="sphere" size="0.005"/>
-        <site name="ray_3" pos="0.03 0 0.037" euler="0 0.8378 0" type="sphere" size="0.005"/>
-        <site name="ray_4" pos="0.03 0 0.037" euler="0 1.1170 0" type="sphere" size="0.005"/>
-        <site name="ray_5" pos="0.03 0 0.037" euler="0 1.3963 0" type="sphere" size="0.005"/>
+        <site name="ray_0" pos="0.03 0 0.037" euler="0 0 0" type="sphere" size="0.005"/> 
+        <site name="ray_1" pos="0.03 0 0.037" euler="0 0.2793 0" type="sphere" size="0.005"/> 
+        <site name="ray_2" pos="0.03 0 0.037" euler="0 0.5585 0" type="sphere" size="0.005"/> 
+        <site name="ray_3" pos="0.03 0 0.037" euler="0 0.8378 0" type="sphere" size="0.005"/> 
+        <site name="ray_4" pos="0.03 0 0.037" euler="0 1.1170 0" type="sphere" size="0.005"/> 
+        <site name="ray_5" pos="0.03 0 0.037" euler="0 1.3963 0" type="sphere" size="0.005"/> 
         <site name="ray_6" pos="0.03 0 0.037" euler="0 1.6755 0" type="sphere" size="0.005"/>
       </body>
 
-      <!-- CÁMARA OAK-D -->
       <geom size="0.01 0.05 0.015" pos="0.257 0 0.19" type="box" rgba="0.7 0.7 0.7 1"/>
       <body name="camera_oakd_link" pos="0.257 0 0.19">
         <camera name="cam_oakd" pos="0 0 0" quat="0.5 -0.5 -0.5 0.5" fovy="69"/>
       </body>
-
-      <!-- CÁMARA Logitech -->
+  
       <body name="camera_back_link" pos="-0.34 0.0270001 -0.02">
         <geom quat="-1 0 0 2.65359e-06" type="mesh" rgba="0.2 0.2 0.2 1" mesh="logitech_c920"/>
         <camera name="cam_back" pos="0.02 -0.0270001 0.175" euler="1.5708 1.5708 3.14159" fovy="78"/>
       </body>
 
-      <!-- FLIPPERS -->
       <body name="flipper_1_link" pos="-0.24 -0.256 0.06">
         <inertial pos="0 0.00355409 0.15154" quat="0.707092 -0.00452931 0.00452931 0.707092" mass="3.74207" diaginertia="0.0729765 0.065573 0.00896149"/>
         <joint name="flipper_joint_1" pos="0 0 0" axis="0 -1 0" damping="2.0" armature="0.05"/>
@@ -118,7 +105,6 @@
         </body>
       </body>
 
-      <!-- ARM -->
       <body name="link_1" pos="0.12 0 0.2183">
         <inertial pos="0 0 0" mass="1.5" diaginertia="0.01 0.01 0.005"/>
         <joint name="joint_1" pos="0 0 0" axis="0 0 1" range="-3.14 3.14" actuatorfrcrange="-150 150" damping="20.0" armature="0.05"/>
@@ -146,10 +132,12 @@
                   <joint name="joint_6" pos="0 0 0" axis="0 1 0" range="-3.14 3.14" actuatorfrcrange="-50 50" damping="20.0" armature="0.05"/>
                   <geom size="0.01 0.0005" quat="0.707107 -0.707107 0 0" type="cylinder" rgba="1 0.4 0 1"/>
                   <geom size="0.04 0.02 0.03" pos="0 0.02 0" type="box" rgba="0.2 0.2 0.2 1"/>
+
                   <body name="logitech_gripper_assembly" pos="0.05 0.00466266 -0.143907" euler="-0.1745 0 -1.5708">
                     <geom type="mesh" mesh="logitech_c920" rgba="0.2 0.2 0.2 1"/>
                     <camera name="cam_gripper" pos="0.00466266 -0.05 0.2" euler="-1.5708 1.5708 0.1745" fovy="78"/>
                   </body>
+                  
                   <body name="left_finger_link" pos="-0.035 0.04 0">
                     <inertial pos="0 0 0" mass="0.05" diaginertia="0.0001 0.0001 0.0001"/>
                     <joint name="left_finger_joint" pos="0 0 0" axis="1 0 0" type="slide" range="0 0.03" actuatorfrcrange="-50 50" damping="20.0" armature="0.05"/>
@@ -167,7 +155,6 @@
         </body>
       </body>
 
-      <!-- RUEDAS MOTRICES IZQUIERDA -->
       <body name="wheel_l_1" pos="0.24 0.18 0.06">
         <inertial pos="0 0 0" mass="0.8" diaginertia="0.01 0.01 0.01"/>
         <joint name="drive_l_1" type="hinge" axis="0 1 0"/>
@@ -184,7 +171,6 @@
         <geom type="cylinder" size="0.1 0.085" quat="0.707107 0.707107 0 0" rgba="1 0 0 1" friction="1.5 0.005 0.0001"/>
       </body>
 
-      <!-- RUEDAS MOTRICES DERECHA -->
       <body name="wheel_r_1" pos="0.24 -0.18 0.06">
         <inertial pos="0 0 0" mass="0.8" diaginertia="0.01 0.01 0.01"/>
         <joint name="drive_r_1" type="hinge" axis="0 1 0"/>
@@ -205,48 +191,42 @@
   </worldbody>
 
   <actuator>
-    <!-- FLIPPERS -->
-    <position name="pos_flipper_1" joint="flipper_joint_1" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416"/>
-    <position name="pos_flipper_2" joint="flipper_joint_2" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416"/>
-    <position name="pos_flipper_3" joint="flipper_joint_3" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416"/>
-    <position name="pos_flipper_4" joint="flipper_joint_4" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416"/>
+    <position name="pos_flipper_1" joint="flipper_joint_1" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
+    <position name="pos_flipper_2" joint="flipper_joint_2" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
+    <position name="pos_flipper_3" joint="flipper_joint_3" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
+    <position name="pos_flipper_4" joint="flipper_joint_4" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
 
-    <!-- BRAZO 6-DOF -->
-    <position name="pos_joint_1" joint="joint_1" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416"/>
-    <position name="pos_joint_2" joint="joint_2" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416"/>
-    <position name="pos_joint_3" joint="joint_3" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416"/>
-    <position name="pos_joint_4" joint="joint_4" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416"/>
-    <position name="pos_joint_5" joint="joint_5" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416"/>
-    <position name="pos_joint_6" joint="joint_6" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416"/>
+    <position name="pos_joint_1" joint="joint_1" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
+    <position name="pos_joint_2" joint="joint_2" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
+    <position name="pos_joint_3" joint="joint_3" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
+    <position name="pos_joint_4" joint="joint_4" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
+    <position name="pos_joint_5" joint="joint_5" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
+    <position name="pos_joint_6" joint="joint_6" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
 
-    <!-- GRIPPER -->
-    <position name="pos_left_finger"  joint="left_finger_joint"  kp="50" ctrllimited="true" ctrlrange="0 0.03"/>
-    <position name="pos_right_finger" joint="right_finger_joint" kp="50" ctrllimited="true" ctrlrange="0 0.03"/>
+    <position name="pos_left_finger" joint="left_finger_joint" kp="50" ctrllimited="true" ctrlrange="0 0.03" />
+    <position name="pos_right_finger" joint="right_finger_joint" kp="50" ctrllimited="true" ctrlrange="0 0.03" />
 
-    <!-- ORUGAS IZQUIERDA -->
     <velocity name="vel_drive_l_1" joint="drive_l_1" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
     <velocity name="vel_drive_l_2" joint="drive_l_2" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
     <velocity name="vel_drive_l_3" joint="drive_l_3" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
 
-    <!-- ORUGAS DERECHA -->
     <velocity name="vel_drive_r_1" joint="drive_r_1" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
     <velocity name="vel_drive_r_2" joint="drive_r_2" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
     <velocity name="vel_drive_r_3" joint="drive_r_3" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
-
-    <!-- FLIPPERS RUEDAS -->
-    <velocity name="vel_flip1_back"  joint="drive_flip1_back"  kv="5" ctrlrange="-1 1"/>
+    
+    <velocity name="vel_flip1_back" joint="drive_flip1_back" kv="5" ctrlrange="-1 1"/>
     <velocity name="vel_flip1_front" joint="drive_flip1_front" kv="5" ctrlrange="-1 1"/>
-    <velocity name="vel_flip2_back"  joint="drive_flip2_back"  kv="5" ctrlrange="-1 1"/>
+    <velocity name="vel_flip2_back" joint="drive_flip2_back" kv="5" ctrlrange="-1 1"/>
     <velocity name="vel_flip2_front" joint="drive_flip2_front" kv="5" ctrlrange="-1 1"/>
-    <velocity name="vel_flip3_back"  joint="drive_flip3_back"  kv="5" ctrlrange="-1 1"/>
+    <velocity name="vel_flip3_back" joint="drive_flip3_back" kv="5" ctrlrange="-1 1"/>
     <velocity name="vel_flip3_front" joint="drive_flip3_front" kv="5" ctrlrange="-1 1"/>
-    <velocity name="vel_flip4_back"  joint="drive_flip4_back"  kv="5" ctrlrange="-1 1"/>
+    <velocity name="vel_flip4_back" joint="drive_flip4_back" kv="5" ctrlrange="-1 1"/>
     <velocity name="vel_flip4_front" joint="drive_flip4_front" kv="5" ctrlrange="-1 1"/>
 
-    <!-- LIDAR -->
     <velocity name="vel_lidar_spin" joint="lidar_spin" kv="10" ctrlrange="-100 100"/>
-  </actuator>
 
+  </actuator>
+  
   <sensor>
     <rangefinder name="lidar_0" site="ray_0" cutoff="15.0" noise="0.02"/>
     <rangefinder name="lidar_1" site="ray_1" cutoff="15.0" noise="0.02"/>
@@ -256,5 +236,4 @@
     <rangefinder name="lidar_5" site="ray_5" cutoff="15.0" noise="0.02"/>
     <rangefinder name="lidar_6" site="ray_6" cutoff="15.0" noise="0.02"/>
   </sensor>
-
 </mujoco>
