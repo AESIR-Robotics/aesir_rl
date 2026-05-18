@@ -17,9 +17,29 @@
     <light directional="true" pos="0 0 5" dir="0 0 -1"/>
     
     <geom name="suelo_penalizacion" type="plane" size="50 50 0.1" pos="0 0 0" material="matplane"/>
-
+        
     <body name="pallets_mesh_body" pos="3 -3.49 0">
       <geom name="pallets_visual" type="mesh" mesh="pallets_mesh" contype="0" conaffinity="0" rgba="0.55 0.38 0.18 1"/>
+      <geom name= "pallet 1" type="box" size=".55 0.6 .12" pos="0 .9 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 2" type="box" size=".55 0.6 .12" pos="-.3 2.1 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 3" type="box" size=".5 0.6 .12" pos="-.6 3.28 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 4" type="box" size=".55 0.6 .12" pos="-1.65 3.28 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 5" type="box" size=".55 0.6 .12" pos="-2 4.48 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 6" type="box" size=".55 0.6 .12" pos="-3.1 4.8 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 7" type="box" size=".55 0.6 .12" pos="-3.4 5.97 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 8" type="box" size=".55 0.6 .12" pos="-4.5 5.97 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 9" type="box" size=".55 0.6 .12" pos="-4.78 7.2 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 10" type="box" size=".55 0.6 .12" pos="-3.7 7.2 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 11" type="box" size=".55 0.6 .12" pos="4.8 4.5 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 12" type="box" size=".55 0.6 .12" pos="3.7 4.5 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 13" type="box" size=".55 0.6 .12" pos="3.4 3.3 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 14" type="box" size=".55 0.6 .12" pos="2.3 3.3 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 15" type="box" size=".55 0.6 .12" pos="2.0 2.1 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 16" type="box" size=".55 0.6 .12" pos="1.7 .9 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 17" type="box" size=".55 0.6 .12" pos="1.4 -.3 0" rgba="1 0 0 0.5"/>
+      <geom name= "pallet 18" type="box" size=".55 0.6 .12" pos=".3 -.3 0" rgba="1 0 0 0.5"/>
+      
+
     </body>
 
     <body name="door_frame" pos="3.7 -2 0.08">

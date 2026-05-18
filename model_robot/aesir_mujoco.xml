@@ -18,16 +18,11 @@
     <mesh name="lidar" content_type="model/stl" file="meshes/lidar.stl" scale="0.001 0.001 0.001"/>
     <mesh name="logitech_c920" content_type="model/stl" file="meshes/logitech_c920.stl" scale="0.001 0.001 0.001"/>
 
-    <!-- Textura para el suelo -->
-    <texture name="texplane" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512"/>
-    <material name="matplane" reflectance="0.3" texture="texplane" texrepeat="2 2" texuniform="true"/>
   </asset>
 
   <worldbody>
     <!-- Test -->
     <light directional="true" diffuse=".8 .8 .8" specular=".2 .2 .2" pos="0 0 5" dir="0 0 -1"/>
-    <geom name="floor" type="plane" size="5 5 0.1" pos="0 0 0" material="matplane" rgba="1 1 1 1"/>
-    <geom name="escalon" type="box" size="1 1 0.1" pos="2 2 0.1" rgba="0.8 0.3 0.1 1"/>
 
     <body name="footprint_link" pos="0 0 0.1">
       <freejoint name="base_freejoint"/>
