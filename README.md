@@ -1,6 +1,6 @@
 # Aesir — Entorno MuJoCo + PPO
 
-Robot de rescate **Aesir** (orugas + 4 flippers + brazo 6-DOF + gripper) navegando una pista con puerta articulada en MuJoCo, entrenado con PPO en PyTorch.Se requiere instalación de ROS2 previa.
+Robot de rescate **Aesir** (orugas + 4 flippers + brazo 6-DOF + gripper) navegando una pista con puerta articulada en MuJoCo, entrenado con PPO en PyTorch. Se requiere instalación de ROS2 previa.
 
 ## Estructura
 
