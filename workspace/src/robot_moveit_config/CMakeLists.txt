@@ -56,6 +56,7 @@ install(PROGRAMS
   scripts/test_teleop.py
   scripts/test_teleop_joints.py
   scripts/hardware_loopback.py
+  scripts/diagnose_pipeline.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -53,7 +53,7 @@ def generate_launch_description() -> LaunchDescription:
         "mujoco_scene",
         default_value=PathJoinSubstitution([
             FindPackageShare("aesir_robot_description"),
-            "worlds", "aesir_scene.xml",
+            "worlds", "rescue_robot.xml",
         ]),
         description="Absolute path to the MuJoCo MJCF/XML scene file. "
                     "Defaults to the bundled aesir_robot_description/worlds/"
