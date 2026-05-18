@@ -82,7 +82,7 @@
       <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.02" iyz="0" izz="0.02"/>
     </inertial>
   </link>
-  <joint name="flipper_1_joint" type="revolute">
+  <joint name="flipper_joint_1" type="revolute">
     <parent link="base_link"/>
     <child link="flipper_1_link"/>
     <origin rpy="0 0 0" xyz="-0.3 0.3 0"/>
@@ -106,7 +106,7 @@
       <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.02" iyz="0" izz="0.02"/>
     </inertial>
   </link>
-  <joint name="flipper_2_joint" type="revolute">
+  <joint name="flipper_joint_2" type="revolute">
     <parent link="base_link"/>
     <child link="flipper_2_link"/>
     <origin rpy="0 0 0" xyz="-0.3 -0.3 0"/>
@@ -130,7 +130,7 @@
       <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.02" iyz="0" izz="0.02"/>
     </inertial>
   </link>
-  <joint name="flipper_3_joint" type="revolute">
+  <joint name="flipper_joint_3" type="revolute">
     <parent link="base_link"/>
     <child link="flipper_3_link"/>
     <origin rpy="0 0 0" xyz="0.3 0.3 0"/>
@@ -154,12 +154,62 @@
       <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.02" iyz="0" izz="0.02"/>
     </inertial>
   </link>
-  <joint name="flipper_4_joint" type="revolute">
+  <joint name="flipper_joint_4" type="revolute">
     <parent link="base_link"/>
     <child link="flipper_4_link"/>
     <origin rpy="0 0 0" xyz="0.3 -0.3 0"/>
     <axis xyz="0 1 0"/>
     <limit lower="-3.14" upper="3.14" effort="150.0" velocity="3.14"/>
+  </joint>
+
+  <!-- ================= DRIVE WHEELS (kinematic placeholders) ================= -->
+ 
+  <link name="drive_l_1_link"/>
+  <joint name="drive_l_1" type="continuous">
+    <parent link="base_link"/>
+    <child link="drive_l_1_link"/>
+    <origin xyz="-0.3 -0.25 -0.05" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <link name="drive_l_2_link"/>
+  <joint name="drive_l_2" type="continuous">
+    <parent link="base_link"/>
+    <child link="drive_l_2_link"/>
+    <origin xyz="0.0 -0.25 -0.05" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <link name="drive_l_3_link"/>
+  <joint name="drive_l_3" type="continuous">
+    <parent link="base_link"/>
+    <child link="drive_l_3_link"/>
+    <origin xyz="0.3 -0.25 -0.05" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <link name="drive_r_1_link"/>
+  <joint name="drive_r_1" type="continuous">
+    <parent link="base_link"/>
+    <child link="drive_r_1_link"/>
+    <origin xyz="-0.3 0.25 -0.05" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <link name="drive_r_2_link"/>
+  <joint name="drive_r_2" type="continuous">
+    <parent link="base_link"/>
+    <child link="drive_r_2_link"/>
+    <origin xyz="0.0 0.25 -0.05" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+  </joint>
+
+  <link name="drive_r_3_link"/>
+  <joint name="drive_r_3" type="continuous">
+    <parent link="base_link"/>
+    <child link="drive_r_3_link"/>
+    <origin xyz="0.3 0.25 -0.05" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
   </joint>
 
   <!-- ================= BASE ARM ================= -->

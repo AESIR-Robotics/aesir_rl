@@ -89,11 +89,11 @@ joint_group_velocity_controller:
 diff_drive_controller:
   ros__parameters:
     # Wheel joints must exist in the URDF with a `velocity` command interface.
-    left_wheel_names:  ["wheel_left_joint"]
-    right_wheel_names: ["wheel_right_joint"]
+    left_wheel_names:  ["drive_l_1", "drive_l_2", "drive_l_3"]
+    right_wheel_names: ["drive_r_1", "drive_r_2", "drive_r_3"]
 
-    # Track width (m) and wheel radius (m). Match aesir_scene.xml geometry.
-    wheel_separation: 0.40
+    # Track width (m) and wheel radius (m). Matches aesir_mujoco_robot_only.xml geometry.
+    wheel_separation: 0.50
     wheel_radius:     0.10
 
     # Required for diff_drive_controller in Humble+:
@@ -136,10 +136,10 @@ diff_drive_controller:
 flipper_controller:
   ros__parameters:
     joints:
-      - flipper_1_joint
-      - flipper_2_joint
-      - flipper_3_joint
-      - flipper_4_joint
+      - flipper_joint_1
+      - flipper_joint_2
+      - flipper_joint_3
+      - flipper_joint_4
     interface_name: position
 
 

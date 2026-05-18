@@ -33,7 +33,9 @@
       use_gazebo: false
       joint_topic: "/joint_states"
       status_topic: "status"
-      is_primary_planning_scene_monitor: false
+      # We do NOT launch move_group, so servo must own the planning scene
+      # rather than try to fetch it from a non-existent provider.
+      is_primary_planning_scene_monitor: true
 
       # Incoming Cartesian command (TwistStamped). Both keys provided for
       # cross-distro compatibility -- moveit_servo only reads the one it

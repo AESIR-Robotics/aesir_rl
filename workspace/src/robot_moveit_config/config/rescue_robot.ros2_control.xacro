@@ -1,30 +1,12 @@
 <?xml version="1.0"?>
 <robot xmlns:xacro="http://www.ros.org/wiki/xacro">
-    <xacro:macro name="rescue_robot_ros2_control" params="name initial_positions_file">
-        <xacro:property name="initial_positions" value="${load_yaml(initial_positions_file)['initial_positions']}"/>
+    <xacro:macro name="rescue_robot_ros2_control" params="name initial_positions_file mujoco_model:=''">
+        <xacro:property name="initial_positions" value="${xacro.load_yaml(initial_positions_file)['initial_positions']}"/>
 
         <ros2_control name="${name}" type="system">
             <hardware>
-                <!--
-                    HARDWARE PLUGIN
-                    ===============
-                    Active plugin: mujoco_ros2_control/MujocoSystem
-                        Reads command interfaces from this <ros2_control> block
-                        and writes them as ctrl values on the MuJoCo model
-                        loaded by the mujoco_ros2_control node. State
-                        interfaces are populated from MuJoCo's qpos / qvel /
-                        sensor data each control cycle.
-
-                    Disconnected: aesir_plugin/TopicBridgeHardware
-                        The custom topic-bridge plugin is intentionally
-                        commented out below. Re-enable ONLY if you go back
-                        to the topic-bridge integration path; in that case
-                        you must also re-enable its build targets in
-                        robot_moveit_config/CMakeLists.txt and the export
-                        in robot_moveit_config/package.xml.
-                -->
-                <plugin>mujoco_ros2_control/MujocoSystem</plugin>
-                <!-- <plugin>aesir_plugin/TopicBridgeHardware</plugin> -->
+                <plugin>mujoco_ros2_control/MujocoSystemInterface</plugin>
+                <param name="mujoco_model">${mujoco_model}</param>
             </hardware>
             <joint name="joint_1">
                 <command_interface name="position"/>
@@ -86,29 +68,60 @@
                 <state_interface name="velocity"/>
                 <state_interface name="effort"/>
             </joint>
-            <joint name="flipper_1_joint">
+            <joint name="flipper_joint_1">
                 <command_interface name="position"/>
                 <state_interface name="position">
-                    <param name="initial_value">${initial_positions['flipper_1_joint']}</param>
+                    <param name="initial_value">${initial_positions['flipper_joint_1']}</param>
                 </state_interface>
             </joint>
-            <joint name="flipper_2_joint">
+            <joint name="flipper_joint_2">
                 <command_interface name="position"/>
                 <state_interface name="position">
-                    <param name="initial_value">${initial_positions['flipper_2_joint']}</param>
+                    <param name="initial_value">${initial_positions['flipper_joint_2']}</param>
                 </state_interface>
             </joint>
-            <joint name="flipper_3_joint">
+            <joint name="flipper_joint_3">
                 <command_interface name="position"/>
                 <state_interface name="position">
-                    <param name="initial_value">${initial_positions['flipper_3_joint']}</param>
+                    <param name="initial_value">${initial_positions['flipper_joint_3']}</param>
                 </state_interface>
             </joint>
-            <joint name="flipper_4_joint">
+            <joint name="flipper_joint_4">
                 <command_interface name="position"/>
                 <state_interface name="position">
-                    <param name="initial_value">${initial_positions['flipper_4_joint']}</param>
+                    <param name="initial_value">${initial_positions['flipper_joint_4']}</param>
                 </state_interface>
+            </joint>
+            <!-- Drive wheel joints (left 1-3, right 1-3) — velocity only for diff_drive_controller -->
+            <joint name="drive_l_1">
+                <command_interface name="velocity"/>
+                <state_interface name="position"/>
+                <state_interface name="velocity"/>
+            </joint>
+            <joint name="drive_l_2">
+                <command_interface name="velocity"/>
+                <state_interface name="position"/>
+                <state_interface name="velocity"/>
+            </joint>
+            <joint name="drive_l_3">
+                <command_interface name="velocity"/>
+                <state_interface name="position"/>
+                <state_interface name="velocity"/>
+            </joint>
+            <joint name="drive_r_1">
+                <command_interface name="velocity"/>
+                <state_interface name="position"/>
+                <state_interface name="velocity"/>
+            </joint>
+            <joint name="drive_r_2">
+                <command_interface name="velocity"/>
+                <state_interface name="position"/>
+                <state_interface name="velocity"/>
+            </joint>
+            <joint name="drive_r_3">
+                <command_interface name="velocity"/>
+                <state_interface name="position"/>
+                <state_interface name="velocity"/>
             </joint>
 
         </ros2_control>
