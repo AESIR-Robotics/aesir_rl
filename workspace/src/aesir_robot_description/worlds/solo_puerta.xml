@@ -1,6 +1,6 @@
 <mujoco model="aesir_solo_puerta">
 
-  <compiler angle="radian" autolimits="true" meshdir="meshes"/>
+  <compiler angle="radian" autolimits="true" meshdir="../../../../model_robot/meshes"/>
   <option timestep="0.002" iterations="50" tolerance="1e-10" cone="elliptic"/>
   <size njmax="1000" nconmax="500" nstack="2000000"/>
 

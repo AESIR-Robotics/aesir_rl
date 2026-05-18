@@ -10,7 +10,7 @@
     <map znear="0.01" zfar="50"/>
   </visual>
 
-  <include file="../../../../model_robot/aesir_mujoco.xml"/>
+  <include file="../../../../model_robot/aesir_mujoco_robot_only.xml"/>
   <include file="../worlds/mapa_completo.xml"/>
 
 </mujoco>
