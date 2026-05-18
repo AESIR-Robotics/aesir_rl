@@ -121,7 +121,6 @@ class AesirMuJoCoEnv:
         self.act_len   = len(self.act_ids)
 
         # ── joints driven by these actuators (for qpos / qvel) ─────────────
-        # position/velocity actuators target a single joint via trnid[0].
         self.joint_ids = np.array([
             self.model.actuator_trnid[i, 0] for i in self.act_ids
         ], dtype=np.int32)
@@ -131,7 +130,7 @@ class AesirMuJoCoEnv:
         self.qvel_adr = np.array(
             [self.model.jnt_dofadr[j] for j in self.joint_ids], dtype=np.int32
         )
-        self.joint_len = 2 * self.act_len   # qpos + qvel
+        self.joint_len = 2 * self.act_len   
 
         # ── lidar spin (held constant) ─────────────────────────────────────
         self.lidar_spin_id = mujoco.mj_name2id(
@@ -148,38 +147,48 @@ class AesirMuJoCoEnv:
                 raise ValueError(f"Sensor lidar_{i} not found in model")
             self.lidar_sensor_adr.append(int(self.model.sensor_adr[sid]))
 
-        # ── observation shapes (cameras stacked along channel axis) ────────
         self.image_shape = (3 * self.num_cameras, self.image_h, self.image_w)
         self.lidar_shape = (self.num_lidar,)
         self.joint_shape = (self.joint_len,)
 
-        # base body (for reward / fall-over termination)
         self.base_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_BODY, "base_link"
         )
         if self.base_id < 0:
-            self.base_id = 1  # skip the world body
+            self.base_id = 1  
 
         self._step_counter = 0
+        self._stuck_counter = 0  
         self._last_base_xy = np.zeros(2)
 
-        # ── optional passive viewer (for visualization while training) ─────
         self.viewer = None
         if render:
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
             self.viewer.cam.distance  = 4.0
             self.viewer.cam.elevation = -20
 
+        # ── Inicialización de Estado y Colisiones ──────────────────────────
+        self.piezas_robot = {
+            "base_link", "tracked_1", "tracked_2", 
+            "flipper_1_1", "flipper_2_1", "flipper_3_1", "flipper_4_1"
+        }
+        self.piezas_brazo = {
+            "link_1", "link_2", "link_3", "link_4", "link_5", "link_6",
+            "logitech_gripper_assembly", "left_finger_link", "right_finger_link"
+        }
+        
+        self.nombres_pallets = [f"fatal_pallet {i}" for i in range(1, 19)]
+        self._reset_estado_misiones()
+
     # ── helpers ────────────────────────────────────────────────────────────
     def _read_cameras(self) -> np.ndarray:
-        """Return (3 * num_cameras, H, W) float32 in [0, 1]."""
         frames = []
         for cam in self.camera_names:
             self.renderer.update_scene(self.data, camera=cam)
-            img = self.renderer.render()                # (H, W, 3) uint8
+            img = self.renderer.render()                
             frames.append(img.astype(np.float32) / 255.0)
-        stacked = np.concatenate(frames, axis=-1)        # (H, W, 3*N)
-        return np.transpose(stacked, (2, 0, 1))          # (3*N, H, W)
+        stacked = np.concatenate(frames, axis=-1)        
+        return np.transpose(stacked, (2, 0, 1))          
 
     def _read_lidar(self) -> np.ndarray:
         lidar = np.empty(self.num_lidar, dtype=np.float32)
@@ -206,18 +215,100 @@ class AesirMuJoCoEnv:
         a = np.clip(action, -1.0, 1.0)
         return self.act_low + 0.5 * (a + 1.0) * (self.act_high - self.act_low)
 
+    def _reset_estado_misiones(self):
+        """Reinicia el estado de los pallets y la puerta."""
+        self.pallets_visitados = {nombre: False for nombre in self.nombres_pallets}
+        self.puerta_desbloqueada = False
+
+    def _obtener_contactos_del_robot(self) -> set:
+        """Escanea contactos y administra reglas de vida/muerte."""
+        objetos_tocados = set()
+        self._brazo_toco_fatal = False
+        self._toco_zona_muerte = False 
+        
+        for i in range(self.data.ncon):
+            contact = self.data.contact[i]
+            
+            geom1_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, contact.geom1) or ""
+            geom2_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, contact.geom2) or ""
+            
+            body1_id = self.model.geom_bodyid[contact.geom1]
+            body2_id = self.model.geom_bodyid[contact.geom2]
+            body1_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, body1_id) or ""
+            body2_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_BODY, body2_id) or ""
+            
+            is_rob1 = (geom1_name in self.piezas_robot) or (body1_name in self.piezas_robot)
+            is_rob2 = (geom2_name in self.piezas_robot) or (body2_name in self.piezas_robot)
+            
+            is_arm1 = (geom1_name in self.piezas_brazo) or (body1_name in self.piezas_brazo)
+            is_arm2 = (geom2_name in self.piezas_brazo) or (body2_name in self.piezas_brazo)
+
+            # 1. "muerte_" mata al robot sin importar qué pieza lo toque
+            if "muerte_" in geom1_name or "muerte_" in geom2_name:
+                if is_rob1 or is_rob2 or is_arm1 or is_arm2:
+                    self._toco_zona_muerte = True
+
+            # 2. "fatal_" mata SOLO al brazo
+            if "fatal_" in geom1_name or "fatal_" in geom2_name:
+                if ("fatal_" in geom1_name and is_arm2) or ("fatal_" in geom2_name and is_arm1):
+                    self._brazo_toco_fatal = True
+
+            # 3. Recolección de misiones (Aplica solo al chasis)
+            if is_rob1 and geom2_name: objetos_tocados.add(geom2_name)
+            elif is_rob2 and geom1_name: objetos_tocados.add(geom1_name)
+                
+        return objetos_tocados
+
     # ── public API ─────────────────────────────────────────────────────────
     def reset(self) -> Dict[str, np.ndarray]:
         mujoco.mj_resetData(self.model, self.data)
+        
+        # ======== SPAWN POINT MANUAL ========
+        # Ajusta estas coordenadas (X, Y, Z) para cambiar dónde inicia el robot.
+        self.data.qpos[0] = -1.5    # X pos 
+        self.data.qpos[1] = 3.5   # Y pos 
+        self.data.qpos[2] = 0.2    # Z pos (Un poco arriba para que caiga)
+        # ====================================
+        
+        # ======== INICIALIZACIÓN DEL BRAZO EN REPOSO ========
+        # Modifica estos radianes para encontrar el pliegue perfecto del brazo
+        angulos_reposo = {
+            "joint_1": -0.314,
+            "joint_2": -3.14,  # -90 grados (hacia atrás)
+            "joint_3": 3.14,   # +90 grados (plegado hacia la base)
+            "joint_4": 0.0,
+            "joint_5": 0.0,
+            "joint_6": 0.0
+        }
+        
+        for nombre_joint, angulo in angulos_reposo.items():
+            jnt_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, nombre_joint)
+            if jnt_id >= 0:
+                qpos_adr = self.model.jnt_qposadr[jnt_id]
+                self.data.qpos[qpos_adr] = angulo
+        # ====================================================
+
         if self.lidar_spin_id >= 0:
             self.data.ctrl[self.lidar_spin_id] = LIDAR_SPIN_VEL
-        # let the simulation settle so sensors / cameras are valid
+
+        door_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "door_hinge")
+        if door_id >= 0:
+            self.model.jnt_range[door_id][0] = 0.0
+            self.model.jnt_range[door_id][1] = 0.0
+
+        self._reset_estado_misiones()
+
         for _ in range(10):
             mujoco.mj_step(self.model, self.data)
             if self.viewer is not None and self.viewer.is_running():
                 self.viewer.sync()
+                
         self._step_counter = 0
+        self._stuck_counter = 0  
+        self._brazo_toco_fatal = False 
+        self._toco_zona_muerte = False
         self._last_base_xy = self.data.xpos[self.base_id, :2].copy()
+        
         return self._observation()
 
     def step(self, action: np.ndarray):
@@ -225,42 +316,92 @@ class AesirMuJoCoEnv:
         self.data.ctrl[self.act_ids] = scaled
         if self.lidar_spin_id >= 0:
             self.data.ctrl[self.lidar_spin_id] = LIDAR_SPIN_VEL
+            
         for _ in range(self.control_decimation):
             mujoco.mj_step(self.model, self.data)
             if self.viewer is not None and self.viewer.is_running():
                 self.viewer.sync()
+                
         self._step_counter += 1
+        obs = self._observation()
+        step_reward = self._reward(obs)
+        objetos_tocados = self._obtener_contactos_del_robot()
 
-        obs    = self._observation()
-        reward = self._reward(obs)
-        done   = self._terminated()
-        return obs, reward, done, {}
+        # Recompensas: Pallets INCREMENTADAS
+        for pallet in self.nombres_pallets:
+            if pallet in objetos_tocados and not self.pallets_visitados[pallet]:
+                self.pallets_visitados[pallet] = True
+                
+                # Checkeamos contra el pallet final
+                if pallet == "fatal_pallet 18":
+                    step_reward += 500.0   # <-- GRAN PREMIO FINAL
+                    for p in self.nombres_pallets:
+                        self.pallets_visitados[p] = False
+                else:
+                    step_reward += 50.0    # <-- INCENTIVO CONSTANTE FUERTE
+
+        # Side Quest: Puerta
+        handle_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "handle_hinge")
+        door_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "door_hinge")
+
+        if handle_id >= 0 and door_id >= 0:
+            handle_qpos_adr = self.model.jnt_qposadr[handle_id]
+            handle_angle = self.data.qpos[handle_qpos_adr]
+
+            if 0.9 <= abs(handle_angle) <= 1.0:
+                if not self.puerta_desbloqueada:
+                    self.puerta_desbloqueada = True
+                    self.model.jnt_range[door_id][0] = -1.5
+                    self.model.jnt_range[door_id][1] =  1.5
+                    step_reward += 50.0  
+
+        # PENALIZACIONES DE TAGS
+        if getattr(self, "_toco_zona_muerte", False):
+            step_reward -= 10.0  
+
+        if getattr(self, "_brazo_toco_fatal", False):
+            step_reward -= 50.0  
+
+        done = self._terminated()
+        return obs, step_reward, done, {}
 
     def _reward(self, obs: Dict[str, np.ndarray]) -> float:
-        """Default reward: forward progress + alive bonus - obstacle penalty.
-
-        Customize this for your actual rescue task.
-        """
         base_xy = self.data.xpos[self.base_id, :2]
-        dx = float(base_xy[0] - self._last_base_xy[0])     # +x progress
+        dx = float(base_xy[0] - self._last_base_xy[0])     
         self._last_base_xy = base_xy.copy()
 
-        min_lidar = float(obs["lidar"].min())              # already in [0, 1]
-        obstacle_penalty = max(0.0, 0.1 - min_lidar) * 5.0
+        if abs(dx) < 0.005:  
+            self._stuck_counter += 1
+            penalizacion_inactividad = 0.05
+        else:
+            self._stuck_counter = 0
+            penalizacion_inactividad = 0.0
 
-        action_cost = 1e-3 * float(
-            np.square(self.data.ctrl[self.act_ids]).mean()
-        )
+        min_lidar = float(obs["lidar"].min())              
+        obstacle_penalty = max(0.0, 0.1 - min_lidar) * 5.0
+        action_cost = 1e-3 * float(np.square(self.data.ctrl[self.act_ids]).mean())
         alive_bonus = 0.01
-        return 5.0 * dx + alive_bonus - obstacle_penalty - action_cost
+        
+        # AUMENTADO: de 5.0 a 10.0 para motivar el avance agresivo en X
+        return (10.0 * dx) + alive_bonus - obstacle_penalty - action_cost - penalizacion_inactividad
 
     def _terminated(self) -> bool:
         if self._step_counter >= self.max_steps:
             return True
-        # robot tipped over: world z-axis projected onto base z-axis
+            
         zmat = self.data.xmat[self.base_id].reshape(3, 3)
-        if float(zmat[2, 2]) < 0.3:
+        if float(zmat[2, 2]) < 0.2:
             return True
+            
+        if getattr(self, "_stuck_counter", 0) > 50:
+            return True
+            
+        if getattr(self, "_toco_zona_muerte", False):
+            return True
+            
+        if getattr(self, "_brazo_toco_fatal", False):
+            return True
+            
         return False
 
     def close(self) -> None:
