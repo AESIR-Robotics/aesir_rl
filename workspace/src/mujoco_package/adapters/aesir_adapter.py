@@ -12,7 +12,7 @@ aesir_scene.xml (~0.40 m and 0.10 m respectively).
 """
 import numpy as np
 import mujoco
-from adapters.mujoco_adapter import MujocoAdapter
+from workspace.src.mujoco_package.adapters.mujoco_adapter import MujocoAdapter
 
 
 class AesirMujocoAdapter(MujocoAdapter):

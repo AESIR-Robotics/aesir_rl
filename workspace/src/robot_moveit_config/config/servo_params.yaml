@@ -1,0 +1,62 @@
+###############################################################################
+#  MoveIt Servo parameters for the Aesir arm
+#
+#  IN  : TwistStamped on /servo_node/delta_twist_cmds   (published by
+#        rl_agent_env.ros_bridge.RosCommunicationNode.publish_arm_twist)
+#  OUT : std_msgs/Float64MultiArray on
+#        /joint_group_velocity_controller/commands
+#        (consumed by JointGroupVelocityController -> ros2_control)
+#
+#  Notes
+#  -----
+#  * The input topic name is the rclcpp-default of moveit_servo on Humble/Iron.
+#    Some distros expose `cartesian_command_in_topic` (Humble) or
+#    `twist_command_in_topic` (Iron+). Both are set below so the same YAML
+#    works across distros (the unused key is simply ignored).
+#  * To stream raw joint velocities we set:
+#       command_out_type     : std_msgs/Float64MultiArray
+#       publish_joint_velocities: true
+#       publish_joint_positions : false
+#    The controller fed by these commands MUST be a
+#    JointGroupVelocityController whose joints match the SRDF "arm" group.
+###############################################################################
+/**:
+  ros__parameters:
+    moveit_servo:
+      # ---- Planning group / frames -------------------------------------- #
+      move_group_name: "arm"
+      planning_frame: "arm_base_link"
+      ee_frame_name: "link_6"
+      robot_link_command_frame: "arm_base_link"
+
+      # ---- Topic plumbing ----------------------------------------------- #
+      use_gazebo: false
+      joint_topic: "/joint_states"
+      status_topic: "status"
+      is_primary_planning_scene_monitor: false
+
+      # Incoming Cartesian command (TwistStamped). Both keys provided for
+      # cross-distro compatibility -- moveit_servo only reads the one it
+      # recognises.
+      cartesian_command_in_topic: "/servo_node/delta_twist_cmds"
+      twist_command_in_topic:     "/servo_node/delta_twist_cmds"
+      joint_command_in_topic:     "/servo_node/delta_joint_cmds"
+
+      command_in_type: "unitless"
+      scale:
+        linear:     1.0
+        rotational: 1.0
+        joint:      1.0
+
+      # ---- Outgoing joint stream (key change) --------------------------- #
+      command_out_topic: "/joint_group_velocity_controller/commands"
+      command_out_type:  "std_msgs/Float64MultiArray"
+      publish_joint_positions:     false
+      publish_joint_velocities:    true
+      publish_joint_accelerations: false
+      publish_period: 0.034
+
+      # ---- Smoothing / safety ------------------------------------------- #
+      low_pass_filter_coeff: 2.0
+      check_collisions: true
+      collision_check_rate: 10.0

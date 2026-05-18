@@ -1,6 +1,6 @@
 import numpy as np
 import mujoco
-from adapters.action_adapter import ActionAdapter, RobotAction
+from workspace.src.mujoco_package.adapters.action_adapter import ActionAdapter, RobotAction
 
 
 class MujocoAdapter(ActionAdapter):

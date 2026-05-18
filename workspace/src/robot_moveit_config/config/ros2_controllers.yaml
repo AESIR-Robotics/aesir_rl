@@ -1,0 +1,177 @@
+###############################################################################
+#  ros2_control controllers for the Aesir robot.
+#
+#  Controller chain consumed by MoveIt Servo + rl_agent_env:
+#    /servo_node/delta_twist_cmds (TwistStamped, from rl_agent_env)
+#       -> moveit_servo
+#       -> /joint_group_velocity_controller/commands (Float64MultiArray)
+#       -> JointGroupVelocityController -> ros2_control velocity interfaces
+#
+#  Controller chain consumed by rl_agent_env for the base:
+#    /diff_drive_controller/cmd_vel (Twist)
+#       -> diff_drive_controller -> wheel velocity command interfaces
+#       -> /odom (consumed back by ros_bridge)
+#
+#  NOTE: the arm joints in your URDF currently expose position+velocity+effort
+#        command interfaces, so JointGroupVelocityController is valid.
+#        The diff_drive_controller below assumes wheel joints named
+#        `wheel_left_joint` and `wheel_right_joint` exist with the `velocity`
+#        command interface -- you MUST add them to the URDF
+#        (see gap report at the end of the chat).
+###############################################################################
+controller_manager:
+  ros__parameters:
+    update_rate: 100  # Hz
+
+    # ---- broadcasters ------------------------------------------------- #
+    joint_state_broadcaster:
+      type: joint_state_broadcaster/JointStateBroadcaster
+
+    # ---- arm controllers --------------------------------------------- #
+    # 1) Used by MoveIt motion planning (FollowJointTrajectory action).
+    arm_controller:
+      type: joint_trajectory_controller/JointTrajectoryController
+
+    # 2) Used by MoveIt Servo direct velocity streaming. This is the
+    #    controller whose name appears in servo_params.yaml's
+    #    command_out_topic.
+    joint_group_velocity_controller:
+      type: velocity_controllers/JointGroupVelocityController
+
+    # ---- base controller --------------------------------------------- #
+    diff_drive_controller:
+      type: diff_drive_controller/DiffDriveController
+
+    # ---- auxiliary --------------------------------------------------- #
+    flipper_controller:
+      type: forward_command_controller/ForwardCommandController
+
+    # raw single-interface controllers (handy for debugging)
+    position_controller:
+      type: forward_command_controller/ForwardCommandController
+    effort_controller:
+      type: forward_command_controller/ForwardCommandController
+    velocity_controller:
+      type: forward_command_controller/ForwardCommandController
+
+
+# ============================================================================ #
+#                       Per-controller configurations                          #
+# ============================================================================ #
+
+arm_controller:
+  ros__parameters:
+    joints:
+      - joint_1
+      - joint_2
+      - joint_3
+      - joint_4
+      - joint_5
+      - joint_6
+    command_interfaces:
+      - position
+      - velocity
+    state_interfaces:
+      - position
+      - velocity
+
+joint_group_velocity_controller:
+  ros__parameters:
+    joints:
+      - joint_1
+      - joint_2
+      - joint_3
+      - joint_4
+      - joint_5
+      - joint_6
+    interface_name: velocity
+
+diff_drive_controller:
+  ros__parameters:
+    # Wheel joints must exist in the URDF with a `velocity` command interface.
+    left_wheel_names:  ["wheel_left_joint"]
+    right_wheel_names: ["wheel_right_joint"]
+
+    # Track width (m) and wheel radius (m). Match aesir_scene.xml geometry.
+    wheel_separation: 0.40
+    wheel_radius:     0.10
+
+    # Required for diff_drive_controller in Humble+:
+    wheel_separation_multiplier: 1.0
+    left_wheel_radius_multiplier:  1.0
+    right_wheel_radius_multiplier: 1.0
+
+    # Odometry
+    publish_rate: 50.0
+    odom_frame_id: "odom"
+    base_frame_id: "base_footprint"
+    pose_covariance_diagonal:  [0.001, 0.001, 0.0,   0.0,   0.0,   0.01]
+    twist_covariance_diagonal: [0.001, 0.0,   0.0,   0.0,   0.0,   0.01]
+    open_loop: false
+    enable_odom_tf: true
+
+    # cmd_vel subscription
+    cmd_vel_timeout: 0.5
+    use_stamped_vel: false
+
+    # Velocity / acceleration limits
+    linear:
+      x:
+        has_velocity_limits: true
+        max_velocity:  0.5
+        min_velocity: -0.5
+        has_acceleration_limits: true
+        max_acceleration:  1.0
+        min_acceleration: -1.0
+    angular:
+      z:
+        has_velocity_limits: true
+        max_velocity:  1.0
+        min_velocity: -1.0
+        has_acceleration_limits: true
+        max_acceleration:  2.0
+        min_acceleration: -2.0
+
+
+flipper_controller:
+  ros__parameters:
+    joints:
+      - flipper_1_joint
+      - flipper_2_joint
+      - flipper_3_joint
+      - flipper_4_joint
+    interface_name: position
+
+
+position_controller:
+  ros__parameters:
+    joints:
+      - joint_1
+      - joint_2
+      - joint_3
+      - joint_4
+      - joint_5
+      - joint_6
+    interface_name: position
+
+effort_controller:
+  ros__parameters:
+    joints:
+      - joint_1
+      - joint_2
+      - joint_3
+      - joint_4
+      - joint_5
+      - joint_6
+    interface_name: effort
+
+velocity_controller:
+  ros__parameters:
+    joints:
+      - joint_1
+      - joint_2
+      - joint_3
+      - joint_4
+      - joint_5
+      - joint_6
+    interface_name: velocity
