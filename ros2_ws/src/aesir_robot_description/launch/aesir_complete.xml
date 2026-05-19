@@ -1,0 +1,17 @@
+<mujoco model="aesir_complete">
+
+  <compiler angle="radian" autolimits="true" meshdir="/home/didier/aesir_rl/model_robot/"/>
+  <option timestep="0.002" iterations="50" tolerance="1e-10" cone="elliptic"/>
+  <size njmax="1000" nconmax="500" nstack="2000000"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="120" elevation="-20"/>
+    <map znear="0.01" zfar="50"/>
+  </visual>
+
+  <include file="/home/didier/aesir_rl/model_robot/aesir_mujoco_robot_only.xml"/>
+  <include file="/home/didier/aesir_rl/workspace/src/aesir_robot_description/worlds/mapa_completo.xml"/>
+
+</mujoco>

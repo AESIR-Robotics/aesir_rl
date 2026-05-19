@@ -1,0 +1,106 @@
+<!--
+  pista_pallets.xml  —  Mundo de entrenamiento: chicana de pallets.
+  El robot se carga vía <include file="aesir_robot.xml"/> (modelo del ambiente A).
+
+  Rutas de malla resueltas con meshdir="meshes" relativo a este archivo.
+  Estructura esperada en el mismo directorio:
+    meshes/
+      base_link.stl, tracked_1.stl, tracked_2.stl,
+      flipper_1_1.stl, flipper_2_1.stl, flipper_3_1.stl, flipper_4_1.stl,
+      lidar.stl, pallets/base_link.stl
+  → copiar o enlazar desde model_robot/meshes/
+
+  Layout qpos (nq robot = base_freejoint(7) + lidar_spin(1) + flippers(4)
+               + flipper_wheels(8) + arm(6) + fingers(2) + drive_wheels(6) = 34)
+-->
+<mujoco model="aesir_pista_pallets">
+
+  <compiler angle="radian" autolimits="true" meshdir="meshes"/>
+  <option timestep="0.002" iterations="50" tolerance="1e-10"
+          solver="Newton" integrator="implicitfast"
+          cone="elliptic" impratio="10"/>
+  <size njmax="1000" nconmax="500" nstack="2000000"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="120" elevation="-20"/>
+    <map znear="0.01" zfar="50"/>
+  </visual>
+
+  <!-- Incluye la definición completa del robot (contact, asset, worldbody, actuator, sensor) -->
+  <include file="aesir_robot.xml"/>
+
+  <default>
+    <!-- Pallets: madera, alta fricción -->
+    <default class="pallet">
+      <geom type="box" size="0.60 0.40 0.075"
+            friction="0.8 0.01 0.001" condim="3"
+            rgba="0.55 0.38 0.18 1"/>
+    </default>
+  </default>
+
+  <!-- Assets del mundo (texturas y malla visual de pallets) -->
+  <asset>
+    <mesh name="pallets_mesh" file="pallets/base_link.stl" scale="0.001 0.001 0.001"/>
+    <texture name="texplane" type="2d" builtin="checker"
+             rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512"/>
+    <material name="matplane"  reflectance="0.3" texture="texplane"
+              texrepeat="4 4" texuniform="true"/>
+    <material name="matpallet" rgba="0.55 0.38 0.18 1"/>
+    <material name="matwall"   rgba="0.55 0.50 0.45 1"/>
+  </asset>
+
+  <!-- Geometría del mundo (sin el robot — ese viene del include) -->
+  <worldbody>
+    <light directional="true"  diffuse=".8 .8 .8" specular=".2 .2 .2" pos="0 0 5" dir="0 0 -1"/>
+    <light directional="false" pos="3.5 0 3" dir="-1 0 -1" diffuse="0.4 0.4 0.4"/>
+    <geom name="floor" type="plane" size="12 12 0.1" pos="0 0 0" material="matplane"/>
+
+    <!-- Cámaras de supervisión (mundo fijo) -->
+    <camera name="cam_overview" pos="3.5 0 7" euler="0 0 -1.5707" fovy="65" mode="fixed"/>
+    <camera name="cam_door"     pos="6.5 0 1.5" euler="1.3 1.5707 0"
+            fovy="55" mode="targetbody" target="footprint_link"/>
+
+    <!-- ================== PISTA: PALLETS ================== -->
+    <!-- Mesh visual del conjunto (solo visual, centroide ajustado) -->
+    <body name="pallets_mesh_body" pos="3 -3.49 0">
+      <geom name="pallets_visual" type="mesh" mesh="pallets_mesh"
+            contype="0" conaffinity="0" rgba="0.55 0.38 0.18 0.5"/>
+    </body>
+
+    <!-- Chicana A (x=2.5m) — gap central de 0.8m -->
+    <body name="pallet_A1" pos="2.5  0.80 0.075"><geom class="pallet" material="matpallet"/></body>
+    <body name="pallet_A2" pos="2.5 -0.80 0.075"><geom class="pallet" material="matpallet"/></body>
+    <body name="wall_A_L"  pos="2.5  2.0  0.6"><geom type="box" size="0.05 0.60 0.60" material="matwall"/></body>
+    <body name="wall_A_R"  pos="2.5 -2.0  0.6"><geom type="box" size="0.05 0.60 0.60" material="matwall"/></body>
+
+    <!-- Chicana B (x=3.5m) — bloqueo central, gap a los lados -->
+    <body name="pallet_B1" pos="3.5  0.0 0.075"><geom class="pallet" material="matpallet"/></body>
+    <body name="pallet_B2" pos="3.5  0.0 0.225"><geom class="pallet" material="matpallet"/></body>
+
+    <!-- Chicana C (x=4.5m) — espejo de A -->
+    <body name="pallet_C1" pos="4.5  0.80 0.075"><geom class="pallet" material="matpallet"/></body>
+    <body name="pallet_C2" pos="4.5 -0.80 0.075"><geom class="pallet" material="matpallet"/></body>
+
+    <!-- Barrera meta — el robot debe cruzarla -->
+    <body name="barrier_goal" pos="5.5 0 0.50">
+      <geom type="box" size="0.05 2.50 0.50" rgba="0.2 0.8 0.2 0.4"
+            contype="0" conaffinity="0"/>
+    </body>
+  </worldbody>
+
+  <keyframe>
+    <!-- qpos = base(7) + lidar_spin(1) + flipper_joints(4) +
+                flipper_wheels(8) + arm(6) + fingers(2) + drive_wheels(6) = 34 -->
+    <key name="home"
+         qpos="0 0 0.10 1 0 0 0
+               0
+               0 0 0 0
+               0 0 0 0 0 0 0 0
+               0 0 0 0 0 0
+               0 0
+               0 0 0 0 0 0"/>
+  </keyframe>
+
+</mujoco>

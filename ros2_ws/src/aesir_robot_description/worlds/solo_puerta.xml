@@ -1,0 +1,49 @@
+<mujoco model="aesir_solo_puerta">
+
+  <compiler angle="radian" autolimits="true" meshdir="../../../../model_robot/meshes"/>
+  <option timestep="0.002" iterations="50" tolerance="1e-10" cone="elliptic"/>
+  <size njmax="1000" nconmax="500" nstack="2000000"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <global azimuth="120" elevation="-20"/>
+    <map znear="0.01" zfar="50"/>
+  </visual>
+
+  <asset>
+    <texture name="texplane" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512"/>
+    <material name="matplane" reflectance="0.3" texture="texplane" texrepeat="4 4" texuniform="true"/>
+    <material name="matdoor" rgba="0.6 0.5 0.4 1"/>
+    <material name="mathandle" rgba="1 0.8 0 1"/>
+
+    <mesh name="puerta_marco"  file="puerta/base_link.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="puerta_hoja"   file="puerta/puerta_1.stl"  scale="0.001 0.001 0.001"/>
+    <mesh name="puerta_manija" file="puerta/manija_1.stl"  scale="0.001 0.001 0.001"/>
+  </asset>
+
+  <worldbody>
+    <light directional="true" pos="0 0 5" dir="0 0 -1"/>
+    <geom name="floor" type="plane" size="10 10 0.1" pos="0 0 0" material="matplane"/>
+
+    <body name="door_frame" pos="3.0 0 0">
+      <geom type="mesh" mesh="puerta_marco" contype="0" conaffinity="0"/>
+
+      <body name="door_leaf" pos="0 1.05 .01">
+        
+        <joint name="door_hinge" type="hinge" axis="0 0 1" pos="0 0 0" range="-1.5 1.5" damping="3.0"/>
+        
+        <geom name="dl_mesh" type="mesh" mesh="puerta_hoja" pos="0 -1.05 -0.009" material="matdoor" contype="0" conaffinity="0"/>
+
+        <body name="door_handle" pos="0.0 -1.32 -1.06">
+          
+          <joint name="handle_hinge" type="hinge" axis="1 0 0" pos="0 0.554 2.103" range="-1.0 0.0" damping="0.3" stiffness="2.0"/>
+          
+          <geom name="dh_mesh" type="mesh" mesh="puerta_manija" pos="-0.01 0.27 1.05" material="mathandle" contype="0" conaffinity="0"/>
+        
+        </body>
+      </body>
+    </body>
+
+  </worldbody>
+</mujoco>
