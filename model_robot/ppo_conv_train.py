@@ -48,9 +48,13 @@ try:
 except ImportError:
     _HAS_WANDB = False
 
+# Triton (PyTorch JIT compiler) segfaults when CUDA is absent.
+import torch._dynamo
+torch._dynamo.disable()
 
-# ──────────────────────────── Config (edit me) ─────────────────────────────
-XML_PATH = "../workspace/src/aesir_robot_description/launch/aesir_complete.xml"
+
+# ──────────────────────────── Config ─────────────────────────────
+XML_PATH = str(Path(__file__).parent / "assets/aesir_complete.xml")
 
 CAMERA_NAMES      = ["cam_gripper", "cam_oakd", "cam_back"]
 CAMERA_H, CAMERA_W = 84, 84               # downscaled images for the CNN
@@ -74,8 +78,8 @@ ACTUATOR_NAMES = [
 CONTROL_DECIMATION = 10                   # physics steps per env.step()
 EPISODE_MAX_STEPS  = 1000                 # env steps per episode
 
-CHECKPOINT_DIR = Path("./checkpoints")
-CHECKPOINT_DIR.mkdir(exist_ok=True)
+CHECKPOINT_DIR = Path("./outputs/checkpoints")
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ──────────────────────────────── Env ──────────────────────────────────────
