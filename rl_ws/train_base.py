@@ -369,4 +369,7 @@ def train(num_iterations:  int   = 500,
 
 
 if __name__ == "__main__":
-    train(render=False)
+    train(
+        render=False,  # Ponlo en False para que entrene a máxima velocidad
+        resume_from="./checkpoints_base/base_best.pt", # Si quieres continuar entrenando desde el mejor modelo guardado
+    )

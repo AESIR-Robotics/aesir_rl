@@ -1,212 +1,214 @@
 """
-arm_env.py  —  Ambiente MuJoCo para entrenamiento del Modelo A (brazo 6-DOF + garra).
+arm_env.py  —  Env MuJoCo para Modelo A (brazo 6-DOF + garra).
 
-El agente emite 9 acciones en [-1, 1]:
-  [0..5]  velocidades articulares normalizadas para joint_1..6
-  [6]     garra izquierda (pos_left_finger)
-  [7]     garra derecha   (pos_right_finger)
+Observaciones — mismo formato dict que los demás envs:
+  images      : 3 cámaras RGB con flip → (9, H, W)
+  lidar       : 7 rangefinders normalizados → (7,)
+  joint_states: qpos+qvel del brazo + dedos → (16,)
 
-  (En el robot real estas velocidades se pasan a MoveIt Servo,
-   que resuelve la cinemática y manda esfuerzos. Aquí en MuJoCo
-   usamos los actuadores de posición con integración explícita.)
+Acciones (8 valores en [-1, 1]):
+  [0..5]  velocidades articulares joint_1..6  (integradas a posición)
+  [6]     dedo izquierdo
+  [7]     dedo derecho
 
-Observación (flat, 31 valores):
-  joint_qpos(6) | joint_qvel(6) | ee_pos(3) | ee_quat(4) |
-  finger_pos(2) | lidar_local(7) | base_qpos(3)
-  = 31 valores
-
-El brazo SE ENTRENA CON LA BASE QUIETA (o con un policy B congelado).
-Para combinarlos después se usa una wrapper que corre ambos en paralelo.
-
-Uso:
-    from arm_env import ArmMuJoCoEnv
-    env = ArmMuJoCoEnv("../model_robot/aesir_mujoco.xml")
+La base permanece quieta. El integrador de velocidad es equivalente
+a MoveIt Servo en deployment real.
 """
 from __future__ import annotations
 
 import numpy as np
 import mujoco
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
-# ── Actuadores del brazo ───────────────────────────────────────────────────
-ARM_JOINTS   = ["pos_joint_1", "pos_joint_2", "pos_joint_3",
-                "pos_joint_4", "pos_joint_5", "pos_joint_6"]
-FINGER_L     = "pos_left_finger"
-FINGER_R     = "pos_right_finger"
-LIDAR_SPIN   = "vel_lidar_spin"
-LIDAR_SPIN_V = 20.0
+# ──────────────────────────── Constantes ───────────────────────────────────
+CAMERA_NAMES        = ["cam_gripper", "cam_oakd", "cam_back"]
+CAMERA_H, CAMERA_W  = 84, 84
+NUM_LIDAR           = 7
+LIDAR_MAX           = 15.0
+LIDAR_SPIN_VEL      = 20.0
 
-MAX_JOINT_VEL = 1.0    # rad/s — qué tan rápido puede mover la articulación por step
+ARM_JOINTS  = ["pos_joint_1", "pos_joint_2", "pos_joint_3",
+               "pos_joint_4", "pos_joint_5", "pos_joint_6"]
+FINGER_L    = "pos_left_finger"
+FINGER_R    = "pos_right_finger"
+LIDAR_SPIN  = "vel_lidar_spin"
+
+# Actuadores observados en joint_states (brazo + dedos)
+OBS_ACTUATORS = ARM_JOINTS + [FINGER_L, FINGER_R]
+
+MAX_JOINT_VEL = 1.0      # rad/s por articulación
 JOINT_RANGE   = 3.1416
 
-NUM_LIDAR = 7
-LIDAR_MAX = 15.0
-
-CONTROL_DECIMATION = 10
-EPISODE_MAX_STEPS  = 500
-
-# Ángulos de reposo del brazo (plegado sobre el robot)
 REST_ANGLES = {
-    "joint_1": -0.314,
-    "joint_2": -3.14,
-    "joint_3":  3.14,
-    "joint_4":  0.0,
-    "joint_5":  0.0,
-    "joint_6":  0.0,
+    "joint_1": -0.314, "joint_2": -3.14, "joint_3": 3.14,
+    "joint_4":  0.0,   "joint_5":  0.0,  "joint_6": 0.0,
 }
+
+CONTROL_DECIMATION  = 10
+EPISODE_MAX_STEPS   = 500
 
 
 class ArmMuJoCoEnv:
-    """Env MuJoCo para Modelo A — brazo 6-DOF con integración de velocidad.
+    """
+    Env para Modelo A.
 
-    La acción es una velocidad articular normalizada. El env integra la
-    velocidad para obtener la posición objetivo, que se pasa al actuador
-    de posición de MuJoCo (equivalente a lo que haría MoveIt Servo).
+    Observación: dict {"images": (9,H,W), "lidar": (7,), "joint_states": (16,)}
+    — mismo formato que BaseMuJoCoEnv y AesirMuJoCoEnv.
+
+    Acción: (8,) en [-1,1]
+      [0..5] vel articular joint_1..6  [6] dedo izq  [7] dedo der
     """
 
-    def __init__(self, xml_path: str, render: bool = False,
+    def __init__(self,
+                 xml_path: str,
+                 camera_names: List[str] = CAMERA_NAMES,
+                 image_hw: Tuple[int, int] = (CAMERA_H, CAMERA_W),
+                 control_decimation: int = CONTROL_DECIMATION,
                  max_steps: int = EPISODE_MAX_STEPS,
-                 timestep_override: Optional[float] = None):
+                 render: bool = False):
 
         self.model = mujoco.MjModel.from_xml_path(xml_path)
         self.data  = mujoco.MjData(self.model)
-        self.max_steps = max_steps
-        self._step_count = 0
-        self.dt = timestep_override or (self.model.opt.timestep * CONTROL_DECIMATION)
+        self.max_steps          = max_steps
+        self.control_decimation = control_decimation
+        self._step_count        = 0
+        self._dt                = self.model.opt.timestep * control_decimation
 
-        # ── índices de actuadores ──────────────────────────────────────────
-        def _aid(name):
-            i = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
-            if i < 0:
-                raise ValueError(f"Actuador no encontrado: {name}")
-            return i
+        # ── cámaras ────────────────────────────────────────────────────────
+        self.image_h, self.image_w = image_hw
+        self.renderer     = mujoco.Renderer(self.model,
+                                            height=self.image_h,
+                                            width=self.image_w)
+        self.camera_names = list(camera_names)
+        self.num_cameras  = len(self.camera_names)
 
-        self.ids_arm    = [_aid(n) for n in ARM_JOINTS]
-        self.id_fing_l  = _aid(FINGER_L)
-        self.id_fing_r  = _aid(FINGER_R)
-        self.id_lidar   = _aid(LIDAR_SPIN)
+        # ── lidar ──────────────────────────────────────────────────────────
+        self.num_lidar = NUM_LIDAR
+        self.lidar_adr = []
+        for i in range(NUM_LIDAR):
+            sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, f"lidar_{i}")
+            if sid < 0:
+                raise ValueError(f"Sensor lidar_{i} no encontrado")
+            self.lidar_adr.append(int(self.model.sensor_adr[sid]))
+        self.id_lidar_spin = self._aid(LIDAR_SPIN)
 
-        # qpos addresses de las articulaciones del brazo
-        self.arm_jnt_ids = [int(self.model.actuator_trnid[i, 0]) for i in self.ids_arm]
-        self.arm_qpos_adr = [int(self.model.jnt_qposadr[j]) for j in self.arm_jnt_ids]
-        self.arm_qvel_adr = [int(self.model.jnt_dofadr[j])  for j in self.arm_jnt_ids]
+        # ── actuadores del brazo ───────────────────────────────────────────
+        self.ids_arm   = [self._aid(n) for n in ARM_JOINTS]
+        self.id_fing_l = self._aid(FINGER_L)
+        self.id_fing_r = self._aid(FINGER_R)
 
-        # finger joints (slide type)
-        fid_l = int(self.model.actuator_trnid[self.id_fing_l, 0])
-        fid_r = int(self.model.actuator_trnid[self.id_fing_r, 0])
-        self.fing_qpos_l = int(self.model.jnt_qposadr[fid_l])
-        self.fing_qpos_r = int(self.model.jnt_qposadr[fid_r])
+        # ── joint_states: qpos+qvel de brazo + dedos ──────────────────────
+        self._obs_act_ids = np.array([self._aid(n) for n in OBS_ACTUATORS], dtype=np.int32)
+        _jnt_ids          = [int(self.model.actuator_trnid[i, 0]) for i in self._obs_act_ids]
+        self._qpos_adr    = np.array([self.model.jnt_qposadr[j] for j in _jnt_ids], dtype=np.int32)
+        self._qvel_adr    = np.array([self.model.jnt_dofadr[j]  for j in _jnt_ids], dtype=np.int32)
 
         # ── end-effector body ──────────────────────────────────────────────
-        # Buscamos el body de la garra (link_6 o gripper_assembly)
-        self.ee_body = mujoco.mj_name2id(
+        self.ee_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_BODY, "logitech_gripper_assembly"
         )
-        if self.ee_body < 0:
-            self.ee_body = mujoco.mj_name2id(
-                self.model, mujoco.mjtObj.mjOBJ_BODY, "link_6"
-            )
+        if self.ee_id < 0:
+            self.ee_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "link_6")
 
         # ── base body ──────────────────────────────────────────────────────
         self.base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "base_link")
         if self.base_id < 0:
             self.base_id = 1
 
-        # ── lidar ──────────────────────────────────────────────────────────
-        self.lidar_adr = []
-        for i in range(NUM_LIDAR):
-            sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, f"lidar_{i}")
-            if sid >= 0:
-                self.lidar_adr.append(int(self.model.sensor_adr[sid]))
+        # ── tamaños expuestos — mismos atributos que los demás envs ────────
+        self.image_shape = (3 * self.num_cameras, self.image_h, self.image_w)
+        self.lidar_shape = (NUM_LIDAR,)
+        self.joint_len   = 2 * len(self._obs_act_ids)
+        self.joint_shape = (self.joint_len,)
+        self.act_len     = 8
 
-        # acción: 6 vel_joint + 2 dedos = 8 valores en [-1,1]
-        self.act_len = 8
-        # obs: joint_qpos(6) + joint_qvel(6) + ee_pos(3) + ee_quat(4) +
-        #      finger_pos(2) + lidar(7) + base_qpos(3) = 31
-        self.obs_len = 31
+        # ── integrador de velocidad del brazo ─────────────────────────────
+        self._joint_pos = np.zeros(6, dtype=np.float64)
 
-        # posición articular actual (integrada)
-        self._joint_pos = np.zeros(6)
-
-        # target gripper (goal) — puede setearse externamente
+        # goal externo (opcional, para reward)
         self.goal_pos: Optional[np.ndarray] = None
 
+        # ── viewer ─────────────────────────────────────────────────────────
         self.viewer = None
         if render:
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+            self.viewer.cam.distance  = 2.0
+            self.viewer.cam.elevation = -20
 
-    # ── Integración de velocidad (MoveIt Servo equivalent) ─────────────────
-    def _integrate_arm_velocity(self, vel_normalized: np.ndarray) -> np.ndarray:
-        """Integra velocidades articulares para obtener la posición objetivo."""
-        delta = np.clip(vel_normalized, -1.0, 1.0) * MAX_JOINT_VEL * self.dt
-        self._joint_pos += delta
-        # clamp a rango articular
-        self._joint_pos = np.clip(self._joint_pos, -JOINT_RANGE, JOINT_RANGE)
-        return self._joint_pos.copy()
+    # ── utilidad ───────────────────────────────────────────────────────────
+    def _aid(self, name: str) -> int:
+        i = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
+        if i < 0:
+            raise ValueError(f"Actuador no encontrado: '{name}'")
+        return i
 
-    # ── Aplicar acción ─────────────────────────────────────────────────────
+    # ── Integrador de velocidad (≡ MoveIt Servo en sim) ───────────────────
     def _apply_action(self, action: np.ndarray):
-        a = np.clip(action, -1.0, 1.0)
-
-        # brazo: integrar velocidad → setear posición objetivo
-        target_pos = self._integrate_arm_velocity(a[:6])
+        a     = np.clip(action, -1.0, 1.0)
+        delta = a[:6] * MAX_JOINT_VEL * self._dt
+        self._joint_pos = np.clip(self._joint_pos + delta, -JOINT_RANGE, JOINT_RANGE)
         for k, aid in enumerate(self.ids_arm):
-            self.data.ctrl[aid] = target_pos[k]
+            self.data.ctrl[aid] = self._joint_pos[k]
+        self.data.ctrl[self.id_fing_l] = float(np.clip((a[6] + 1.0) / 2.0 * 0.03, 0.0, 0.03))
+        self.data.ctrl[self.id_fing_r] = float(np.clip((a[7] + 1.0) / 2.0 * 0.03, 0.0, 0.03))
+        self.data.ctrl[self.id_lidar_spin] = LIDAR_SPIN_VEL
 
-        # garra: control de posición directo [0, 0.03]
-        self.data.ctrl[self.id_fing_l] = (a[6] + 1.0) / 2.0 * 0.03
-        self.data.ctrl[self.id_fing_r] = (a[7] + 1.0) / 2.0 * 0.03
+    # ── Observaciones ──────────────────────────────────────────────────────
+    def _read_cameras(self) -> np.ndarray:
+        """→ (9, H, W) float32 en [0,1].
+        np.flip(..., axis=(0,1)) equivale a cv2.flip(img, -1).
+        """
+        frames = []
+        for cam in self.camera_names:
+            self.renderer.update_scene(self.data, camera=cam)
+            img = self.renderer.render()
+            img = np.flip(img, axis=(0, 1))
+            frames.append(img.astype(np.float32) / 255.0)
+        return np.transpose(np.concatenate(frames, axis=-1), (2, 0, 1))
 
-        self.data.ctrl[self.id_lidar] = LIDAR_SPIN_V
+    def _read_lidar(self) -> np.ndarray:
+        """→ (7,) float32 en [0,1]."""
+        lidar = np.empty(NUM_LIDAR, dtype=np.float32)
+        for i, adr in enumerate(self.lidar_adr):
+            d = float(self.data.sensordata[adr])
+            if d <= 0.0 or d >= LIDAR_MAX:
+                d = LIDAR_MAX
+            lidar[i] = d / LIDAR_MAX
+        return lidar
 
-    # ── Observación ────────────────────────────────────────────────────────
-    def _get_obs(self) -> np.ndarray:
-        qpos_arm  = np.array([self.data.qpos[a] for a in self.arm_qpos_adr])
-        qvel_arm  = np.array([self.data.qvel[a] for a in self.arm_qvel_adr])
+    def _read_joint_state(self) -> np.ndarray:
+        """→ (16,) float32: qpos+qvel de joint_1..6 + dedos."""
+        qpos = self.data.qpos[self._qpos_adr]
+        qvel = self.data.qvel[self._qvel_adr]
+        return np.concatenate([qpos, qvel]).astype(np.float32)
 
-        if self.ee_body >= 0:
-            ee_pos  = self.data.xpos[self.ee_body].copy()
-            ee_quat = self.data.xquat[self.ee_body].copy()
-        else:
-            ee_pos  = np.zeros(3)
-            ee_quat = np.array([1.0, 0, 0, 0])
+    def _observation(self) -> Dict[str, np.ndarray]:
+        return {
+            "images":       self._read_cameras(),
+            "lidar":        self._read_lidar(),
+            "joint_states": self._read_joint_state(),
+        }
 
-        fing = np.array([self.data.qpos[self.fing_qpos_l],
-                         self.data.qpos[self.fing_qpos_r]])
-
-        lidar = np.array([
-            min(float(self.data.sensordata[a]), LIDAR_MAX) / LIDAR_MAX
-            for a in self.lidar_adr
-        ]) if self.lidar_adr else np.zeros(NUM_LIDAR)
-
-        base_pos = self.data.xpos[self.base_id].copy()
-
-        return np.concatenate([
-            qpos_arm, qvel_arm, ee_pos, ee_quat, fing, lidar, base_pos
-        ]).astype(np.float32)
-
-    # ── Reward (ajustar según tarea) ───────────────────────────────────────
+    # ── Reward ────────────────────────────────────────────────────────────
     def _reward(self) -> float:
-        """Reward básico: minimizar distancia EE → goal si existe, else alive."""
-        if self.goal_pos is not None and self.ee_body >= 0:
-            ee = self.data.xpos[self.ee_body]
-            dist = float(np.linalg.norm(ee - self.goal_pos))
-            return -dist + 0.01   # bonus de supervivencia
-        # sin goal: el trainer externo maneja la recompensa
-        return 0.01
+        # Minimizar distancia EE → goal si existe
+        if self.goal_pos is not None and self.ee_id >= 0:
+            dist = float(np.linalg.norm(self.data.xpos[self.ee_id] - self.goal_pos))
+            rew  = -2.0 * dist + 0.01
+        else:
+            rew = 0.01
 
-    # ── Terminación ────────────────────────────────────────────────────────
+        # action_cost sobre todos los actuadores del brazo
+        action_cost = 1e-3 * float(np.square(self.data.ctrl[self._obs_act_ids]).mean())
+        return rew - action_cost
+
+    # ── Terminación ───────────────────────────────────────────────────────
     def _terminated(self) -> bool:
         return self._step_count >= self.max_steps
 
     # ── API pública ────────────────────────────────────────────────────────
-    def reset(self, keep_base: bool = True) -> np.ndarray:
-        """
-        keep_base=True: solo resetea el brazo, deja la base donde está.
-        keep_base=False: reset total del modelo.
-        """
+    def reset(self, keep_base: bool = True) -> Dict[str, np.ndarray]:
         if keep_base:
-            # guardar qpos de la base (freejoint = primeros 7)
             base_qpos = self.data.qpos[:7].copy()
             base_qvel = self.data.qvel[:6].copy()
             mujoco.mj_resetData(self.model, self.data)
@@ -218,43 +220,41 @@ class ArmMuJoCoEnv:
             self.data.qpos[1] =  3.5
             self.data.qpos[2] =  0.2
 
-        # posición de reposo del brazo
         for nombre, angulo in REST_ANGLES.items():
             jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, nombre)
             if jid >= 0:
                 self.data.qpos[self.model.jnt_qposadr[jid]] = angulo
 
         self._joint_pos = np.array([REST_ANGLES[f"joint_{i+1}"] for i in range(6)])
-
-        self.data.ctrl[self.id_lidar] = LIDAR_SPIN_V
+        self.data.ctrl[self.id_lidar_spin] = LIDAR_SPIN_VEL
 
         for _ in range(10):
             mujoco.mj_step(self.model, self.data)
 
         self._step_count = 0
-
         if self.viewer and self.viewer.is_running():
             self.viewer.sync()
 
-        return self._get_obs()
+        return self._observation()
 
     def step(self, action: np.ndarray):
         self._apply_action(action)
-        for _ in range(CONTROL_DECIMATION):
+        for _ in range(self.control_decimation):
             mujoco.mj_step(self.model, self.data)
         if self.viewer and self.viewer.is_running():
             self.viewer.sync()
         self._step_count += 1
-        obs  = self._get_obs()
+        obs  = self._observation()
         rew  = self._reward()
         done = self._terminated()
         return obs, rew, done, {}
 
     def set_goal(self, goal_xyz: np.ndarray):
-        """Setea el objetivo del EE para el cálculo de reward."""
         self.goal_pos = np.array(goal_xyz, dtype=np.float64)
 
     def close(self):
         if self.viewer:
             try: self.viewer.close()
             except Exception: pass
+        try: self.renderer.close()
+        except Exception: pass

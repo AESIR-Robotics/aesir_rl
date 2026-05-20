@@ -276,14 +276,20 @@ class AesirMuJoCoEnv:
 
     # ── Observaciones ──────────────────────────────────────────────────────
     def _read_cameras(self) -> np.ndarray:
-        """→ (9, H, W) float32 en [0,1]."""
+        """→ (9, H, W) float32 en [0,1].
+
+        np.flip(..., axis=(0,1)) equivale a cv2.flip(img, -1):
+        voltea tanto vertical como horizontalmente para corregir la
+        orientación del renderer de MuJoCo.
+        """
         frames = []
         for cam in self.camera_names:
             self.renderer.update_scene(self.data, camera=cam)
             img = self.renderer.render()
+            img = np.flip(img, axis=(0, 1))          # equivale a cv2.flip(..., -1)
             frames.append(img.astype(np.float32) / 255.0)
-        stacked = np.concatenate(frames, axis=-1)  # (H, W, 9)
-        return np.transpose(stacked, (2, 0, 1))    # (9, H, W)
+        stacked = np.concatenate(frames, axis=-1)    # (H, W, 9)
+        return np.transpose(stacked, (2, 0, 1))      # (9, H, W)
 
     def _read_lidar(self) -> np.ndarray:
         """→ (7,) float32 en [0,1]."""
@@ -344,19 +350,20 @@ class AesirMuJoCoEnv:
         base_xy = self.data.xpos[self.base_id, :2]
         dx      = float(base_xy[0] - self._last_base_xy[0])
         self._last_base_xy = base_xy.copy()
+
         if abs(dx) < 0.005:
             self._stuck_counter += 1
             pen_inactiv = 0.05
         else:
             self._stuck_counter = 0
             pen_inactiv = 0.0
+
         min_lidar    = float(obs["lidar"].min())
         obstacle_pen = max(0.0, 0.1 - min_lidar) * 5.0
-        ctrl_vals    = np.concatenate([
-            self.data.ctrl[self.ids_drive_l + self.ids_drive_r],
-            self.data.ctrl[self.ids_arm],
-        ])
-        action_cost = 1e-3 * float(np.square(ctrl_vals).mean())
+
+        # action_cost sobre TODOS los actuadores (base + brazo + flippers + rueditas)
+        action_cost = 1e-3 * float(np.square(self.data.ctrl[self._obs_act_ids]).mean())
+
         alive_bonus = 0.01
         return (10.0 * dx) + alive_bonus - obstacle_pen - action_cost - pen_inactiv
 

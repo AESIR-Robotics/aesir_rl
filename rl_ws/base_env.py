@@ -28,11 +28,11 @@ NUM_LIDAR           = 7
 LIDAR_MAX           = 15.0
 LIDAR_SPIN_VEL      = 20.0
 
-TRACK_HALF_WIDTH    = 0.21    # m — ajustar midiendo en el XML
-WHEEL_RADIUS        = 0.05    # m
-MAX_WHEEL_VEL       = 20.0    # rad/s  (= ctrlrange de vel_drive_*)
-MAX_LINEAR_VEL      = 1.5     # m/s
-MAX_ANGULAR_VEL     = 2.0     # rad/s
+TRACK_HALF_WIDTH    = 0.21
+WHEEL_RADIUS        = 0.05
+MAX_WHEEL_VEL       = 20.0
+MAX_LINEAR_VEL      = 1.5
+MAX_ANGULAR_VEL     = 2.0
 
 DRIVE_LEFT   = ["vel_drive_l_1", "vel_drive_l_2", "vel_drive_l_3"]
 DRIVE_RIGHT  = ["vel_drive_r_1", "vel_drive_r_2", "vel_drive_r_3"]
@@ -45,24 +45,50 @@ FLIP_WHEELS  = {
 }
 LIDAR_SPIN   = "vel_lidar_spin"
 
-# Actuadores expuestos en joint_states (base + flippers, sin rueditas auxiliares)
 OBS_ACTUATORS = DRIVE_LEFT + DRIVE_RIGHT + FLIPPERS
 
 CONTROL_DECIMATION  = 10
 EPISODE_MAX_STEPS   = 1000
 
+# Ruta de checkpoints en orden de visita
+RUTA_PALLETS = [
+    "fatal_pallet 9",   # Spawn
+    "fatal_pallet 8",
+    "fatal_pallet 7",
+    "fatal_pallet 6",
+    "fatal_pallet 5",
+    "fatal_pallet 4",
+    "fatal_pallet 3",
+    "fatal_pallet 2",
+    "fatal_pallet 1",   # Fin rampa izquierda
+    "fatal_pallet 18",  # Inicio curva de conexión
+    "fatal_pallet 17",
+    "fatal_pallet 16",
+    "fatal_pallet 15",
+    "fatal_pallet 14",
+    "fatal_pallet 13",
+    "fatal_pallet 12",
+    "fatal_pallet 11",  # Meta final
+]
+
+ARM_REST_POSITIONS = {
+    "joint_1": -0.0,
+    "joint_2": -3.14,
+    "joint_3":  3.14,
+    "joint_4": -1.57295,
+    "joint_5": -1.57295,
+    "joint_6":  1.57295,
+}
+
+TIP_NAMES = [
+    "wheel_flip1_front",
+    "wheel_flip2_front",
+    "wheel_flip3_front",
+    "wheel_flip4_front",
+]
+
 
 class BaseMuJoCoEnv:
-    """
-    Env para Modelo B.
-
-    La observación tiene el mismo formato dict que AesirMuJoCoEnv:
-      {"images": ndarray(9,H,W), "lidar": ndarray(7,), "joint_states": ndarray(N,)}
-    Así la misma red ConvActorCritic sirve aquí y en el entrenamiento conjunto.
-
-    Acción: (6,) en [-1, 1]
-      [0] v_lin  [1] ω_ang  [2..5] flipper_1..4
-    """
 
     def __init__(self,
                  xml_path: str,
@@ -76,9 +102,26 @@ class BaseMuJoCoEnv:
         self.data  = mujoco.MjData(self.model)
         self.max_steps          = max_steps
         self.control_decimation = control_decimation
-        self._step_count        = 0
-        self._stuck_counter     = 0
-        self._last_x            = 0.0
+
+        # Solo añadir al array si el geom EXISTE, y guardar el nombre en paralelo
+        # para que current_pallet_idx siempre apunte al nombre correcto.
+        self.pallet_names: List[str] = []
+        self.pallet_geom_ids: List[int] = []
+        for name in RUTA_PALLETS:
+            gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            if gid >= 0:
+                self.pallet_names.append(name)
+                self.pallet_geom_ids.append(gid)
+            else:
+                print(f"[base_env] Aviso: geom '{name}' no encontrado en el modelo — se omite de la ruta")
+
+        # Tips de flippers (para colisiones opcionales)
+        self.tip_ids: List[int] = []
+        for name in TIP_NAMES:
+            bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+            if bid < 0:
+                print(f"[base_env] Aviso: body '{name}' no encontrado")
+            self.tip_ids.append(bid)
 
         # ── cámaras ────────────────────────────────────────────────────────
         self.image_h, self.image_w = image_hw
@@ -107,7 +150,7 @@ class BaseMuJoCoEnv:
             for fname, wnames in FLIP_WHEELS.items()
         }
 
-        # ── joint_states: qpos+qvel de actuadores de base ─────────────────
+        # ── joint_states ───────────────────────────────────────────────────
         self._obs_act_ids = np.array([self._aid(n) for n in OBS_ACTUATORS], dtype=np.int32)
         _jnt_ids          = [int(self.model.actuator_trnid[i, 0]) for i in self._obs_act_ids]
         self._qpos_adr    = np.array([self.model.jnt_qposadr[j] for j in _jnt_ids], dtype=np.int32)
@@ -118,12 +161,15 @@ class BaseMuJoCoEnv:
         if self.base_id < 0:
             self.base_id = 1
 
-        # ── tamaños expuestos — mismos atributos que AesirMuJoCoEnv ────────
+        # ── tamaños expuestos ──────────────────────────────────────────────
         self.image_shape = (3 * self.num_cameras, self.image_h, self.image_w)
         self.lidar_shape = (NUM_LIDAR,)
         self.joint_len   = 2 * len(self._obs_act_ids)
         self.joint_shape = (self.joint_len,)
         self.act_len     = 6
+
+        # antes del primer reset()
+        self._reset_state()
 
         # ── viewer ─────────────────────────────────────────────────────────
         self.viewer = None
@@ -131,6 +177,15 @@ class BaseMuJoCoEnv:
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
             self.viewer.cam.distance  = 4.0
             self.viewer.cam.elevation = -20
+
+    def _reset_state(self):
+        """Inicializa todas las variables de estado. Llamado en __init__ y reset()."""
+        self._step_count          = 0
+        self._stuck_counter       = 0
+        self._last_base_xy        = np.zeros(2)
+        self._last_flipper_action = np.zeros(4, dtype=np.float32)
+        self.current_pallet_idx   = 0
+        self.last_dist_to_target  = 0.0
 
     # ── utilidad ───────────────────────────────────────────────────────────
     def _aid(self, name: str) -> int:
@@ -160,24 +215,23 @@ class BaseMuJoCoEnv:
         for k, fid in enumerate(self.ids_flippers):
             fp = float(np.clip(a[2 + k] * 3.1416, -3.1416, 3.1416))
             self.data.ctrl[fid] = fp
+            # FIX Bug 3: izq = flippers 0,2 — der = flippers 1,3
             wvel = vl if k in (0, 2) else vr
             for wid in self.ids_flip_wh.get(fid, []):
-                self.data.ctrl[wid] = float(np.clip(wvel, -1.0, 1.0))
+                self.data.ctrl[wid] = wvel
 
         self.data.ctrl[self.id_lidar_spin] = LIDAR_SPIN_VEL
 
     # ── Observaciones ──────────────────────────────────────────────────────
     def _read_cameras(self) -> np.ndarray:
-        """→ (9, H, W) float32 en [0, 1]."""
         frames = []
         for cam in self.camera_names:
             self.renderer.update_scene(self.data, camera=cam)
-            img = self.renderer.render()
+            img = np.flip(self.renderer.render(), axis=(0, 1))
             frames.append(img.astype(np.float32) / 255.0)
         return np.transpose(np.concatenate(frames, axis=-1), (2, 0, 1))
 
     def _read_lidar(self) -> np.ndarray:
-        """→ (7,) float32 en [0, 1]."""
         lidar = np.empty(NUM_LIDAR, dtype=np.float32)
         for i, adr in enumerate(self.lidar_adr):
             d = float(self.data.sensordata[adr])
@@ -187,10 +241,10 @@ class BaseMuJoCoEnv:
         return lidar
 
     def _read_joint_state(self) -> np.ndarray:
-        """→ (2*N_obs_act,) float32: qpos ‖ qvel de actuadores de base."""
-        qpos = self.data.qpos[self._qpos_adr]
-        qvel = self.data.qvel[self._qvel_adr]
-        return np.concatenate([qpos, qvel]).astype(np.float32)
+        return np.concatenate([
+            self.data.qpos[self._qpos_adr],
+            self.data.qvel[self._qvel_adr],
+        ]).astype(np.float32)
 
     def _observation(self) -> Dict[str, np.ndarray]:
         return {
@@ -200,50 +254,132 @@ class BaseMuJoCoEnv:
         }
 
     # ── Reward ────────────────────────────────────────────────────────────
-    def _reward(self, obs: Dict[str, np.ndarray]) -> float:
-        x  = float(self.data.xpos[self.base_id, 0])
-        dx = x - self._last_x
-        self._last_x = x
+    def _reward(self, obs: Dict[str, np.ndarray], action: np.ndarray) -> float:
+        base_pos = self.data.xpos[self.base_id]
+        base_xy  = base_pos[:2].copy()
+        base_z   = float(base_pos[2])
 
-        if abs(dx) < 0.005:
+        # 1. Caída letal
+        if base_z < 0.10:
+            return -100.0
+
+        # 2. Inactividad
+        move_dist = float(np.linalg.norm(base_xy - self._last_base_xy))
+        self._last_base_xy = base_xy.copy()
+        if move_dist < 0.005:
             self._stuck_counter += 1
-            pen_inactiv = 0.05
+            penalty_stuck = min(2.0, 0.01 * self._stuck_counter)
         else:
             self._stuck_counter = 0
-            pen_inactiv = 0.0
+            penalty_stuck = 0.0
 
+        # 3. Obstáculos lidar
         min_lidar    = float(obs["lidar"].min())
-        obstacle_pen = max(0.0, 0.1 - min_lidar) * 5.0
-        ctrl_vals    = np.concatenate([
-            self.data.ctrl[self.ids_drive_l + self.ids_drive_r]
-        ])
-        action_cost = 1e-3 * float(np.square(ctrl_vals).mean())
-        alive_bonus = 0.01
+        obstacle_pen = max(0.0, 0.0001 - min_lidar) * 5.0
 
-        return (10.0 * dx) + alive_bonus - obstacle_pen - action_cost - pen_inactiv
+        # 4. Costo de energía
+        action_cost = 1e-9 * float(np.square(self.data.ctrl[self._obs_act_ids]).mean())
+
+        # 5. Movimiento errático de flippers
+        current_flipper = action[2:6].astype(np.float32)
+        flipper_pen = 0.2 * float(np.square(current_flipper - self._last_flipper_action).mean())
+        self._last_flipper_action = current_flipper.copy()
+
+        # 6. Inclinación
+        zmat      = self.data.xmat[self.base_id].reshape(3, 3)
+        tilt_pen  = max(0.0, 0.65 - float(zmat[2, 2])) * 5.0
+
+        # 7. Progreso hacia pallet actual
+        progress_reward = 0.0
+        pallet_bonus    = 0.0
+
+        if self.current_pallet_idx < len(self.pallet_geom_ids):
+            target_gid = self.pallet_geom_ids[self.current_pallet_idx]
+            target_pos = self.data.geom_xpos[target_gid][:2]
+            dist       = float(np.linalg.norm(base_xy - target_pos))
+
+            delta_dist           = self.last_dist_to_target - dist
+            proximity_multiplier = float(np.exp(-dist))
+            progress_reward      = delta_dist * (50 + 100.0 * proximity_multiplier)
+            self.last_dist_to_target = dist
+
+            if dist < 0.45:
+                pallet_name = self.pallet_names[self.current_pallet_idx]
+                pallet_bonus = 50.0
+                #print(f"[base_env] ✅ Pallet alcanzado: {pallet_name} "
+                #      f"(idx {self.current_pallet_idx + 1}/{len(self.pallet_geom_ids)})")
+                self.current_pallet_idx += 1
+                #print(f"[base_env] Próximo objetivo: "
+                #      f"{self.pallet_names[self.current_pallet_idx] if self.current_pallet_idx < len(self.pallet_names) else 'Ninguno, pista completada'}")
+
+                # Actualizar distancia al siguiente pallet
+                if self.current_pallet_idx < len(self.pallet_geom_ids):
+                    next_pos = self.data.geom_xpos[
+                        self.pallet_geom_ids[self.current_pallet_idx]
+                    ][:2]
+                    self.last_dist_to_target = float(np.linalg.norm(base_xy - next_pos))
+                else:
+                    self.last_dist_to_target = 0.0
+
+                # Devolver solo el bonus más penalizaciones al pisar el pallet
+                return pallet_bonus - penalty_stuck - obstacle_pen - action_cost - flipper_pen - tilt_pen
+
+        return progress_reward + pallet_bonus - penalty_stuck - obstacle_pen - action_cost - flipper_pen - tilt_pen
 
     # ── Terminación ───────────────────────────────────────────────────────
     def _terminated(self) -> bool:
-        if self._step_count >= self.max_steps: return True
+        if self._step_count >= self.max_steps:
+            #print("[base_env] ⏰ Episodio terminado por límite de pasos")
+            return True
         zmat = self.data.xmat[self.base_id].reshape(3, 3)
-        if float(zmat[2, 2]) < 0.2: return True
-        if self._stuck_counter > 50: return True
+        if float(zmat[2, 2]) < 0.20:
+            #print("[base_env] 🛑 Episodio terminado por caída (base demasiado inclinado)")
+            return True
+        if float(self.data.xpos[self.base_id, 2]) < 0.10:
+            #print("[base_env] 🛑 Episodio terminado por caída (base demasiado bajo)")
+            return True
+        if self.current_pallet_idx >= len(self.pallet_geom_ids):
+            print("[base_env] 🏆 ¡Pista completada!")
+            return True
         return False
 
-    # ── API pública ────────────────────────────────────────────────────────
+    # ── Reset ─────────────────────────────────────────────────────────────
     def reset(self) -> Dict[str, np.ndarray]:
         mujoco.mj_resetData(self.model, self.data)
         self.data.qpos[0] = -1.5
         self.data.qpos[1] =  3.5
         self.data.qpos[2] =  0.2
+
+        # Poner brazo en posición de reposo
+        for joint_name, target_angle in ARM_REST_POSITIONS.items():
+            jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
+            if jid >= 0:
+                self.data.qpos[self.model.jnt_qposadr[jid]] = target_angle
+            act_id = mujoco.mj_name2id(
+                self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"pos_{joint_name}"
+            )
+            if act_id >= 0:
+                self.data.ctrl[act_id] = target_angle
+
         self.data.ctrl[self.id_lidar_spin] = LIDAR_SPIN_VEL
+
         for _ in range(10):
             mujoco.mj_step(self.model, self.data)
-        self._step_count    = 0
-        self._stuck_counter = 0
-        self._last_x        = float(self.data.xpos[self.base_id, 0])
+
+        # FIX Bug 4: un solo bloque de inicialización de estado
+        self._reset_state()
+        self._last_base_xy = self.data.xpos[self.base_id, :2].copy()
+
+        # Distancia inicial al primer pallet
+        if len(self.pallet_geom_ids) > 0:
+            first_pos = self.data.geom_xpos[self.pallet_geom_ids[0]][:2]
+            self.last_dist_to_target = float(
+                np.linalg.norm(self._last_base_xy - first_pos)
+            )
+
         if self.viewer and self.viewer.is_running():
             self.viewer.sync()
+
         return self._observation()
 
     def step(self, action: np.ndarray):
@@ -254,7 +390,7 @@ class BaseMuJoCoEnv:
             self.viewer.sync()
         self._step_count += 1
         obs  = self._observation()
-        rew  = self._reward(obs)
+        rew  = self._reward(obs, action)
         done = self._terminated()
         return obs, rew, done, {}
 
