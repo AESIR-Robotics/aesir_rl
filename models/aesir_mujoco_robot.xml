@@ -214,14 +214,14 @@
     <velocity name="vel_drive_r_2" joint="drive_r_2" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
     <velocity name="vel_drive_r_3" joint="drive_r_3" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
     
-    <velocity name="vel_flip1_back" joint="drive_flip1_back" kv="5" ctrlrange="-1 1"/>
-    <velocity name="vel_flip1_front" joint="drive_flip1_front" kv="5" ctrlrange="-1 1"/>
-    <velocity name="vel_flip2_back" joint="drive_flip2_back" kv="5" ctrlrange="-1 1"/>
-    <velocity name="vel_flip2_front" joint="drive_flip2_front" kv="5" ctrlrange="-1 1"/>
-    <velocity name="vel_flip3_back" joint="drive_flip3_back" kv="5" ctrlrange="-1 1"/>
-    <velocity name="vel_flip3_front" joint="drive_flip3_front" kv="5" ctrlrange="-1 1"/>
-    <velocity name="vel_flip4_back" joint="drive_flip4_back" kv="5" ctrlrange="-1 1"/>
-    <velocity name="vel_flip4_front" joint="drive_flip4_front" kv="5" ctrlrange="-1 1"/>
+    <velocity name="vel_flip1_back" joint="drive_flip1_back" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
+    <velocity name="vel_flip1_front" joint="drive_flip1_front" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
+    <velocity name="vel_flip2_back" joint="drive_flip2_back" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
+    <velocity name="vel_flip2_front" joint="drive_flip2_front" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
+    <velocity name="vel_flip3_back" joint="drive_flip3_back" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
+    <velocity name="vel_flip3_front" joint="drive_flip3_front" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
+    <velocity name="vel_flip4_back" joint="drive_flip4_back" kv="5" ctrllimited="true" ctrlrange="-20 20"/>
+    <velocity name="vel_flip4_front" joint="drive_flip4_front" kv="5" ctrlrange="-20 20"/>
 
     <velocity name="vel_lidar_spin" joint="lidar_spin" kv="10" ctrlrange="-100 100"/>
 
