@@ -1,5 +1,5 @@
 """
-PPO trainer — MAPA PALLETS (V2 Unificada con Política 14-Dim)
+PPO trainer — MAPA PALLETS (V3 - Anti-Saltos y Estabilidad)
 =============================================================
 Combina el sistema de misiones espaciales (PathMonitor) con el 
 acelerador de aprendizaje (Differential Drive + Arm Integrator)
@@ -120,7 +120,11 @@ P_ACTION_COST        = -1e-3
 P_ARM_ENERGY         = -0.005  
 P_WRONG_DIR          = -2.0    
 P_FLIP_OVERUSE       = -0.002  
-P_Z_BOUNCE           = -10.0   
+
+# NUEVAS PENALIZACIONES DE FÍSICAS
+P_JUMP_FATAL         = -50.0   # Si Z supera 0.45m (salto/vuelo)
+P_STABILITY          = -10.0   # Castigo por inclinación severa (wheelies)
+P_SHAKE              = -0.02   # Castigo por velocidades angulares bruscas del chasis
 
 LIDAR_DANGER_THRESH  = 0.12    
 
@@ -295,7 +299,7 @@ class AesirPalletsEnv:
         self._step_counter  = 0
         self._stuck_counter = 0
         self._last_xy       = np.array(SPAWN_XYZ[:2], dtype=np.float64)
-        self._last_z        = float(SPAWN_XYZ[2])
+        self._jumped_fatal  = False
 
         self.viewer = None
         if render:
@@ -372,7 +376,6 @@ class AesirPalletsEnv:
             jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, nombre)
             if jid >= 0:
                 self.data.qpos[self.model.jnt_qposadr[jid]] = angulo
-        # Sincroniza el integrador
         self._joint_pos = np.array([ARM_REST_ANGLES[f"joint_{i+1}"] for i in range(6)], dtype=np.float64)
 
     # ── Reset y Step ───────────────────────────────────────────────────────
@@ -400,10 +403,10 @@ class AesirPalletsEnv:
 
         self._step_counter  = 0
         self._stuck_counter = 0
+        self._jumped_fatal  = False
 
         base_pos = self.data.xpos[self.base_id]
         self._last_xy = base_pos[:2].copy()
-        self._last_z  = float(base_pos[2])
 
         self._path_monitor.reset(start_cp_idx=start_idx, start_xy=self._last_xy)
         self._contact_monitor.reset_flags()
@@ -437,16 +440,29 @@ class AesirPalletsEnv:
         xy = base_pos[:2].copy()
         current_z = float(base_pos[2])
 
-        # 1. PROGRESO EN EL PATH
+        # ── 1. PROGRESO EN EL PATH ─────────────────────────────────────────
         path_r, cp_bonus, _ = self._path_monitor.update(xy)
         reward += path_r + cp_bonus
 
-        # 2. Z BOUNCE (Saltos)
-        dz = current_z - getattr(self, '_last_z', current_z)
-        self._last_z = current_z
-        reward += P_Z_BOUNCE * abs(dz)
+        # ── 2. ESTABILIDAD Y ANTI-SALTOS (Mecánicas Físicas) ───────────────
+        # Si el robot se eleva por encima de los 45cm (volando)
+        if current_z > 0.45:
+            self._jumped_fatal = True
+            reward += P_JUMP_FATAL
 
-        # 3. ALIVE & SMOOTH DRIVE
+        # Penalización por perder el paralelismo con el suelo (Anti-Wheelie)
+        # zmat[2,2] es 1.0 si el robot está plano, y se acerca a 0 si se inclina
+        zmat = self.data.xmat[self.base_id].reshape(3, 3)
+        uprightness = float(zmat[2, 2])
+        if uprightness < 0.90:  
+            reward += P_STABILITY * (0.90 - uprightness)
+
+        # Penalización por sacudidas y giros bruscos del chasis
+        # qvel[3:6] son las velocidades angulares del freejoint (roll, pitch, yaw)
+        base_ang_vel = self.data.qvel[3:6]
+        reward += P_SHAKE * float(np.sum(np.square(base_ang_vel)))
+
+        # ── 3. ALIVE & SMOOTH DRIVE ────────────────────────────────────────
         reward += R_ALIVE
         vel = xy - self._last_xy
         to_cp = self._path_monitor.next_cp_xy - xy
@@ -455,7 +471,7 @@ class AesirPalletsEnv:
             alignment = float(np.dot(vel, to_cp) / (np.linalg.norm(vel) * to_cp_norm))
             if alignment > 0.5: reward += R_SMOOTH_DRIVE * alignment
         
-        # 4. STUCK PENALTY
+        # ── 4. STUCK PENALTY ───────────────────────────────────────────────
         if float(np.linalg.norm(vel)) < 0.005:
             self._stuck_counter += 1
             reward += P_STUCK
@@ -463,23 +479,23 @@ class AesirPalletsEnv:
             self._stuck_counter = max(0, self._stuck_counter - 1)
         self._last_xy = xy.copy()
 
-        # 5. LIDAR
+        # ── 5. LIDAR ───────────────────────────────────────────────────────
         min_lidar = float(obs["lidar"].min())
         if min_lidar < LIDAR_DANGER_THRESH:
             reward += P_LIDAR_NEAR * (LIDAR_DANGER_THRESH - min_lidar)
 
-        # 6. ACTION COST (Usa las señales de control reales)
+        # ── 6. ACTION COST (Usa las señales de control reales) ─────────────
         reward += P_ACTION_COST * float(np.square(self.data.ctrl[self._obs_act_ids]).mean())
 
-        # 7. ARM ENERGY
+        # ── 7. ARM ENERGY ──────────────────────────────────────────────────
         if self._arm_dof_adrs:
             arm_vel = np.array([self.data.qvel[adr] for adr in self._arm_dof_adrs])
             reward += P_ARM_ENERGY * float(np.sum(np.abs(arm_vel)))
 
-        # 8. FLIPPER OVERUSE (Basado en la acción normalizada -1..1)
+        # ── 8. FLIPPER OVERUSE (Basado en la acción normalizada -1..1) ─────
         reward += P_FLIP_OVERUSE * float(np.sum(np.abs(action[2:6])))
 
-        # 9. MUERTE
+        # ── 9. MUERTE ──────────────────────────────────────────────────────
         if self._contact_monitor.arm_hit_fatal: reward += P_ARM_FATAL
         if self._contact_monitor.robot_hit_muerte: reward += P_MUERTE
 
@@ -488,8 +504,12 @@ class AesirPalletsEnv:
     def _terminated(self) -> bool:
         if self._step_counter >= self.max_steps: return True
         zmat = self.data.xmat[self.base_id].reshape(3, 3)
+        # Volteo drástico
         if float(zmat[2, 2]) < 0.20: return True
         if self._stuck_counter >= STUCK_MAX_STEPS: return True
+        
+        # Nuevas condiciones fatales
+        if self._jumped_fatal: return True
         if self._contact_monitor.robot_hit_muerte: return True
         if self._contact_monitor.arm_hit_fatal: return True
         if self._path_monitor.completed: return True
