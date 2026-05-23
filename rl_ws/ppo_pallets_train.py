@@ -1,58 +1,21 @@
 """
-PPO trainer — MAPA PALLETS
-==========================
-Archivo específico para entrenar al robot Aesir en la pista de pallets
-(solo_pallets.xml + aesir_mujoco_robot_only.xml).
+PPO trainer — MAPA PALLETS (V2 Unificada con Política 14-Dim)
+=============================================================
+Combina el sistema de misiones espaciales (PathMonitor) con el 
+acelerador de aprendizaje (Differential Drive + Arm Integrator)
+reduciendo el espacio de acción de 26 a 14 dimensiones.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SISTEMA DE RECOMPENSAS
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-  POSITIVAS
-  ─────────
-  +path_progress       Avance hacia el siguiente checkpoint del corredor
-                       (medido sobre la curva S, no solo en X).  Escala: 8.0
-  +checkpoint_bonus    Bono único al cruzar cada uno de los 8 checkpoints
-                       del corredor. Monto: 40 por CP, deben cruzarse en orden.
-  +completion_bonus    +500 al alcanzar el checkpoint final (pallet 18 zone).
-  +alive_bonus         +0.01 por step para desincentivar suicidios rápidos.
-  +smooth_drive_bonus  +0.003 si la velocidad lineal es consistente y hacia
-                       adelante en el corredor (evita zigzag).
-
-  PENALIZACIONES
-  ──────────────
-  -arm_fatal_penalty   -50 + terminal: brazo toca geom con prefijo "fatal_"
-  -muerte_penalty      -10 por step + terminal: chasis toca "muerte_" (suelo)
-  -stuck_penalty       -0.05/step si dx < umbral; terminal tras 60 steps quieto
-  -lidar_penalty       Penaliza acercarse demasiado a obstáculos (lidar < 0.1)
-  -action_cost         Penaliza consumo energético (norma al cuadrado del ctrl)
-  -arm_energy_penalty  Penaliza velocidad angular del brazo: el brazo debe
-                       mantenerse plegado mientras navega
-  -wrong_direction_pen Penaliza alejarse del siguiente checkpoint activo
-  -flip_overuse_pen    Penaliza uso excesivo de flippers en terreno plano
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DISEÑO DEL PATH
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  El corredor serpentea en S entre las 18 tarimas.
-  Se definen 8 checkpoints (CPs) en los cuellos de botella del corredor.
-  CP0 = posición de spawn. El robot debe cruzarlos en orden 0→8.
-
-  CP0  (-1.50,  3.50)   spawn
-  CP1  (-1.10,  2.90)   salida gate pallets 9-10
-  CP2  ( 0.00,  1.70)   gate pallets 7-6
-  CP3  ( 1.20,  0.50)   gate pallets 5-4
-  CP4  ( 2.50, -0.20)   gate pallets 3-14
-  CP5  ( 4.00, -1.60)   corredor derecho pallets 15-16
-  CP6  ( 4.70, -3.20)   gate pallets 17-1
-  CP7  ( 3.50, -3.79)   META — zona pallet 18
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Uso:
-    cd /home/<user>/aesir_rl/workspace/src/aesir_robot_description
-    MUJOCO_GL=egl python3 ppo_pallets_train.py
+Acciones (14 dims, normalizadas en [-1,1]):
+  [0]    v_lin       velocidad lineal de la base   → diferencial
+  [1]    ω_ang       velocidad angular de la base  → diferencial
+  [2..5] flipper_1..4  posición objetivo de cada flipper
+  [6..11] joint_1..6  velocidad articular del brazo (integrada a posición)
+  [12]   dedo izquierdo
+  [13]   dedo derecho
 """
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -75,45 +38,54 @@ except ImportError:
     _HAS_WANDB = False
 
 
-# ──────────────────────── Configuración ────────────────────────────────────
-XML_PATH = "/home/aesir/aesir_rl/models/aesir_pallets.xml"          # ajustar según tu estructura
+# ──────────────────────────── Ruta XML (Auto-detecta) ──────────────────────
+_HERE    = os.path.dirname(os.path.abspath(__file__))
+_FULL    = os.path.join(_HERE, "../aesir_robot_description/launch/aesir_complete.xml")
+_ROBOT   = os.path.join(_HERE, "aesir_mujoco.xml")
+# Ajusta a tu preferencia, por defecto asume el path del entorno real:
+XML_PATH = _FULL if os.path.exists(_FULL) else "/home/aesir/aesir_rl/models/aesir_pallets.xml"
 
+# ──────────────────────────── Configuración General ────────────────────────
 CAMERA_NAMES       = ["cam_gripper", "cam_oakd", "cam_back"]
 CAMERA_H, CAMERA_W = 84, 84
 NUM_LIDAR_RAYS     = 7
 LIDAR_MAX_RANGE    = 15.0
 LIDAR_SPIN_VEL     = 20.0
 
-ACTUATOR_NAMES = [
-    "vel_drive_l_1", "vel_drive_l_2", "vel_drive_l_3",
-    "vel_drive_r_1", "vel_drive_r_2", "vel_drive_r_3",
-    "pos_flipper_1", "pos_flipper_2", "pos_flipper_3", "pos_flipper_4",
-    "pos_joint_1", "pos_joint_2", "pos_joint_3",
-    "pos_joint_4", "pos_joint_5", "pos_joint_6",
-    "pos_left_finger", "pos_right_finger",
-    "vel_flip1_back", "vel_flip1_front",
-    "vel_flip2_back", "vel_flip2_front",
-    "vel_flip3_back", "vel_flip3_front",
-    "vel_flip4_back", "vel_flip4_front",
-]
+# ── Parámetros físicos del control ─────────────────────────────────────────
+TRACK_HALF_WIDTH    = 0.21        # Distancia Y centro-oruga (m)
+WHEEL_RADIUS        = 0.05        # Radio rueda tracción (m)
+MAX_WHEEL_VEL       = 20.0        # rad/s (= ctrlrange vel_drive_*)
+MAX_LINEAR_VEL      = 1.5         # m/s
+MAX_ANGULAR_VEL     = 2.0         # rad/s
+MAX_JOINT_VEL       = 1.0         # rad/s por articulación del brazo
 
-# Índices dentro de ACTUATOR_NAMES para subconjuntos de actuadores
-_IDX_DRIVE_L  = slice(0, 3)    # vel_drive_l_1..3
-_IDX_DRIVE_R  = slice(3, 6)    # vel_drive_r_1..3
-_IDX_FLIPPER  = slice(6, 10)   # pos_flipper_1..4
-_IDX_ARM      = slice(10, 16)  # pos_joint_1..6
-_IDX_GRIPPER  = slice(16, 18)
+# ── Nombres de actuadores agrupados ──────────────────────────────────────
+DRIVE_LEFT   = ["vel_drive_l_1", "vel_drive_l_2", "vel_drive_l_3"]
+DRIVE_RIGHT  = ["vel_drive_r_1", "vel_drive_r_2", "vel_drive_r_3"]
+FLIPPERS     = ["pos_flipper_1", "pos_flipper_2", "pos_flipper_3", "pos_flipper_4"]
+FLIP_WHEELS  = {
+    "pos_flipper_1": ["vel_flip1_back", "vel_flip1_front"],
+    "pos_flipper_2": ["vel_flip2_back", "vel_flip2_front"],
+    "pos_flipper_3": ["vel_flip3_back", "vel_flip3_front"],
+    "pos_flipper_4": ["vel_flip4_back", "vel_flip4_front"],
+}
+ARM_JOINTS   = ["pos_joint_1", "pos_joint_2", "pos_joint_3",
+                "pos_joint_4", "pos_joint_5", "pos_joint_6"]
+FINGER_L     = "pos_left_finger"
+FINGER_R     = "pos_right_finger"
+LIDAR_SPIN   = "vel_lidar_spin"
+
+OBS_ACTUATORS = DRIVE_LEFT + DRIVE_RIGHT + FLIPPERS + ARM_JOINTS + [FINGER_L, FINGER_R]
 
 CONTROL_DECIMATION = 10
-EPISODE_MAX_STEPS  = 1200       # más pasos para un corredor largo
-STUCK_MAX_STEPS    = 60         # pasos quieto antes de terminar
+EPISODE_MAX_STEPS  = 1200       
+STUCK_MAX_STEPS    = 60         
 
 CHECKPOINT_DIR = Path("./checkpoints_pallets")
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 
 # ────────────── Path de navegación (checkpoints del corredor) ───────────────
-# Coordenadas (x, y) en el frame mundo.
-# El robot debe cruzarlos en orden estricto 0 → 7.
 PATH_CHECKPOINTS: List[Tuple[float, float]] = [
     (-1.50,  3.50),   # CP0 spawn
     (-1.10,  2.90),   # CP1 salida gate 9-10
@@ -124,59 +96,39 @@ PATH_CHECKPOINTS: List[Tuple[float, float]] = [
     ( 4.70, -3.20),   # CP6 gate 17-1
     ( 3.50, -3.79),   # CP7 META pallet 18
 ]
-# Radio para considerar "cruzado" un checkpoint (metros)
 CP_REACH_RADIUS = 0.90
-# Checkpoint final (índice)
-CP_FINAL_IDX = len(PATH_CHECKPOINTS) - 1
+CP_FINAL_IDX    = len(PATH_CHECKPOINTS) - 1
+SPAWN_XYZ       = (-1.5, 3.5, 0.20)
 
-# Posición de spawn del robot
-SPAWN_XYZ = (-1.5, 3.5, 0.20)
-
-# Ángulos de reposo del brazo (joints 1-6 en radianes)
 ARM_REST_ANGLES = {
-    "joint_1":  -0.314,
-    "joint_2":  -3.14,
-    "joint_3":   3.14,
-    "joint_4":  -1.35,
-    "joint_5":  -1.54,
-    "joint_6":   1.54,
+    "joint_1": -0.314, "joint_2": -3.14, "joint_3":  3.14,
+    "joint_4": -1.35,  "joint_5": -1.54, "joint_6":  1.54,
 }
 
 # ────────────── Magnitudes de recompensa (ajustables) ──────────────────────
-R_PATH_PROGRESS      =  8.0    # por metro avanzado hacia siguiente CP
-R_CHECKPOINT         = 40.0    # bono único por CP cruzado
-R_COMPLETION         = 500.0   # bono final al completar el recorrido
-R_ALIVE              =  0.01   # por step
-R_SMOOTH_DRIVE       =  0.003  # si velocidad lineal alineada hacia el path
+R_PATH_PROGRESS      =  8.0    
+R_CHECKPOINT         = 40.0    
+R_COMPLETION         = 500.0   
+R_ALIVE              =  0.01   
+R_SMOOTH_DRIVE       =  0.003  
 
-P_ARM_FATAL          = -50.0   # brazo toca "fatal_" → terminal
-P_MUERTE             = -10.0   # toca "muerte_" por step → terminal
-P_STUCK              = -0.05   # por step quieto
-P_LIDAR_NEAR         = -5.0    # escala cuando lidar < LIDAR_DANGER_THRESH
-P_ACTION_COST        = -1e-3   # escala por norma² del ctrl
-P_ARM_ENERGY         = -0.005  # escala por |qvel| del brazo
-P_WRONG_DIR          = -2.0    # por metro alejado del siguiente CP
-P_FLIP_OVERUSE       = -0.002  # escala por |flipper_cmd| en terreno plano
-P_Z_BOUNCE           = -10.0   # NUEVO: Penalización por saltar o moverse bruscamente en Z
+P_ARM_FATAL          = -50.0   
+P_MUERTE             = -10.0   
+P_STUCK              = -0.05   
+P_LIDAR_NEAR         = -5.0    
+P_ACTION_COST        = -1e-3   
+P_ARM_ENERGY         = -0.005  
+P_WRONG_DIR          = -2.0    
+P_FLIP_OVERUSE       = -0.002  
+P_Z_BOUNCE           = -10.0   
 
-LIDAR_DANGER_THRESH  = 0.12    # porcentaje del rango máximo (normalizado)
+LIDAR_DANGER_THRESH  = 0.12    
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PathMonitor — lógica de checkpoints
+#  PathMonitor y ContactMonitor
 # ══════════════════════════════════════════════════════════════════════════════
 class PathMonitor:
-    """
-    Mantiene el estado del recorrido (qué checkpoints se han cruzado)
-    y calcula la recompensa de progreso a lo largo de la curva S.
-
-    Expone:
-        .update(xy)  → (path_reward, cp_bonus, completed)
-        .reset()
-        .next_cp_xy  → (x,y) del próximo checkpoint
-        .current_cp  → índice del CP activo (el que sigue por cruzar)
-    """
-
     def __init__(self):
         self._cps = np.array(PATH_CHECKPOINTS, dtype=np.float64)
         self.reset()
@@ -184,48 +136,34 @@ class PathMonitor:
     def reset(self, start_cp_idx: int = 0, start_xy: np.ndarray = None):
         if start_xy is None:
             start_xy = np.array(SPAWN_XYZ[:2])
-            
-        # El checkpoint activo será el siguiente al punto de aparición
         self.current_cp   = min(start_cp_idx + 1, CP_FINAL_IDX)
         self._prev_dist   = self._dist_to_cp(self.current_cp, start_xy)
-        self.cps_crossed  = start_cp_idx  # Asumimos que "cruzó" los anteriores al aparecer ahí
+        self.cps_crossed  = start_cp_idx  
         self.completed    = False
 
     @property
     def next_cp_xy(self) -> np.ndarray:
-        idx = min(self.current_cp, CP_FINAL_IDX)
-        return self._cps[idx]
+        return self._cps[min(self.current_cp, CP_FINAL_IDX)]
 
     def _dist_to_cp(self, cp_idx: int, xy: np.ndarray) -> float:
         return float(np.linalg.norm(xy - self._cps[cp_idx]))
 
     def update(self, xy: np.ndarray) -> Tuple[float, float, bool]:
-        """
-        Retorna (path_reward, cp_bonus, episode_completed).
-        Debe llamarse UNA vez por step.
-        """
-        if self.completed:
-            return 0.0, 0.0, True
+        if self.completed: return 0.0, 0.0, True
 
         cp_idx = self.current_cp
         dist_now = self._dist_to_cp(cp_idx, xy)
 
-        # ── recompensa de progreso: cuánto nos acercamos al CP activo ──────
-        delta_dist     = self._prev_dist - dist_now    # positivo = acercarse
+        delta_dist     = self._prev_dist - dist_now
         path_reward    = R_PATH_PROGRESS * delta_dist
         self._prev_dist = dist_now
 
-        # ── penalización por alejarse del CP activo ─────────────────────────
-        wrong_dir_pen = 0.0
-        if delta_dist < -0.01:                          # nos alejamos
-            wrong_dir_pen = P_WRONG_DIR * abs(delta_dist)
+        wrong_dir_pen = P_WRONG_DIR * abs(delta_dist) if delta_dist < -0.01 else 0.0
 
-        # ── detección de checkpoint cruzado ─────────────────────────────────
         cp_bonus = 0.0
         if dist_now < CP_REACH_RADIUS:
             cp_bonus        = R_CHECKPOINT
             self.cps_crossed += 1
-
             if cp_idx == CP_FINAL_IDX:
                 self.completed = True
                 cp_bonus += R_COMPLETION
@@ -236,17 +174,7 @@ class PathMonitor:
         return (path_reward + wrong_dir_pen), cp_bonus, self.completed
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  ContactMonitor — lógica de colisiones
-# ══════════════════════════════════════════════════════════════════════════════
 class ContactMonitor:
-    """
-    Clasifica cada contacto en la simulación usando los prefijos de nombre:
-      "fatal_"  → sólo mata si lo toca el brazo
-      "muerte_" → mata sin importar qué parte del robot
-    Expone flags que se resetean en cada step.
-    """
-
     _CHASSIS_PARTS = frozenset({
         "base_link", "tracked_1", "tracked_2",
         "flipper_1_1", "flipper_2_1", "flipper_3_1", "flipper_4_1",
@@ -278,8 +206,7 @@ class ContactMonitor:
         self.reset_flags()
         for i in range(data.ncon):
             c = data.contact[i]
-            g1 = self._geom_name(c.geom1)
-            g2 = self._geom_name(c.geom2)
+            g1, g2 = self._geom_name(c.geom1), self._geom_name(c.geom2)
             b1 = self._body_name(self._model.geom_bodyid[c.geom1])
             b2 = self._body_name(self._model.geom_bodyid[c.geom2])
 
@@ -289,28 +216,17 @@ class ContactMonitor:
             is_arm2     = g2 in self._ARM_PARTS     or b2 in self._ARM_PARTS
             is_robot    = is_chassis1 or is_chassis2 or is_arm1 or is_arm2
 
-            has_fatal  = "fatal_"  in g1 or "fatal_"  in g2
-            has_muerte = "muerte_" in g1 or "muerte_" in g2
-
-            # muerte_ + cualquier pieza del robot → kill
-            if has_muerte and is_robot:
+            if ("muerte_" in g1 or "muerte_" in g2) and is_robot:
                 self.robot_hit_muerte = True
 
-            # fatal_ + brazo → kill brazo
-            if has_fatal:
-                if ("fatal_" in g1 and is_arm2) or ("fatal_" in g2 and is_arm1):
-                    self.arm_hit_fatal = True
+            if ("fatal_" in g1 and is_arm2) or ("fatal_" in g2 and is_arm1):
+                self.arm_hit_fatal = True
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  AesirPalletsEnv
+#  AesirPalletsEnv (Arquitectura 14-Dim)
 # ══════════════════════════════════════════════════════════════════════════════
 class AesirPalletsEnv:
-    """
-    Entorno MuJoCo para la pista de pallets.
-    Reemplaza AesirMuJoCoEnv del trainer genérico.
-    """
-
     def __init__(self,
                  xml_path: str = XML_PATH,
                  camera_names: List[str] = CAMERA_NAMES,
@@ -325,118 +241,79 @@ class AesirPalletsEnv:
         self.data  = mujoco.MjData(self.model)
 
         self.image_h, self.image_w = image_hw
-        self.renderer = mujoco.Renderer(self.model,
-                                        height=self.image_h,
-                                        width=self.image_w)
-        self.camera_names     = list(camera_names)
-        self.num_cameras      = len(camera_names)
-        self.num_lidar        = num_lidar_rays
-        self.lidar_max        = lidar_max_range
-        self.control_decimation = control_decimation
-        self.max_steps        = max_steps
+        self.renderer = mujoco.Renderer(self.model, height=self.image_h, width=self.image_w)
+        self.camera_names = list(camera_names)
+        self.num_cameras  = len(self.camera_names)
+        self.num_lidar    = num_lidar_rays
+        self.lidar_max    = lidar_max_range
 
-        # ── actuadores ──────────────────────────────────────────────────────
-        self.act_ids = np.array([
-            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, n)
-            for n in ACTUATOR_NAMES
-        ], dtype=np.int32)
-        missing = [n for n, i in zip(ACTUATOR_NAMES, self.act_ids) if i < 0]
-        if missing:
-            raise ValueError(f"Actuadores no encontrados en el modelo: {missing}")
+        # ── Setup Actuadores 14-Dim ─────────────────────────────────────────
+        self.ids_drive_l  = [self._aid(n) for n in DRIVE_LEFT]
+        self.ids_drive_r  = [self._aid(n) for n in DRIVE_RIGHT]
+        self.ids_flippers = [self._aid(n) for n in FLIPPERS]
+        self.ids_flip_wh  = {self._aid(fn): [self._aid(w) for w in wns] for fn, wns in FLIP_WHEELS.items()}
+        self.ids_arm      = [self._aid(n) for n in ARM_JOINTS]
+        self.id_fing_l    = self._aid(FINGER_L)
+        self.id_fing_r    = self._aid(FINGER_R)
 
-        self.ctrlrange = self.model.actuator_ctrlrange[self.act_ids].copy()
-        self.act_low   = self.ctrlrange[:, 0]
-        self.act_high  = self.ctrlrange[:, 1]
-        self.act_len   = len(self.act_ids)
+        # ── joint_states: qpos + qvel de OBS_ACTUATORS ────────────────────
+        self._obs_act_ids = np.array([self._aid(n) for n in OBS_ACTUATORS], dtype=np.int32)
+        _jnt_ids          = [int(self.model.actuator_trnid[i, 0]) for i in self._obs_act_ids]
+        self._qpos_adr    = np.array([self.model.jnt_qposadr[j] for j in _jnt_ids], dtype=np.int32)
+        self._qvel_adr    = np.array([self.model.jnt_dofadr[j]  for j in _jnt_ids], dtype=np.int32)
+        self.joint_len    = 2 * len(self._obs_act_ids)
 
-        # ── joint addresses para obs ────────────────────────────────────────
-        self.joint_ids = np.array(
-            [self.model.actuator_trnid[i, 0] for i in self.act_ids], dtype=np.int32
-        )
-        self.qpos_adr = np.array(
-            [self.model.jnt_qposadr[j] for j in self.joint_ids], dtype=np.int32
-        )
-        self.qvel_adr = np.array(
-            [self.model.jnt_dofadr[j]  for j in self.joint_ids], dtype=np.int32
-        )
-        self.joint_len = 2 * self.act_len
-
-        # ── joint address del brazo (para penalizar energía) ────────────────
-        arm_joint_names = [
-            "joint_1","joint_2","joint_3","joint_4","joint_5","joint_6"
-        ]
+        # ── penalización energía del brazo ──────────────────────────────────
         self._arm_dof_adrs = []
-        for jn in arm_joint_names:
+        for jn in ["joint_1","joint_2","joint_3","joint_4","joint_5","joint_6"]:
             jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, jn)
             if jid >= 0:
                 self._arm_dof_adrs.append(int(self.model.jnt_dofadr[jid]))
 
-        # ── flipper joint ids (para penalizar overuse) ───────────────────────
-        _flip_names = ["flipper_joint_1","flipper_joint_2",
-                        "flipper_joint_3","flipper_joint_4"]
-        self._flip_act_indices = [
-            ACTUATOR_NAMES.index(f"pos_flipper_{i+1}") for i in range(4)
-        ]
-
-        # ── lidar spin ───────────────────────────────────────────────────────
-        self.lidar_spin_id = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "vel_lidar_spin"
-        )
-
-        # ── sensores lidar ───────────────────────────────────────────────────
         self.lidar_sensor_adr = []
         for i in range(self.num_lidar):
-            sid = mujoco.mj_name2id(
-                self.model, mujoco.mjtObj.mjOBJ_SENSOR, f"lidar_{i}"
-            )
-            if sid < 0:
-                raise ValueError(f"Sensor lidar_{i} no encontrado")
-            self.lidar_sensor_adr.append(int(self.model.sensor_adr[sid]))
+            sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, f"lidar_{i}")
+            if sid >= 0: self.lidar_sensor_adr.append(int(self.model.sensor_adr[sid]))
 
-        # ── body base ────────────────────────────────────────────────────────
-        self.base_id = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_BODY, "footprint_link"
-        )
-        if self.base_id < 0:
-            self.base_id = mujoco.mj_name2id(
-                self.model, mujoco.mjtObj.mjOBJ_BODY, "base_link"
-            )
-        if self.base_id < 0:
-            self.base_id = 1
+        self.lidar_spin_id = self._aid(LIDAR_SPIN)
+        self.base_id       = max(mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "footprint_link"), 1)
 
-        # ── shapes ───────────────────────────────────────────────────────────
+        # ── dims ───────────────────────────────────────────────────────────
         self.image_shape = (3 * self.num_cameras, self.image_h, self.image_w)
         self.lidar_shape = (self.num_lidar,)
-        self.joint_shape = (self.joint_len,)
+        self.act_len     = 14
 
-        # ── monitores ────────────────────────────────────────────────────────
+        self.control_decimation = control_decimation
+        self._dt                = self.model.opt.timestep * control_decimation
+        self.max_steps          = max_steps
+        self._joint_pos         = np.zeros(6, dtype=np.float64)
+
+        # ── monitores ──────────────────────────────────────────────────────
         self._path_monitor    = PathMonitor()
         self._contact_monitor = ContactMonitor(self.model)
 
-        # ── estado interno ───────────────────────────────────────────────────
         self._step_counter  = 0
         self._stuck_counter = 0
         self._last_xy       = np.array(SPAWN_XYZ[:2], dtype=np.float64)
         self._last_z        = float(SPAWN_XYZ[2])
-        self._last_vel_dir  = np.zeros(2)   # para smooth_drive_bonus
 
-        # ── viewer ───────────────────────────────────────────────────────────
         self.viewer = None
         if render:
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
             self.viewer.cam.distance  = 6.0
             self.viewer.cam.elevation = -25
 
-    # ── helpers ─────────────────────────────────────────────────────────────
+    def _aid(self, name: str) -> int:
+        return mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
 
     def _read_cameras(self) -> np.ndarray:
         frames = []
         for cam in self.camera_names:
             self.renderer.update_scene(self.data, camera=cam)
             img = self.renderer.render()
+            img = np.flip(img, axis=(0, 1))  # Parche cámara invertida
             frames.append(img.astype(np.float32) / 255.0)
-        stacked = np.concatenate(frames, axis=-1)
-        return np.transpose(stacked, (2, 0, 1))
+        return np.transpose(np.concatenate(frames, axis=-1), (2, 0, 1))
 
     def _read_lidar(self) -> np.ndarray:
         lidar = np.empty(self.num_lidar, dtype=np.float32)
@@ -446,8 +323,8 @@ class AesirPalletsEnv:
         return lidar
 
     def _read_joint_state(self) -> np.ndarray:
-        qpos = self.data.qpos[self.qpos_adr]
-        qvel = self.data.qvel[self.qvel_adr]
+        qpos = self.data.qpos[self._qpos_adr]
+        qvel = self.data.qvel[self._qvel_adr]
         return np.concatenate([qpos, qvel]).astype(np.float32)
 
     def _observation(self) -> Dict[str, np.ndarray]:
@@ -457,38 +334,65 @@ class AesirPalletsEnv:
             "joint_states": self._read_joint_state(),
         }
 
-    def _scale_action(self, action: np.ndarray) -> np.ndarray:
-        a = np.clip(action, -1.0, 1.0)
-        return self.act_low + 0.5 * (a + 1.0) * (self.act_high - self.act_low)
+    # ── Mapeo 14-Dim ───────────────────────────────────────────────────────
+    def _apply_action(self, action: np.ndarray):
+        a     = np.clip(action, -1.0, 1.0)
+        v_lin = float(a[0]) * MAX_LINEAR_VEL
+        omega = float(a[1]) * MAX_ANGULAR_VEL
+
+        # Base Diferencial
+        vl = float(np.clip((v_lin - omega * TRACK_HALF_WIDTH) / WHEEL_RADIUS, -MAX_WHEEL_VEL, MAX_WHEEL_VEL))
+        vr = float(np.clip((v_lin + omega * TRACK_HALF_WIDTH) / WHEEL_RADIUS, -MAX_WHEEL_VEL, MAX_WHEEL_VEL))
+        for i in self.ids_drive_l: self.data.ctrl[i] = vl
+        for i in self.ids_drive_r: self.data.ctrl[i] = vr
+
+        # Flippers y sus Ruedas
+        for k, fid in enumerate(self.ids_flippers):
+            fp = float(np.clip(a[2+k] * 3.1416, -3.1416, 3.1416))
+            self.data.ctrl[fid] = fp
+            wvel = vl if k in (0, 2) else vr
+            for wid in self.ids_flip_wh.get(fid, []):
+                self.data.ctrl[wid] = float(np.clip(wvel, -1.0, 1.0))
+
+        # Brazo (Integrador)
+        delta = a[6:12] * MAX_JOINT_VEL * self._dt
+        self._joint_pos = np.clip(self._joint_pos + delta, -3.1416, 3.1416)
+        for k, aid in enumerate(self.ids_arm):
+            self.data.ctrl[aid] = self._joint_pos[k]
+        
+        # Gripper
+        self.data.ctrl[self.id_fing_l] = float(np.clip((a[12] + 1.0) / 2.0 * 0.03, 0.0, 0.03))
+        self.data.ctrl[self.id_fing_r] = float(np.clip((a[13] + 1.0) / 2.0 * 0.03, 0.0, 0.03))
+
+        if self.lidar_spin_id >= 0:
+            self.data.ctrl[self.lidar_spin_id] = LIDAR_SPIN_VEL
 
     def _set_arm_rest(self):
-        """Coloca el brazo en posición de reposo al hacer reset."""
-        for jname, angle in ARM_REST_ANGLES.items():
-            jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, jname)
+        for nombre, angulo in ARM_REST_ANGLES.items():
+            jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, nombre)
             if jid >= 0:
-                self.data.qpos[self.model.jnt_qposadr[jid]] = angle
+                self.data.qpos[self.model.jnt_qposadr[jid]] = angulo
+        # Sincroniza el integrador
+        self._joint_pos = np.array([ARM_REST_ANGLES[f"joint_{i+1}"] for i in range(6)], dtype=np.float64)
 
-    # ── API pública ──────────────────────────────────────────────────────────
-
+    # ── Reset y Step ───────────────────────────────────────────────────────
     def reset(self) -> Dict[str, np.ndarray]:
         mujoco.mj_resetData(self.model, self.data)
 
-        # ── NUEVO: Spawn Aleatorio sobre la ruta de Pallets ──
+        # Domain Randomization: Spawn a lo largo del path
         start_idx = int(np.random.randint(0, len(PATH_CHECKPOINTS) - 1))
         spawn_x, spawn_y = PATH_CHECKPOINTS[start_idx]
-        spawn_z = 0.25  # Altura segura sobre la madera
-
+        
         self.data.qpos[0] = spawn_x
         self.data.qpos[1] = spawn_y
-        self.data.qpos[2] = spawn_z
-        self.data.qpos[3:7] = [1, 0, 0, 0]   # cuaternión identidad
+        self.data.qpos[2] = 0.25
+        self.data.qpos[3:7] = [1, 0, 0, 0]
 
         self._set_arm_rest()
 
         if self.lidar_spin_id >= 0:
             self.data.ctrl[self.lidar_spin_id] = LIDAR_SPIN_VEL
 
-        # Settle
         for _ in range(10):
             mujoco.mj_step(self.model, self.data)
             if self.viewer is not None and self.viewer.is_running():
@@ -497,23 +401,17 @@ class AesirPalletsEnv:
         self._step_counter  = 0
         self._stuck_counter = 0
 
-        # Registrar posiciones iniciales para el tracking de recompensas
         base_pos = self.data.xpos[self.base_id]
-        self._last_xy       = base_pos[:2].copy()
-        self._last_z        = float(base_pos[2])  # NUEVO: Seguimiento del eje Z
-        self._last_vel_dir  = np.zeros(2)
+        self._last_xy = base_pos[:2].copy()
+        self._last_z  = float(base_pos[2])
 
-        # Sincronizar el monitor con el punto de aparición aleatorio
         self._path_monitor.reset(start_cp_idx=start_idx, start_xy=self._last_xy)
         self._contact_monitor.reset_flags()
 
         return self._observation()
 
     def step(self, action: np.ndarray):
-        scaled = self._scale_action(action)
-        self.data.ctrl[self.act_ids] = scaled
-        if self.lidar_spin_id >= 0:
-            self.data.ctrl[self.lidar_spin_id] = LIDAR_SPIN_VEL
+        self._apply_action(action)
 
         for _ in range(self.control_decimation):
             mujoco.mj_step(self.model, self.data)
@@ -524,118 +422,77 @@ class AesirPalletsEnv:
         self._contact_monitor.scan(self.data)
 
         obs    = self._observation()
-        reward = self._compute_reward(obs, scaled)
+        reward = self._compute_reward(obs, action)
         done   = self._terminated()
 
         return obs, reward, done, {
             "checkpoint":   self._path_monitor.current_cp,
             "cps_crossed":  self._path_monitor.cps_crossed,
             "completed":    self._path_monitor.completed,
-            "arm_fatal":    self._contact_monitor.arm_hit_fatal,
-            "muerte":       self._contact_monitor.robot_hit_muerte,
-            "stuck_steps":  self._stuck_counter,
         }
 
-    # ── reward ──────────────────────────────────────────────────────────────
-
-    def _compute_reward(self,
-                        obs: Dict[str, np.ndarray],
-                        scaled_ctrl: np.ndarray) -> float:
+    def _compute_reward(self, obs: Dict[str, np.ndarray], action: np.ndarray) -> float:
         reward = 0.0
         base_pos = self.data.xpos[self.base_id]
         xy = base_pos[:2].copy()
         current_z = float(base_pos[2])
 
-        # ── 1. PROGRESO EN EL PATH ─────────────────────────────────────────
+        # 1. PROGRESO EN EL PATH
         path_r, cp_bonus, _ = self._path_monitor.update(xy)
         reward += path_r + cp_bonus
 
-        # ── NUEVO: PENALIZACIÓN EN EJE Z (Saltos/Botes) ────────────────────
+        # 2. Z BOUNCE (Saltos)
         dz = current_z - getattr(self, '_last_z', current_z)
         self._last_z = current_z
-        
-        z_penalty = P_Z_BOUNCE * abs(dz)
-        reward += z_penalty
+        reward += P_Z_BOUNCE * abs(dz)
 
-        # ── 2. ALIVE BONUS ────────────────────────────────────────────────
+        # 3. ALIVE & SMOOTH DRIVE
         reward += R_ALIVE
-
-        # ── 3. SMOOTH DRIVE BONUS ─────────────────────────────────────────
-        # Recompensa si la velocidad va alineada con el vector hacia el CP
         vel = xy - self._last_xy
-        next_cp = self._path_monitor.next_cp_xy
-        to_cp   = next_cp - xy
+        to_cp = self._path_monitor.next_cp_xy - xy
         to_cp_norm = np.linalg.norm(to_cp)
         if to_cp_norm > 1e-4 and np.linalg.norm(vel) > 1e-4:
             alignment = float(np.dot(vel, to_cp) / (np.linalg.norm(vel) * to_cp_norm))
-            if alignment > 0.5:          # va en la dirección correcta
-                reward += R_SMOOTH_DRIVE * alignment
-        self._last_xy = xy.copy()
-
-        # ── 4. STUCK PENALTY ─────────────────────────────────────────────
-        dist_moved = float(np.linalg.norm(xy - (xy - (xy - self._last_xy))))
-        if dist_moved < 0.005:
+            if alignment > 0.5: reward += R_SMOOTH_DRIVE * alignment
+        
+        # 4. STUCK PENALTY
+        if float(np.linalg.norm(vel)) < 0.005:
             self._stuck_counter += 1
             reward += P_STUCK
         else:
             self._stuck_counter = max(0, self._stuck_counter - 1)
+        self._last_xy = xy.copy()
 
-        # ── 5. LIDAR OBSTACLE PENALTY ─────────────────────────────────────
+        # 5. LIDAR
         min_lidar = float(obs["lidar"].min())
         if min_lidar < LIDAR_DANGER_THRESH:
-            # penalty proporcional: mayor mientras más cerca
             reward += P_LIDAR_NEAR * (LIDAR_DANGER_THRESH - min_lidar)
 
-        # ── 6. ACTION COST (energía total) ────────────────────────────────
-        reward += P_ACTION_COST * float(np.square(scaled_ctrl).mean())
+        # 6. ACTION COST (Usa las señales de control reales)
+        reward += P_ACTION_COST * float(np.square(self.data.ctrl[self._obs_act_ids]).mean())
 
-        # ── 7. ARM ENERGY PENALTY (brazo debe quedarse quieto) ────────────
+        # 7. ARM ENERGY
         if self._arm_dof_adrs:
-            arm_vel = np.array(
-                [self.data.qvel[adr] for adr in self._arm_dof_adrs]
-            )
+            arm_vel = np.array([self.data.qvel[adr] for adr in self._arm_dof_adrs])
             reward += P_ARM_ENERGY * float(np.sum(np.abs(arm_vel)))
 
-        # ── 8. FLIPPER OVERUSE PENALTY ────────────────────────────────────
-        # En terreno plano, los flippers deben estar plegados (ctrl ≈ 0)
-        flip_cmds = scaled_ctrl[_IDX_FLIPPER]
-        reward += P_FLIP_OVERUSE * float(np.sum(np.abs(flip_cmds)))
+        # 8. FLIPPER OVERUSE (Basado en la acción normalizada -1..1)
+        reward += P_FLIP_OVERUSE * float(np.sum(np.abs(action[2:6])))
 
-        # ── 9. CONTACTO FATAL / MUERTE ───────────────────────────────────
-        if self._contact_monitor.arm_hit_fatal:
-            reward += P_ARM_FATAL         # ya generará done=True
-
-        if self._contact_monitor.robot_hit_muerte:
-            reward += P_MUERTE            # ya generará done=True
+        # 9. MUERTE
+        if self._contact_monitor.arm_hit_fatal: reward += P_ARM_FATAL
+        if self._contact_monitor.robot_hit_muerte: reward += P_MUERTE
 
         return float(reward)
 
-    # ── terminated ──────────────────────────────────────────────────────────
-
     def _terminated(self) -> bool:
-        # Máximo de steps
-        if self._step_counter >= self.max_steps:
-            return True
-
-        # Volcado del chasis (z_col del eje Z del cuerpo < umbral)
+        if self._step_counter >= self.max_steps: return True
         zmat = self.data.xmat[self.base_id].reshape(3, 3)
-        if float(zmat[2, 2]) < 0.20:
-            return True
-
-        # Quieto demasiado tiempo
-        if self._stuck_counter >= STUCK_MAX_STEPS:
-            return True
-
-        # Contacto letal
-        if self._contact_monitor.robot_hit_muerte:
-            return True
-        if self._contact_monitor.arm_hit_fatal:
-            return True
-
-        # Misión completada
-        if self._path_monitor.completed:
-            return True
-
+        if float(zmat[2, 2]) < 0.20: return True
+        if self._stuck_counter >= STUCK_MAX_STEPS: return True
+        if self._contact_monitor.robot_hit_muerte: return True
+        if self._contact_monitor.arm_hit_fatal: return True
+        if self._path_monitor.completed: return True
         return False
 
     def close(self):
@@ -647,7 +504,7 @@ class AesirPalletsEnv:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Redes neurales (igual que el trainer genérico, sin cambios)
+#  Redes Neurales y PPO
 # ══════════════════════════════════════════════════════════════════════════════
 class ImageEncoder(nn.Module):
     def __init__(self, in_channels: int, h: int, w: int, out_dim: int = 256):
@@ -727,9 +584,6 @@ class ConvActorCritic(nn.Module):
         return logp, value, entropy
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  Rollout buffer
-# ══════════════════════════════════════════════════════════════════════════════
 @dataclass
 class RolloutBuffer:
     capacity:    int
@@ -789,9 +643,6 @@ class RolloutBuffer:
         return adv, ret
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  PPO update
-# ══════════════════════════════════════════════════════════════════════════════
 def ppo_update(policy, optimizer, buf, advantages, returns,
                epochs, batch_size, clip, vf_coef, ent_coef, device):
     images  = torch.as_tensor(buf.images,  dtype=torch.float32, device=device)
@@ -827,7 +678,7 @@ def ppo_update(policy, optimizer, buf, advantages, returns,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  Loop de entrenamiento
+#  Loop de entrenamiento principal
 # ══════════════════════════════════════════════════════════════════════════════
 def obs_to_tensor(obs):
     return {k: torch.from_numpy(v).float() for k, v in obs.items()}
@@ -864,15 +715,21 @@ def train(num_iterations: int  = 600,
           use_wandb:       bool  = True,
           wandb_project:   str   = "AESIR-PPO-PALLETS",
           wandb_run_name:  str   = None,
-          image_log_every: int   = 25):
+          image_log_every: int   = 25,
+          resume_from:     str   = None):
 
-    device = (torch.device("cuda" if torch.cuda.is_available() else "cpu")
-              if device_str == "auto" else torch.device(device_str))
+    device = torch.device(
+        "cuda" if (device_str == "auto" and torch.cuda.is_available())
+        else device_str if device_str != "auto" else "cpu"
+    )
     print(f"Device: {device}")
 
+    # PREVENCIÓN CORE DUMP: Previene bug de concurrencia PyTorch+MuJoCo Viewer
+    _ = torch.optim.Adam([torch.nn.Parameter(torch.empty(1))])
+
     env = AesirPalletsEnv(render=render)
-    print(f"act_len={env.act_len}  image={env.image_shape}  "
-          f"lidar={env.num_lidar}  joints={env.joint_len}")
+    print(f"act_len={env.act_len} (14-Dim) image={env.image_shape} "
+          f"lidar={env.num_lidar} joints={env.joint_len}")
 
     policy = ConvActorCritic(
         image_shape=env.image_shape,
@@ -881,6 +738,17 @@ def train(num_iterations: int  = 600,
         act_dim=env.act_len,
     ).to(device)
     optimizer = torch.optim.Adam(policy.parameters(), lr=lr)
+
+    start_iter = 0
+    best_avg   = -1e9
+
+    if resume_from and os.path.isfile(resume_from):
+        ckpt = torch.load(resume_from, map_location=device)
+        policy.load_state_dict(ckpt["policy"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        start_iter = ckpt.get("iter", 0)
+        best_avg   = ckpt.get("avg_ep_r", -1e9)
+        print(f"Resumiendo desde iter {start_iter}  (best_avg={best_avg:.2f})")
 
     buf = RolloutBuffer(
         capacity=steps_per_iter,
@@ -898,17 +766,17 @@ def train(num_iterations: int  = 600,
             "checkpoints": PATH_CHECKPOINTS,
             "R_PATH_PROGRESS": R_PATH_PROGRESS, "R_CHECKPOINT": R_CHECKPOINT,
             "R_COMPLETION": R_COMPLETION,
+            "act_dim": env.act_len, "differential_drive": True
         })
         wandb.watch(policy, log="gradients", log_freq=100)
 
     obs = env.reset()
     ep_reward, ep_len = 0.0, 0
     ep_history: List[float] = []
-    ep_cps_history: List[int] = []    # checkpoints cruzados por episodio
-    best_avg = -1e9
-
+    ep_cps_history: List[int] = []    
+    
     try:
-        for it in range(num_iterations):
+        for it in range(start_iter, start_iter + num_iterations):
             t0 = time.time()
 
             for _ in range(steps_per_iter):
@@ -929,7 +797,6 @@ def train(num_iterations: int  = 600,
                     ep_reward, ep_len = 0.0, 0
                     obs = env.reset()
 
-            # GAE bootstrap
             obs_t = obs_to_tensor(obs)
             with torch.no_grad():
                 _, _, last_val = policy(
@@ -952,7 +819,7 @@ def train(num_iterations: int  = 600,
 
             if use_wandb:
                 log = {
-                    "iter": it, "global_step": (it+1)*steps_per_iter,
+                    "iter": it, "global_step": (it - start_iter + 1)*steps_per_iter,
                     "avg_ep_reward": avg_r, "avg_cps_crossed": avg_cps,
                     "policy_loss": stats["pi"], "value_loss": stats["v"],
                     "entropy": stats["ent"],
@@ -961,7 +828,7 @@ def train(num_iterations: int  = 600,
                 }
                 if it % image_log_every == 0:
                     log["cameras"] = make_camera_panel(obs["images"], env.camera_names)
-                wandb.log(log, step=(it+1)*steps_per_iter)
+                wandb.log(log, step=(it - start_iter + 1)*steps_per_iter)
 
             if (it + 1) % save_every == 0:
                 p = CHECKPOINT_DIR / f"pallets_iter{it+1:05d}.pt"
@@ -983,4 +850,5 @@ def train(num_iterations: int  = 600,
 
 
 if __name__ == "__main__":
+    # Recuerda: render=True para ver la ventana, render=False para entrenar rápido
     train(render=True)
