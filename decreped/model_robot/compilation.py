@@ -1,13 +1,16 @@
 import mujoco
 import mujoco.viewer  # Importante: Importar el visor gráfico
 
+from path_utils import get_urdf_path, get_meshes_dir
+
 # 1. Leer el archivo URDF como texto
-with open('aesir_puro.urdf', 'r') as f:
+urdf_path = get_urdf_path()
+with open(urdf_path, 'r') as f:
     urdf_string = f.read()
 
-# Reemplaza esto con tu ruta real (lo que ya habías hecho)
-ruta_absoluta_meshes = "/home/kfcnef/AESIR/arm/workspace/src/aesir_robot_description/meshes/"
-urdf_string = urdf_string.replace('package://aesir_robot_description/meshes/', ruta_absoluta_meshes)
+# Reemplaza los paths de meshes con rutas correctas
+meshes_dir = get_meshes_dir()
+urdf_string = urdf_string.replace('package://aesir_robot_description/meshes/', str(meshes_dir) + '/')
 
 # 2. Compilar el modelo
 modelo = mujoco.MjModel.from_xml_string(urdf_string)

@@ -1,6 +1,6 @@
-<mujoco model="aesir_complete">
+<mujoco model="aesir_puerta">
 
-  <compiler angle="radian" autolimits="true" meshdir="../../../../model_robot/"/>
+  <compiler angle="radian" autolimits="true" meshdir=""/>
   <option timestep="0.002" iterations="50" tolerance="1e-10" cone="elliptic"/>
   <size njmax="1000" nconmax="500" nstack="2000000"/>
 
@@ -11,7 +11,7 @@
     <map znear="0.01" zfar="50"/>
   </visual>
 
-  <include file="../../../../model_robot/aesir_mujoco_robot_only.xml"/>
-  <include file="../worlds/mapa_completo.xml"/>
+  <include file="aesir_mujoco_robot.xml"/>
+  <include file="solo_puerta.xml"/>
 
 </mujoco>

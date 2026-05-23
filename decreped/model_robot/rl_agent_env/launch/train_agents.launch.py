@@ -16,6 +16,7 @@ Run:
     ros2 launch rl_agent_env train_agents.launch.py mujoco_scene:=/abs/path/to/scene.xml
 """
 import os
+from pathlib import Path
 import xacro
 import yaml
 
@@ -37,6 +38,7 @@ def _static_paths():
     """Return a dict of absolute paths resolved at parse time."""
     moveit_pkg = get_package_share_directory("robot_moveit_config")
     desc_pkg   = get_package_share_directory("aesir_robot_description")
+    repo_root = Path(__file__).resolve().parents[4]
     return {
         "urdf_xacro":   os.path.join(moveit_pkg, "config", "rescue_robot.urdf.xacro"),
         "srdf":         os.path.join(moveit_pkg, "config", "rescue_robot.srdf"),
@@ -44,7 +46,7 @@ def _static_paths():
         "joint_limits": os.path.join(moveit_pkg, "config", "joint_limits.yaml"),
         "servo":        os.path.join(moveit_pkg, "config", "servo_params.yaml"),
         "controllers":  os.path.join(moveit_pkg, "config", "ros2_controllers.yaml"),
-        "default_scene": os.path.join(desc_pkg,  "launch", "aesir_complete.xml"),
+        "default_scene": str(repo_root / "workspace" / "src" / "aesir_robot_description" / "launch" / "aesir_complete.xml"),
     }
 
 

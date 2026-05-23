@@ -1,9 +1,11 @@
 import mujoco
 import mujoco.viewer
 
+from path_utils import get_xml_model_path
+
 # 1. Cargar el modelo directamente desde el archivo XML (.xml o .mjb)
-# Cambia 'aesir_mujoco.xml' por la ruta de tu archivo si está en otra carpeta
-modelo = mujoco.MjModel.from_xml_path('aesir_mujoco.xml')
+xml_path = get_xml_model_path()
+modelo = mujoco.MjModel.from_xml_path(str(xml_path))
 
 # 2. Crear la estructura de datos de la simulación
 data = mujoco.MjData(modelo)

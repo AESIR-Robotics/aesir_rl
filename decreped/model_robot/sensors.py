@@ -4,8 +4,10 @@ import cv2
 import numpy as np
 import time
 
+from path_utils import get_xml_model_path
+
 # 1. Cargar el modelo
-model = mujoco.MjModel.from_xml_path("aesir_mujoco.xml")
+model = mujoco.MjModel.from_xml_path(str(get_xml_model_path()))
 data = mujoco.MjData(model)
 
 # 2. Crear el Renderizador para las cámaras

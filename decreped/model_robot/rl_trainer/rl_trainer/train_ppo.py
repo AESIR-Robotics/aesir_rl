@@ -17,13 +17,8 @@ Actions (continuous, 26 dims, normalized to [-1, 1] and rescaled to ctrlrange):
 `vel_lidar_spin` is *not* part of the action; the env keeps it at a constant
 speed so the policy doesn't have to learn to spin the lidar itself.
 
-Checkpoints (policy + optimizer + iter + avg reward) are saved to
-./checkpoints/ every `save_every` iterations, plus a `ppo_conv_best.pt`
-that tracks the best running average episode reward.
-
 Usage:
-    cd /home/<user>/aesir_rl/model_robot
-    MUJOCO_GL=egl python3 ppo_conv_train.py
+    MUJOCO_GL=egl python3 train_ppo.py
 """
 from __future__ import annotations
 
@@ -48,15 +43,17 @@ try:
 except ImportError:
     _HAS_WANDB = False
 
+# [!] Importaciones del nuevo sistema
+from rl_trainer.path_utils import get_xml_path, get_checkpoint_dir
 
 # ──────────────────────────── Config (edit me) ─────────────────────────────
-XML_PATH = "../workspace/src/aesir_robot_description/launch/aesir_complete.xml"
+XML_PATH = str(get_xml_path())
 
 CAMERA_NAMES      = ["cam_gripper", "cam_oakd", "cam_back"]
-CAMERA_H, CAMERA_W = 84, 84               # downscaled images for the CNN
+CAMERA_H, CAMERA_W = 84, 84               
 NUM_LIDAR_RAYS    = 7
-LIDAR_MAX_RANGE   = 15.0                  # used for normalization
-LIDAR_SPIN_VEL    = 20.0                  # rad/s, held constant by the env
+LIDAR_MAX_RANGE   = 15.0                  
+LIDAR_SPIN_VEL    = 20.0                  
 
 ACTUATOR_NAMES = [
     "vel_drive_l_1", "vel_drive_l_2", "vel_drive_l_3",
@@ -71,11 +68,10 @@ ACTUATOR_NAMES = [
     "vel_flip4_back", "vel_flip4_front",
 ]
 
-CONTROL_DECIMATION = 10                   # physics steps per env.step()
-EPISODE_MAX_STEPS  = 1000                 # env steps per episode
+CONTROL_DECIMATION = 10                   
+EPISODE_MAX_STEPS  = 1000                 
 
-CHECKPOINT_DIR = Path("./checkpoints")
-CHECKPOINT_DIR.mkdir(exist_ok=True)
+CHECKPOINT_DIR = get_checkpoint_dir()
 
 
 # ──────────────────────────────── Env ──────────────────────────────────────
@@ -107,7 +103,7 @@ class AesirMuJoCoEnv:
         self.control_decimation = control_decimation
         self.max_steps    = max_steps
 
-        # ── actuator indices and ctrl ranges ───────────────────────────────
+        # ── actuator indices and ctrl ranges 
         self.act_ids = np.array([
             mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, n)
             for n in ACTUATOR_NAMES
@@ -120,7 +116,7 @@ class AesirMuJoCoEnv:
         self.act_high  = self.ctrlrange[:, 1]
         self.act_len   = len(self.act_ids)
 
-        # ── joints driven by these actuators (for qpos / qvel) ─────────────
+        # ── joints driven by these actuators 
         self.joint_ids = np.array([
             self.model.actuator_trnid[i, 0] for i in self.act_ids
         ], dtype=np.int32)
@@ -132,12 +128,10 @@ class AesirMuJoCoEnv:
         )
         self.joint_len = 2 * self.act_len   
 
-        # ── lidar spin (held constant) ─────────────────────────────────────
         self.lidar_spin_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "vel_lidar_spin"
         )
 
-        # ── lidar sensors ──────────────────────────────────────────────────
         self.lidar_sensor_adr = []
         for i in range(self.num_lidar):
             sid = mujoco.mj_name2id(
@@ -167,7 +161,7 @@ class AesirMuJoCoEnv:
             self.viewer.cam.distance  = 4.0
             self.viewer.cam.elevation = -20
 
-        # ── Inicialización de Estado y Colisiones ──────────────────────────
+        # ── Inicialización de Estado y Colisiones 
         self.piezas_robot = {
             "base_link", "tracked_1", "tracked_2", 
             "flipper_1_1", "flipper_2_1", "flipper_3_1", "flipper_4_1"
@@ -180,7 +174,7 @@ class AesirMuJoCoEnv:
         self.nombres_pallets = [f"fatal_pallet {i}" for i in range(1, 19)]
         self._reset_estado_misiones()
 
-    # ── helpers ────────────────────────────────────────────────────────────
+    # ── helpers 
     def _read_cameras(self) -> np.ndarray:
         frames = []
         for cam in self.camera_names:
@@ -259,23 +253,20 @@ class AesirMuJoCoEnv:
                 
         return objetos_tocados
 
-    # ── public API ─────────────────────────────────────────────────────────
+    # ── public API 
     def reset(self) -> Dict[str, np.ndarray]:
         mujoco.mj_resetData(self.model, self.data)
         
         # ======== SPAWN POINT MANUAL ========
-        # Ajusta estas coordenadas (X, Y, Z) para cambiar dónde inicia el robot.
         self.data.qpos[0] = -1.5    # X pos 
-        self.data.qpos[1] = 3.5   # Y pos 
-        self.data.qpos[2] = 0.2    # Z pos (Un poco arriba para que caiga)
-        # ====================================
+        self.data.qpos[1] = 3.5     # Y pos 
+        self.data.qpos[2] = 0.2     # Z pos 
 
         # ======== INICIALIZACIÓN DEL BRAZO EN REPOSO ========
-        # Modifica estos radianes para encontrar el pliegue perfecto del brazo
         angulos_reposo = {
             "joint_1": -0.314,
-            "joint_2": -3.14,  # -90 grados (hacia atrás)
-            "joint_3": 3.14,   # +90 grados (plegado hacia la base)
+            "joint_2": -3.14,  
+            "joint_3": 3.14,   
             "joint_4": -1.35,
             "joint_5": -1.54,
             "joint_6": 1.54
@@ -332,13 +323,12 @@ class AesirMuJoCoEnv:
             if pallet in objetos_tocados and not self.pallets_visitados[pallet]:
                 self.pallets_visitados[pallet] = True
                 
-                # Checkeamos contra el pallet final
                 if pallet == "fatal_pallet 18":
-                    step_reward += 500.0   # <-- GRAN PREMIO FINAL
+                    step_reward += 500.0   
                     for p in self.nombres_pallets:
                         self.pallets_visitados[p] = False
                 else:
-                    step_reward += 50.0    # <-- INCENTIVO CONSTANTE FUERTE
+                    step_reward += 50.0    
 
         # Side Quest: Puerta
         handle_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, "handle_hinge")
@@ -382,7 +372,6 @@ class AesirMuJoCoEnv:
         action_cost = 1e-3 * float(np.square(self.data.ctrl[self.act_ids]).mean())
         alive_bonus = 0.01
         
-        # AUMENTADO: de 5.0 a 10.0 para motivar el avance agresivo en X
         return (10.0 * dx) + alive_bonus - obstacle_penalty - action_cost - penalizacion_inactividad
 
     def _terminated(self) -> bool:
@@ -418,8 +407,6 @@ class AesirMuJoCoEnv:
 
 # ──────────────────────────────── Network ──────────────────────────────────
 class ImageEncoder(nn.Module):
-    """Nature-CNN-style encoder for stacked RGB cameras (9 channels)."""
-
     def __init__(self, in_channels: int, h: int, w: int, out_dim: int = 256):
         super().__init__()
         self.conv = nn.Sequential(
@@ -440,8 +427,6 @@ class ImageEncoder(nn.Module):
 
 
 class StateEncoder(nn.Module):
-    """MLP for the (lidar || joint_states) vector."""
-
     def __init__(self, in_dim: int, out_dim: int = 128):
         super().__init__()
         self.net = nn.Sequential(
@@ -455,8 +440,6 @@ class StateEncoder(nn.Module):
 
 
 class ConvActorCritic(nn.Module):
-    """Multi-modal actor-critic. Diagonal Gaussian with learnable log-std."""
-
     def __init__(self,
                  image_shape: Tuple[int, int, int],
                  lidar_dim:   int,
@@ -488,7 +471,7 @@ class ConvActorCritic(nn.Module):
 
     def forward(self, images, lidar, joints):
         z       = self._fuse(images, lidar, joints)
-        mu      = torch.tanh(self.actor_mu(z))                # mean in [-1,1]
+        mu      = torch.tanh(self.actor_mu(z))                
         value   = self.critic(z)
         log_std = torch.clamp(self.log_std, -5.0, 1.0)
         std     = log_std.exp().expand_as(mu)
@@ -504,7 +487,7 @@ class ConvActorCritic(nn.Module):
         raw  = dist.sample()
         logp = dist.log_prob(raw).sum(dim=-1)
         return (
-            raw.squeeze(0).cpu().numpy(),     # env clips & scales
+            raw.squeeze(0).cpu().numpy(),     
             float(logp.item()),
             float(value.item()),
         )
@@ -634,12 +617,11 @@ def save_checkpoint(path: Path, policy, optimizer, iter_idx: int, avg_ep_r: floa
 
 
 def make_camera_panel(obs_images: np.ndarray, camera_names: List[str]):
-    """Build a wandb.Image laying the N cameras side-by-side."""
     n = len(camera_names)
     h, w = obs_images.shape[1], obs_images.shape[2]
     panel = np.zeros((h, w * n, 3), dtype=np.uint8)
     for k in range(n):
-        cam = obs_images[k * 3:(k + 1) * 3]                    # (3, H, W)
+        cam = obs_images[k * 3:(k + 1) * 3]                    
         cam = (cam.transpose(1, 2, 0) * 255).clip(0, 255).astype(np.uint8)
         panel[:, k * w:(k + 1) * w, :] = cam
     return wandb.Image(panel, caption=" | ".join(camera_names))
@@ -669,8 +651,7 @@ def train(num_iterations: int = 500,
         device = torch.device(device_str)
     print(f"Using device: {device}")
 
-    # PREVENCIÓN CORE DUMP: PyTorch y el viewer de MuJoCo tienen un bug de concurrencia al inicializar Triton/Dynamo
-    # Forzamos la inicialización de torch.optim (y debajo Triton) *antes* de instanciar MuJoCo
+    # [!] PREVENCIÓN DE ERROR DE PYTORCH: Esto evita que el entorno choque al crear el viewer
     _ = torch.optim.Adam([torch.nn.Parameter(torch.empty(1))])
 
     env = AesirMuJoCoEnv(render=render)
@@ -695,7 +676,6 @@ def train(num_iterations: int = 500,
         act_dim=env.act_len,
     )
 
-    # ── wandb init ─────────────────────────────────────────────────────────
     use_wandb = use_wandb and _HAS_WANDB
     if use_wandb:
         wandb.init(
@@ -745,7 +725,6 @@ def train(num_iterations: int = 500,
                     ep_reward, ep_len = 0.0, 0
                     obs = env.reset()
 
-            # bootstrap value for GAE on the last (possibly mid-episode) obs
             obs_t = obs_to_tensor(obs)
             with torch.no_grad():
                 _, _, last_value = policy(
@@ -771,7 +750,6 @@ def train(num_iterations: int = 500,
                   f"ent={metrics['ent']:.3f}  "
                   f"({dt:.1f}s)")
 
-            # ── wandb scalar + image logging ───────────────────────────────
             if use_wandb:
                 log_dict = {
                     "iter":         it,
@@ -790,7 +768,6 @@ def train(num_iterations: int = 500,
                     )
                 wandb.log(log_dict, step=(it + 1) * steps_per_iter)
 
-            # ── checkpointing ──────────────────────────────────────────────
             if (it + 1) % save_every == 0:
                 ckpt_path = CHECKPOINT_DIR / f"ppo_conv_iter{it+1:05d}.pt"
                 save_checkpoint(ckpt_path, policy, optimizer, it + 1, avg_ep_r)

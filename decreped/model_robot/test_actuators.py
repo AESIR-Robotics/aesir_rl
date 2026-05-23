@@ -4,7 +4,7 @@ Carga el modelo completo (robot + mapa) y aplica movimientos de prueba
 a cada grupo de actuadores en secuencia mientras el viewer está abierto.
 
 Uso:
-    cd /home/<user>/aesir_rl/model_robot
+    cd ./model_robot
     MUJOCO_GL=egl python3 test_actuators.py
 """
 
@@ -12,7 +12,9 @@ import numpy as np
 import mujoco
 import mujoco.viewer
 
-XML_PATH = "../workspace/src/aesir_robot_description/launch/aesir_complete.xml"
+from path_utils import get_xml_path
+
+XML_PATH = str(get_xml_path())
 
 # ── duración de cada prueba (segundos de sim-time) ──────────────────────────
 PHASE_DURATION = 3.0   # segundos por fase

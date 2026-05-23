@@ -22,7 +22,7 @@ Checkpoints (policy + optimizer + iter + avg reward) are saved to
 that tracks the best running average episode reward.
 
 Usage:
-    cd /home/<user>/aesir_rl/model_robot
+    cd ./model_robot
     MUJOCO_GL=egl python3 ppo_conv_train.py
 """
 from __future__ import annotations
@@ -48,9 +48,11 @@ try:
 except ImportError:
     _HAS_WANDB = False
 
+from path_utils import get_xml_path, get_checkpoint_dir
+
 
 # ──────────────────────────── Config (edit me) ─────────────────────────────
-XML_PATH = "../workspace/src/aesir_robot_description/launch/aesir_complete.xml"
+XML_PATH = str(get_xml_path())
 
 CAMERA_NAMES      = ["cam_gripper", "cam_oakd", "cam_back"]
 CAMERA_H, CAMERA_W = 84, 84               # downscaled images for the CNN
@@ -74,8 +76,7 @@ ACTUATOR_NAMES = [
 CONTROL_DECIMATION = 10                   # physics steps per env.step()
 EPISODE_MAX_STEPS  = 1000                 # env steps per episode
 
-CHECKPOINT_DIR = Path("./checkpoints")
-CHECKPOINT_DIR.mkdir(exist_ok=True)
+CHECKPOINT_DIR = get_checkpoint_dir()
 
 
 # ──────────────────────────────── Env ──────────────────────────────────────
@@ -269,16 +270,16 @@ class AesirMuJoCoEnv:
         self.data.qpos[1] = 3.5   # Y pos 
         self.data.qpos[2] = 0.2    # Z pos (Un poco arriba para que caiga)
         # ====================================
-        
+
         # ======== INICIALIZACIÓN DEL BRAZO EN REPOSO ========
         # Modifica estos radianes para encontrar el pliegue perfecto del brazo
         angulos_reposo = {
             "joint_1": -0.314,
             "joint_2": -3.14,  # -90 grados (hacia atrás)
             "joint_3": 3.14,   # +90 grados (plegado hacia la base)
-            "joint_4": 0.0,
-            "joint_5": 0.0,
-            "joint_6": 0.0
+            "joint_4": -1.35,
+            "joint_5": -1.54,
+            "joint_6": 1.54
         }
         
         for nombre_joint, angulo in angulos_reposo.items():

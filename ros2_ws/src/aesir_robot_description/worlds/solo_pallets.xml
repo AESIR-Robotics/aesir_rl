@@ -1,38 +1,47 @@
-<mujoco model="aesir_solo_pallets">
-
-  <compiler angle="radian" autolimits="true" meshdir="../../../../model_robot/meshes"/>
-  <option timestep="0.002" iterations="50" tolerance="1e-10"
-          solver="Newton" integrator="implicitfast"
-          cone="elliptic" impratio="10"/>
-
-  <visual>
-    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
-    <rgba haze="0.15 0.25 0.35 1"/>
-    <global azimuth="120" elevation="-20"/>
-    <map znear="0.01" zfar="50"/>
-  </visual>
+<mujoco model="aesir_mapa_pallets">
 
   <asset>
-    <mesh name="pallets_mesh" file="pallets/base_link.stl" scale="0.001 0.001 0.001"/>
+    <texture name="texplane" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512"/>
+    <material name="matplane" reflectance="0.3" texture="texplane" texrepeat="4 4" texuniform="true"/>
 
-    <texture name="texplane" type="2d" builtin="checker"
-             rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512"/>
-    <material name="matplane" reflectance="0.3" texture="texplane"
-              texrepeat="4 4" texuniform="true"/>
+    <mesh name="pallets_mesh" file="/home/aesir/aesir_rl/models/meshes/pallets/base_link.stl" scale="0.001 0.001 0.001"/>
   </asset>
 
   <worldbody>
-    <light directional="true" diffuse=".8 .8 .8" specular=".2 .2 .2"
-           pos="0 0 5" dir="0 0 -1"/>
-    <light directional="false" pos="3.5 0 3" dir="-1 0 -1" diffuse="0.4 0.4 0.4"/>
-    <geom name="floor" type="plane" size="12 12 0.1" pos="0 0 0" material="matplane"/>
-
-    <camera name="cam_overview" pos="3.5 0 7" euler="0 0 -1.5707" fovy="65" mode="fixed"/>
-
+    <light directional="true" pos="0 0 5" dir="0 0 -1"/>
+    
+    <geom name="muerte_suelo_penalizacion" type="plane" size="50 50 0.1" pos="0 0 0" material="matplane"/>
+        
     <body name="pallets_mesh_body" pos="3 -3.49 0">
-      <geom name="pallets_visual" type="mesh" mesh="pallets_mesh"
-            contype="0" conaffinity="0" rgba="0.55 0.38 0.18 1"/>
-    </body>
-  </worldbody>
+      <geom name="pallets_visual" type="mesh" mesh="pallets_mesh" contype="0" conaffinity="0" rgba="0.55 0.38 0.18 1"/>
+      <geom name= "fatal_pallet 1" type="box" size=".55 0.6 .12" pos="0 .9 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 2" type="box" size=".55 0.6 .12" pos="-.3 2.1 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 3" type="box" size=".5 0.6 .12" pos="-.6 3.28 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 4" type="box" size=".55 0.6 .12" pos="-1.65 3.28 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 5" type="box" size=".55 0.6 .12" pos="-2 4.48 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 6" type="box" size=".55 0.6 .12" pos="-3.1 4.8 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 7" type="box" size=".55 0.6 .12" pos="-3.4 5.97 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 8" type="box" size=".55 0.6 .12" pos="-4.5 5.97 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 9" type="box" size=".55 0.6 .12" pos="-4.78 7.2 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 10" type="box" size=".55 0.6 .12" pos="-3.7 7.2 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 11" type="box" size=".55 0.6 .12" pos="4.8 4.5 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 12" type="box" size=".55 0.6 .12" pos="3.7 4.5 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 13" type="box" size=".55 0.6 .12" pos="3.4 3.3 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 14" type="box" size=".55 0.6 .12" pos="2.3 3.3 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 15" type="box" size=".55 0.6 .12" pos="2.0 2.1 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 16" type="box" size=".55 0.6 .12" pos="1.7 .9 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 17" type="box" size=".55 0.6 .12" pos="1.4 -.3 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_pallet 18" type="box" size=".55 0.6 .12" pos=".3 -.3 0" rgba="1 0 0 0.5"/>
 
+
+      <geom name= "fatal_stick 1" type="box" size=".024 0.05 .45" pos=".572 .33 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_stick 2" type="box" size=".024 0.05 .45" pos="1.127 .33 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_stick 3" type="box" size=".024 0.05 .45" pos="-.276 .228 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_stick 4" type="box" size=".024 0.05 .45" pos="-.024 2.724 0" rgba="1 0 0 0.5"/>
+      <geom name= "fatal_stick 5" type="box" size=".024 0.05 .45" pos="-.9 2.8 0" rgba="1 0 0 0.5"/>
+
+
+    </body>
+
+  </worldbody>
 </mujoco>

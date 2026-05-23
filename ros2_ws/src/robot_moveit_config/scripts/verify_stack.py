@@ -36,7 +36,7 @@ PREREQUISITE (run in separate terminal BEFORE this script):
     ros2 launch robot_moveit_config bringup.launch.py
 
 Usage:
-    cd /home/<user>/aesir_rl/workspace
+    cd ./workspace
     source install/setup.bash
 
     # Full verification (all 3 modules)
