@@ -12,7 +12,7 @@ class LoopbackSimulator(Node):
         super().__init__('hardware_loopback_node')
         
         # Publisher: Send the "fake" physical encoder data back to the C++ plugin
-        self.feedback_pub = self.create_publisher(JointState, '/hardware_feedback', 10)
+        self.feedback_pub = self.create_publisher(JointState, '/hardware_node/joint_states', 10)
         
         # Subscriber: Listen to the commands your C++ plugin is sending out
         self.command_sub = self.create_subscription(
@@ -21,7 +21,7 @@ class LoopbackSimulator(Node):
             self.command_callback,
             10
         )
-        self.get_logger().info('Loopback active: Mirroring /commands_hardware -> /hardware_feedback')
+        self.get_logger().info('Loopback active: Mirroring /commands_hardware -> /hardware_node/joint_states')
 
     def command_callback(self, cmd_msg):
         # Create a standard ROS 2 JointState message
