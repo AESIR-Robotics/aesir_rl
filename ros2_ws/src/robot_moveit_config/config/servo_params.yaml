@@ -28,5 +28,12 @@
 
       low_pass_filter_coeff: 2.0
       
-      check_collisions: true
+      check_collisions: false
       collision_check_rate: 10.0
+
+      self_collision_proximity_threshold: 0.001
+      scene_collision_proximity_threshold: 0.002
+
+      lower_singularity_threshold: 80.0
+      hard_stop_singularity_threshold: 100.0
+      leaving_singularity_threshold_multiplier: 2.0

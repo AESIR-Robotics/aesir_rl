@@ -64,7 +64,7 @@ Los checkpoints se guardan automáticamente en `model_robot/checkpoints/`.
 
 ---
 
-## Opción B — Entrenar solo la base (más rápido, sin cámaras)
+## Opción B — Entrenar solo la base
 
 Red MLP simple, solo lidar + estado. Converge mucho antes que con cámaras.
 Útil para preentrenar la navegación antes de añadir el brazo.

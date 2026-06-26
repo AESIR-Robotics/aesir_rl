@@ -196,12 +196,12 @@
     <position name="pos_flipper_3" joint="flipper_joint_3" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
     <position name="pos_flipper_4" joint="flipper_joint_4" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
 
-    <position name="pos_joint_1" joint="joint_1" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
-    <position name="pos_joint_2" joint="joint_2" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
-    <position name="pos_joint_3" joint="joint_3" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
-    <position name="pos_joint_4" joint="joint_4" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
-    <position name="pos_joint_5" joint="joint_5" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
-    <position name="pos_joint_6" joint="joint_6" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
+    <position name="pos_joint_1" joint="joint_1" kp="400" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
+    <position name="pos_joint_2" joint="joint_2" kp="400" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
+    <position name="pos_joint_3" joint="joint_3" kp="400" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
+    <position name="pos_joint_4" joint="joint_4" kp="400" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
+    <position name="pos_joint_5" joint="joint_5" kp="400" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
+    <position name="pos_joint_6" joint="joint_6" kp="400" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
 
     <position name="pos_left_finger" joint="left_finger_joint" kp="50" ctrllimited="true" ctrlrange="0 0.03" />
     <position name="pos_right_finger" joint="right_finger_joint" kp="50" ctrllimited="true" ctrlrange="0 0.03" />

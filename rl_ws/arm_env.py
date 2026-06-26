@@ -7,18 +7,28 @@ Observaciones — mismo formato dict que los demás envs:
   joint_states: qpos+qvel del brazo + dedos → (16,)
 
 Acciones (8 valores en [-1, 1]):
-  [0..5]  velocidades articulares joint_1..6  (integradas a posición)
+  [0..2]  velocidad lineal del end-effector (vx, vy, vz), en el frame arm_base_link
+  [3..5]  velocidad angular del end-effector (wx, wy, wz), en el frame arm_base_link
   [6]     dedo izquierdo
   [7]     dedo derecho
 
-La base permanece quieta. El integrador de velocidad es equivalente
-a MoveIt Servo en deployment real.
+La acción es un twist cartesiano del end-effector, no velocidad articular: se
+convierte a velocidad articular vía Jacobiano + pseudo-inversa amortiguada
+(damped least squares) en cartesian_twist_to_joint_vel(), exactamente el mismo
+cálculo que hace MoveIt Servo en deployment real (ver ros_bridge.py /
+send_arm_cartesian_vel). La base permanece quieta en este env.
+
+MAX_LINEAR_VEL / MAX_ANGULAR_VEL deben coincidir con scale.linear /
+scale.rotational en servo_params.yaml (ambos 1.0 por defecto), para que una
+acción a=1.0 produzca la misma velocidad cartesiana en sim y en deployment.
 """
 from __future__ import annotations
 
+import time
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
 import mujoco
-from typing import Dict, List, Optional, Tuple
 
 # ──────────────────────────── Constantes ───────────────────────────────────
 CAMERA_NAMES        = ["cam_gripper", "cam_oakd", "cam_back"]
@@ -36,8 +46,10 @@ LIDAR_SPIN  = "vel_lidar_spin"
 # Actuadores observados en joint_states (brazo + dedos)
 OBS_ACTUATORS = ARM_JOINTS + [FINGER_L, FINGER_R]
 
-MAX_JOINT_VEL = 1.0      # rad/s por articulación
-JOINT_RANGE   = 3.1416
+MAX_LINEAR_VEL  = 1.0   # m/s   — debe igualar scale.linear en servo_params.yaml
+MAX_ANGULAR_VEL = 1.0   # rad/s — debe igualar scale.rotational en servo_params.yaml
+DLS_DAMPING     = 0.05  # damping de la pseudo-inversa cerca de singularidades
+JOINT_RANGE     = 3.1416
 
 REST_ANGLES = {
     "joint_1": -0.314, "joint_2": -3.14, "joint_3": 3.14,
@@ -48,6 +60,30 @@ CONTROL_DECIMATION  = 10
 EPISODE_MAX_STEPS   = 500
 
 
+# ──────────────────────────── IK cartesiana compartida ─────────────────────
+def cartesian_twist_to_joint_vel(model, data, ee_id: int, arm_dof_adr,
+                                  base_id: int, twist_base: np.ndarray,
+                                  damping: float = DLS_DAMPING) -> np.ndarray:
+    """
+    Convierte un twist cartesiano del end-effector (expresado en el frame de
+    base_id) a velocidades articulares del brazo, vía Jacobiano + pseudo-inversa
+    amortiguada (damped least squares). Mismo cálculo que hace MoveIt Servo.
+
+    Usado por ArmMuJoCoEnv y por combined_env.py — para no duplicar la IK.
+    """
+    jacp = np.zeros((3, model.nv))
+    jacr = np.zeros((3, model.nv))
+    mujoco.mj_jacBody(model, data, jacp, jacr, ee_id)
+    J = np.vstack([jacp[:, arm_dof_adr], jacr[:, arm_dof_adr]])
+
+    # frame de base_id -> world (si base_id no se mueve durante el step, da igual)
+    R = data.xmat[base_id].reshape(3, 3)
+    twist_world = np.concatenate([R @ twist_base[:3], R @ twist_base[3:]])
+
+    J_pinv = J.T @ np.linalg.inv(J @ J.T + (damping ** 2) * np.eye(6))
+    return J_pinv @ twist_world
+
+
 class ArmMuJoCoEnv:
     """
     Env para Modelo A.
@@ -56,7 +92,7 @@ class ArmMuJoCoEnv:
     — mismo formato que BaseMuJoCoEnv y AesirMuJoCoEnv.
 
     Acción: (8,) en [-1,1]
-      [0..5] vel articular joint_1..6  [6] dedo izq  [7] dedo der
+      [0..2] vel. lineal EE  [3..5] vel. angular EE  [6] dedo izq  [7] dedo der
     """
 
     def __init__(self,
@@ -103,6 +139,10 @@ class ArmMuJoCoEnv:
         self._qpos_adr    = np.array([self.model.jnt_qposadr[j] for j in _jnt_ids], dtype=np.int32)
         self._qvel_adr    = np.array([self.model.jnt_dofadr[j]  for j in _jnt_ids], dtype=np.int32)
 
+        # Direcciones de qvel de las 6 articulaciones del brazo (mismo orden que ARM_JOINTS),
+        # usadas para extraer las columnas del Jacobiano correspondientes al brazo.
+        self._arm_dof_adr = self._qvel_adr[:6]
+
         # ── end-effector body ──────────────────────────────────────────────
         self.ee_id = mujoco.mj_name2id(
             self.model, mujoco.mjtObj.mjOBJ_BODY, "logitech_gripper_assembly"
@@ -122,7 +162,7 @@ class ArmMuJoCoEnv:
         self.joint_shape = (self.joint_len,)
         self.act_len     = 8
 
-        # ── integrador de velocidad del brazo ─────────────────────────────
+        # ── integrador de posición del brazo (resultado de integrar la IK) ──
         self._joint_pos = np.zeros(6, dtype=np.float64)
 
         # goal externo (opcional, para reward)
@@ -142,13 +182,20 @@ class ArmMuJoCoEnv:
             raise ValueError(f"Actuador no encontrado: '{name}'")
         return i
 
-    # ── Integrador de velocidad (≡ MoveIt Servo en sim) ───────────────────
+    # ── Aplicar accion: twist cartesiano -> IK -> integrador (≡ MoveIt Servo) ──
     def _apply_action(self, action: np.ndarray):
-        a     = np.clip(action, -1.0, 1.0)
-        delta = a[:6] * MAX_JOINT_VEL * self._dt
+        a = np.clip(action, -1.0, 1.0)
+
+        twist_base = a[:6] * np.array([MAX_LINEAR_VEL] * 3 + [MAX_ANGULAR_VEL] * 3)
+        qvel_arm = cartesian_twist_to_joint_vel(
+            self.model, self.data, self.ee_id, self._arm_dof_adr, self.base_id, twist_base
+        )
+
+        delta = qvel_arm * self._dt
         self._joint_pos = np.clip(self._joint_pos + delta, -JOINT_RANGE, JOINT_RANGE)
         for k, aid in enumerate(self.ids_arm):
             self.data.ctrl[aid] = self._joint_pos[k]
+
         self.data.ctrl[self.id_fing_l] = float(np.clip((a[6] + 1.0) / 2.0 * 0.03, 0.0, 0.03))
         self.data.ctrl[self.id_fing_r] = float(np.clip((a[7] + 1.0) / 2.0 * 0.03, 0.0, 0.03))
         self.data.ctrl[self.id_lidar_spin] = LIDAR_SPIN_VEL
@@ -258,3 +305,187 @@ class ArmMuJoCoEnv:
             except Exception: pass
         try: self.renderer.close()
         except Exception: pass
+
+
+# ──────────────────────────── Env vía ROS2 real ─────────────────────────────
+# Mismos pesos de reward que ArmMuJoCoEnv._reward (2.0 / 0.01), nombrados aqui
+# para no repetir literales magicos en ArmServoEnv.
+W_GOAL  = 2.0
+W_ALIVE = 0.01
+
+# Mismos joints que ARM_JOINTS/FINGER_L/FINGER_R pero en convencion ROS (sin
+# el prefijo "pos_" de los actuadores MuJoCo) — los nombres que aparecen en
+# /joint_states real.
+ROS_ARM_JOINTS    = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
+ROS_FINGER_JOINTS = ["left_finger_joint", "right_finger_joint"]
+ROS_OBS_JOINTS    = ROS_ARM_JOINTS + ROS_FINGER_JOINTS
+
+SERVO_CONTROL_DT      = 0.1   # segundos reales por step() — no se puede acelerar
+SERVO_EPISODE_MAX_STEPS = 200  # 200*0.1s = 20s reales por episodio
+SERVO_EE_FRAME   = "tool_link"
+SERVO_BASE_FRAME = "arm_base_link"
+
+
+class ArmServoEnv:
+    """
+    Misma interfaz reset()/step()/set_goal() que ArmMuJoCoEnv, mismos pesos de
+    reward y misma semantica de accion (8 valores en [-1,1]: twist cartesiano
+    del EE + 2 dedos) — pero controlando el brazo a traves del stack ROS2 real
+    (MoveIt Servo + ros2_control) en vez de llamar mujoco.mj_step() directo.
+
+    Requiere, en otras terminales, ANTES de instanciar este env:
+        ros2 launch robot_moveit_config bringup_viz.launch.py
+        cd rl_ws && python3 mujoco_ros_bridge.py
+
+    Diferencias obligadas frente a ArmMuJoCoEnv (no son elecciones de diseño,
+    son restricciones del control via ROS2):
+      - step() bloquea SERVO_CONTROL_DT segundos de tiempo REAL por llamada —
+        no hay mj_step() directo que acelerar, el fisico corre en otro proceso.
+      - reset() no puede teletransportar el brazo via Servo (solo velocidad
+        incremental) — usa el servicio /mujoco_ros_bridge/reset_arm, que sí
+        teletransporta el estado fisico dentro de mujoco_ros_bridge.py.
+      - Observacion: solo joint_states (16,) — no existe bridge de
+        camaras/lidar via ROS2, asi que no hay "images"/"lidar" en el dict.
+        Por eso necesita una red mas simple (ver train_arm_servo.py).
+      - Posicion del EE para el reward: via TF (arm_base_link -> tool_link),
+        no via data.xpos directo (no hay acceso directo a MuJoCo aqui).
+    """
+
+    def __init__(self, node_name: str = "arm_servo_env", max_steps: int = SERVO_EPISODE_MAX_STEPS):
+        import rclpy
+        from rclpy.node import Node
+        from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSHistoryPolicy
+        from geometry_msgs.msg import TwistStamped
+        from sensor_msgs.msg import JointState
+        from std_msgs.msg import Float64MultiArray
+        from std_srvs.srv import Trigger
+        import tf2_ros
+
+        self._rclpy = rclpy
+        self._TwistStamped = TwistStamped
+        self._Float64MultiArray = Float64MultiArray
+        self._Trigger = Trigger
+
+        if not rclpy.ok():
+            rclpy.init()
+        self._node = Node(node_name)
+
+        self.max_steps   = max_steps
+        self._step_count = 0
+        self.goal_pos: Optional[np.ndarray] = None
+        self._joint_state = None
+
+        qos = QoSProfile(reliability=QoSReliabilityPolicy.RELIABLE,
+                          history=QoSHistoryPolicy.KEEP_LAST, depth=10)
+        self._pub_twist  = self._node.create_publisher(TwistStamped, "/servo_node/delta_twist_cmds", qos)
+        self._pub_finger = self._node.create_publisher(Float64MultiArray, "/gripper_controller/commands", 10)
+        self._node.create_subscription(JointState, "/joint_states", self._joint_state_cb, 10)
+        self._reset_cli = self._node.create_client(Trigger, "/mujoco_ros_bridge/reset_arm")
+
+        self._tf_buffer   = tf2_ros.Buffer()
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self._node)
+
+        self.joint_len = 2 * len(ROS_OBS_JOINTS)
+        self.act_len   = 8
+
+    # ── ROS plumbing ──────────────────────────────────────────────────────
+    def _joint_state_cb(self, msg) -> None:
+        self._joint_state = msg
+
+    def _spin_for(self, duration_s: float) -> None:
+        t_end = time.monotonic() + duration_s
+        while time.monotonic() < t_end:
+            self._rclpy.spin_once(self._node, timeout_sec=max(0.0, t_end - time.monotonic()))
+
+    def _wait_for_joint_state(self, timeout_s: float = 5.0) -> None:
+        t0 = time.monotonic()
+        while self._joint_state is None:
+            self._rclpy.spin_once(self._node, timeout_sec=0.1)
+            if time.monotonic() - t0 > timeout_s:
+                raise RuntimeError(
+                    "No llego /joint_states — verifica que bringup_viz.launch.py "
+                    "y mujoco_ros_bridge.py esten corriendo."
+                )
+
+    def _ee_position(self) -> Optional[np.ndarray]:
+        try:
+            tf = self._tf_buffer.lookup_transform(
+                SERVO_BASE_FRAME, SERVO_EE_FRAME, self._rclpy.time.Time()
+            )
+            t = tf.transform.translation
+            return np.array([t.x, t.y, t.z], dtype=np.float64)
+        except Exception:
+            return None
+
+    # ── Observacion ───────────────────────────────────────────────────────
+    def _read_joint_state(self) -> np.ndarray:
+        msg = self._joint_state
+        name_to_idx = {n: i for i, n in enumerate(msg.name)}
+        qpos = np.zeros(len(ROS_OBS_JOINTS), dtype=np.float32)
+        qvel = np.zeros(len(ROS_OBS_JOINTS), dtype=np.float32)
+        for k, name in enumerate(ROS_OBS_JOINTS):
+            idx = name_to_idx.get(name)
+            if idx is not None:
+                if idx < len(msg.position): qpos[k] = msg.position[idx]
+                if idx < len(msg.velocity): qvel[k] = msg.velocity[idx]
+        return np.concatenate([qpos, qvel])
+
+    def _observation(self) -> Dict[str, np.ndarray]:
+        return {"joint_states": self._read_joint_state()}
+
+    # ── Reward — misma formula que ArmMuJoCoEnv._reward ────────────────────
+    def _reward(self, action: np.ndarray) -> float:
+        ee = self._ee_position()
+        if self.goal_pos is not None and ee is not None:
+            dist = float(np.linalg.norm(ee - self.goal_pos))
+            rew = -W_GOAL * dist + W_ALIVE
+        else:
+            rew = W_ALIVE
+        action_cost = 1e-3 * float(np.square(action).mean())
+        return rew - action_cost
+
+    # ── API publica — misma firma que ArmMuJoCoEnv ─────────────────────────
+    def reset(self) -> Dict[str, np.ndarray]:
+        while not self._reset_cli.wait_for_service(timeout_sec=1.0):
+            self._node.get_logger().info("Esperando /mujoco_ros_bridge/reset_arm...")
+        future = self._reset_cli.call_async(self._Trigger.Request())
+        self._rclpy.spin_until_future_complete(self._node, future, timeout_sec=5.0)
+
+        self._joint_state = None
+        self._wait_for_joint_state()
+        self._step_count = 0
+        return self._observation()
+
+    def step(self, action: np.ndarray):
+        a = np.clip(action, -1.0, 1.0)
+
+        twist = self._TwistStamped()
+        twist.header.stamp = self._node.get_clock().now().to_msg()
+        twist.header.frame_id = SERVO_BASE_FRAME
+        twist.twist.linear.x, twist.twist.linear.y, twist.twist.linear.z = (float(v) for v in a[0:3])
+        twist.twist.angular.x, twist.twist.angular.y, twist.twist.angular.z = (float(v) for v in a[3:6])
+        self._pub_twist.publish(twist)
+
+        finger_msg = self._Float64MultiArray()
+        finger_msg.data = [
+            float(np.clip((a[6] + 1.0) / 2.0 * 0.03, 0.0, 0.03)),
+            float(np.clip((a[7] + 1.0) / 2.0 * 0.03, 0.0, 0.03)),
+        ]
+        self._pub_finger.publish(finger_msg)
+
+        self._spin_for(SERVO_CONTROL_DT)
+
+        self._step_count += 1
+        obs  = self._observation()
+        rew  = self._reward(a)
+        done = self._step_count >= self.max_steps
+        return obs, rew, done, {}
+
+    def set_goal(self, goal_xyz: np.ndarray) -> None:
+        self.goal_pos = np.array(goal_xyz, dtype=np.float64)
+
+    def close(self) -> None:
+        twist = self._TwistStamped()
+        twist.header.frame_id = SERVO_BASE_FRAME
+        self._pub_twist.publish(twist)
+        self._node.destroy_node()
