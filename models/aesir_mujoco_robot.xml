@@ -315,6 +315,38 @@
     </body>
   </worldbody>
 
+  <equality>
+    <joint joint1="drive_l_2" joint2="drive_l_1" polycoef="0 2.552 0 0 0"/>
+    <joint joint1="drive_l_3" joint2="drive_l_1" polycoef="0 2.552 0 0 0"/>
+    <joint joint1="drive_l_4" joint2="drive_l_1" polycoef="0 2.552 0 0 0"/>
+    <joint joint1="drive_l_5" joint2="drive_l_1" polycoef="0 2.552 0 0 0"/>
+    <joint joint1="drive_l_6" joint2="drive_l_1" polycoef="0 1.0 0 0 0"/>
+    
+    <joint joint1="drive_flipper3_1" joint2="drive_l_1" polycoef="0 1.763 0 0 0"/>
+    <joint joint1="drive_flipper3_2" joint2="drive_l_1" polycoef="0 1.385 0 0 0"/>
+    <joint joint1="drive_flipper3_3l" joint2="drive_l_1" polycoef="0 2.771 0 0 0"/>
+    <joint joint1="drive_flipper3_3r" joint2="drive_l_1" polycoef="0 2.771 0 0 0"/>
+    <joint joint1="drive_flipper4_1" joint2="drive_l_1" polycoef="0 1.763 0 0 0"/>
+    <joint joint1="drive_flipper4_2" joint2="drive_l_1" polycoef="0 1.385 0 0 0"/>
+    <joint joint1="drive_flipper4_3l" joint2="drive_l_1" polycoef="0 2.771 0 0 0"/>
+    <joint joint1="drive_flipper4_3r" joint2="drive_l_1" polycoef="0 2.771 0 0 0"/>
+
+    <joint joint1="drive_r_2" joint2="drive_r_1" polycoef="0 2.552 0 0 0"/>
+    <joint joint1="drive_r_3" joint2="drive_r_1" polycoef="0 2.552 0 0 0"/>
+    <joint joint1="drive_r_4" joint2="drive_r_1" polycoef="0 2.552 0 0 0"/>
+    <joint joint1="drive_r_5" joint2="drive_r_1" polycoef="0 2.552 0 0 0"/>
+    <joint joint1="drive_r_6" joint2="drive_r_1" polycoef="0 1.0 0 0 0"/>
+    
+    <joint joint1="drive_flipper1_1" joint2="drive_r_1" polycoef="0 1.763 0 0 0"/>
+    <joint joint1="drive_flipper1_2" joint2="drive_r_1" polycoef="0 1.385 0 0 0"/>
+    <joint joint1="drive_flipper1_3l" joint2="drive_r_1" polycoef="0 2.771 0 0 0"/>
+    <joint joint1="drive_flipper1_3r" joint2="drive_r_1" polycoef="0 2.771 0 0 0"/>
+    <joint joint1="drive_flipper2_1" joint2="drive_r_1" polycoef="0 1.763 0 0 0"/>
+    <joint joint1="drive_flipper2_2" joint2="drive_r_1" polycoef="0 1.385 0 0 0"/>
+    <joint joint1="drive_flipper2_3l" joint2="drive_r_1" polycoef="0 2.771 0 0 0"/>
+    <joint joint1="drive_flipper2_3r" joint2="drive_r_1" polycoef="0 2.771 0 0 0"/>
+  </equality>
+
   <actuator>
     <position name="pos_flipper_1" joint="flipper_1_joint" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
     <position name="pos_flipper_2" joint="flipper_2_joint" kp="200" ctrllimited="true" ctrlrange="-3.1416 3.1416" />
@@ -331,28 +363,8 @@
     <position name="pos_left_finger" joint="left_finger_joint" kp="50" ctrllimited="true" ctrlrange="0 0.03" />
     <position name="pos_right_finger" joint="right_finger_joint" kp="50" ctrllimited="true" ctrlrange="0 0.03" />
 
-    <velocity name="vel_drive_l_1" joint="drive_l_1" kv="5" ctrllimited="true" ctrlrange="-6.28318 6.28318"/>
-    <velocity name="vel_drive_l_2" joint="drive_l_2" kv="5" ctrllimited="true" ctrlrange="-6.28318 6.28318"/>
-    <velocity name="vel_drive_l_3" joint="drive_l_3" kv="5" ctrllimited="true" ctrlrange="-6.28318 6.28318"/>
-    <velocity name="vel_drive_l_4" joint="drive_l_4" kv="5" ctrllimited="true" ctrlrange="-6.28318 6.28318"/>
-    <velocity name="vel_drive_l_5" joint="drive_l_5" kv="5" ctrllimited="true" ctrlrange="-6.28318 6.28318"/>
-    <velocity name="vel_drive_l_6" joint="drive_l_6" kv="5" ctrllimited="true" ctrlrange="-6.28318 6.28318"/>
-
-    <velocity name="vel_drive_r_1" joint="drive_r_1" kv="5" ctrllimited="true" ctrlrange="-6.28318 6.28318"/>
-    <velocity name="vel_drive_r_2" joint="drive_r_2" kv="5" ctrllimited="true" ctrlrange="-6.28318 6.28318"/>
-    <velocity name="vel_drive_r_3" joint="drive_r_3" kv="5" ctrllimited="true" ctrlrange="-6.28318 6.28318"/>
-    <velocity name="vel_drive_r_4" joint="drive_r_4" kv="5" ctrllimited="true" ctrlrange="-6.28318 6.28318"/>
-    <velocity name="vel_drive_r_5" joint="drive_r_5" kv="5" ctrllimited="true" ctrlrange="-6.28318 6.28318"/>
-    <velocity name="vel_drive_r_6" joint="drive_r_6" kv="5" ctrllimited="true" ctrlrange="-120 120"/>
-    
-    <velocity name="vel_flipper1_1" joint="drive_flipper1_1" kv="5" ctrllimited="true" ctrlrange="-3.14159 3.14159"/>
-    <velocity name="vel_flipper1_2" joint="drive_flipper1_2" kv="5" ctrllimited="true" ctrlrange="-3.14159 3.14159"/>
-    <velocity name="vel_flipper2_1" joint="drive_flipper2_1" kv="5" ctrllimited="true" ctrlrange="-3.14159 3.14159"/>
-    <velocity name="vel_flipper2_2" joint="drive_flipper2_2" kv="5" ctrllimited="true" ctrlrange="-3.14159 3.14159"/>
-    <velocity name="vel_flipper3_1" joint="drive_flipper3_1" kv="5" ctrllimited="true" ctrlrange="-3.14159 3.14159"/>
-    <velocity name="vel_flipper3_2" joint="drive_flipper3_2" kv="5" ctrllimited="true" ctrlrange="-3.14159 3.14159"/>
-    <velocity name="vel_flipper4_1" joint="drive_flipper4_1" kv="5" ctrllimited="true" ctrlrange="-3.14159 3.14159"/>
-    <velocity name="vel_flipper4_2" joint="drive_flipper4_2" kv="5" ctrllimited="true" ctrlrange="-3.14159 3.14159"/>
+    <velocity name="vel_track_left" joint="drive_l_1" kv="15" ctrllimited="true" ctrlrange="-6.28 6.28" forcelimited="true" forcerange="-120 120"/>
+    <velocity name="vel_track_right" joint="drive_r_1" kv="15" ctrllimited="true" ctrlrange="-6.28 6.28" forcelimited="true" forcerange="-120 120"/>
 
     <velocity name="vel_lidar_spin" joint="lidar_spin" kv="10" ctrlrange="-100 100"/>
 

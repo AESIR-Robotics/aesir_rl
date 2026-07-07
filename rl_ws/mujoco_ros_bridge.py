@@ -166,35 +166,17 @@ class MujocoHardwareBridge(Node):
         self._arm_dof_adr = [self._qvel_adr[n] for n in
                               ("joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6")]
 
-        # Orugas: actuadores de velocidad de las 6 ruedas por lado (ver
-        # aesir_mujoco_robot.xml, vel_drive_l_1..6 / vel_drive_r_1..6). El limite
-        # de velocidad ya esta en el XML (ctrlrange de cada actuador de velocidad).
-        self._left_wheel_aids = [
-            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"vel_drive_l_{i}")
-            for i in range(1, 7)
-        ]
-        self._right_wheel_aids = [
-            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"vel_drive_r_{i}")
-            for i in range(1, 7)
-        ]
-
-        # Rodillos de flipper: asumo que van acoplados mecanicamente al motor
-        # del mismo lado que las ruedas principales (flipper_1/2 = derecha,
-        # flipper_3/4 = izquierda) — ajustar si tienen motor propio.
-        self._left_flipper_roller_aids = [
-            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, n)
-            for n in ("vel_flipper3_1", "vel_flipper3_2", "vel_flipper4_1", "vel_flipper4_2")
-        ]
-        self._right_flipper_roller_aids = [
-            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, n)
-            for n in ("vel_flipper1_1", "vel_flipper1_2", "vel_flipper2_1", "vel_flipper2_2")
-        ]
-        self._vel_ramp_target  = {}
-        self._vel_ramp_current = {}
-        for aid in (self._left_wheel_aids + self._right_wheel_aids
-                    + self._left_flipper_roller_aids + self._right_flipper_roller_aids):
-            self._vel_ramp_target[aid]  = 0.0
-            self._vel_ramp_current[aid] = 0.0
+        """ Orugas: UN actuador de velocidad por lado (vel_track_left/right),
+        que mueve el joint "maestro" de cada lado (drive_l_1/drive_r_1). El
+        resto de ruedas y rodillos de flipper de ese lado quedan acoplados
+        rigidamente al maestro via <equality><joint .../></equality> en el
+        XML (polycoef = relacion de radios/engranaje) — no hace falta
+        comandarlos por separado, MuJoCo los sincroniza via fuerzas de
+        restriccion. El limite de velocidad ya esta en el XML (ctrlrange)."""
+        self._left_wheel_aid  = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "vel_track_left")
+        self._right_wheel_aid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "vel_track_right")
+        self._vel_ramp_target  = {self._left_wheel_aid: 0.0, self._right_wheel_aid: 0.0}
+        self._vel_ramp_current = {self._left_wheel_aid: 0.0, self._right_wheel_aid: 0.0}
 
         # Estado de rampa de posicion (AVR446-style) para brazo + pivotes de
         # flipper. El gripper (left/right_finger_joint) queda fuera: pasa
@@ -266,19 +248,19 @@ class MujocoHardwareBridge(Node):
                     self.data.ctrl[aid] = target  # gripper: passthrough directo, sin rampa
 
     def _cmd_vel_cb(self, msg: Twist) -> None:
-        # Cinematica diferencial: v_lado = v_lineal +- w*separacion/2, luego a
-        # rad/s de rueda dividiendo por el radio. El limite de velocidad ya lo
-        # aplica MuJoCo via ctrlrange en cada actuador vel_drive_l/r_*; aqui
-        # solo se fija el objetivo — la rampa de aceleracion se aplica en
-        # _physics_step via _ramp_toward_velocity.
+        """ Cinematica diferencial: v_lado = v_lineal +- w*separacion/2, luego a
+        rad/s de rueda dividiendo por el radio. El limite de velocidad ya lo
+        aplica MuJoCo via ctrlrange en vel_track_left/right; aqui solo se
+        fija el objetivo — la rampa de aceleracion se aplica en
+        _physics_step via _ramp_toward_velocity. El resto de ruedas y
+        rodillos de flipper del mismo lado siguen automaticamente por las
+        equality constraints del XML. """
         v, w  = msg.linear.x, msg.angular.z
         omega_left  = (v - w * TRACK_SEPARATION / 2.0) / WHEEL_RADIUS
         omega_right = (v + w * TRACK_SEPARATION / 2.0) / WHEEL_RADIUS
         with self._lock:
-            for aid in self._left_wheel_aids + self._left_flipper_roller_aids:
-                self._vel_ramp_target[aid] = omega_left
-            for aid in self._right_wheel_aids + self._right_flipper_roller_aids:
-                self._vel_ramp_target[aid] = omega_right
+            self._vel_ramp_target[self._left_wheel_aid]  = omega_left
+            self._vel_ramp_target[self._right_wheel_aid] = omega_right
 
     def _physics_step(self) -> None:
         dt = self.model.opt.timestep
