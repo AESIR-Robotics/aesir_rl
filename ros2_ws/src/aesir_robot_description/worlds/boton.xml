@@ -1,0 +1,238 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MuJoCo MJCF — boton (corregido)
+  ================================
+  Cambios respecto a la versión anterior:
+  - <compiler> con meshdir y angle="radian"
+  - <option> con gravedad
+  - <default> con clases de color para cada tipo de pieza
+  - Geoms visuales: group="1", contype="0" conaffinity="0"  → se renderizan, NO colisionan
+  - Geoms de colisión: group="3", sin rgba              → colisionan, NO se renderizan
+  - Joints: damping y armature mínimos para estabilidad numérica
+-->
+
+<mujoco model="boton">
+
+  <compiler angle="radian"
+            meshdir="/home/aesir/aesir_rl/models/meshes/boton/"/>
+
+  <option gravity="0 0 -9.81" timestep="0.002"/>
+
+  <!-- ============================================================
+       CLASES DE COLOR
+       base   → gris claro  (base_link)
+       mount  → azul acero  (Component2_x, piezas fijas)
+       pin    → naranja     (Component1_x, piezas móviles)
+  ============================================================ -->
+  <default>
+    <joint damping="0.01" armature="0.001"/>
+
+    <default class="base">
+      <geom rgba="0.75 0.75 0.78 1" group="1"
+            contype="0" conaffinity="0" type="mesh"/>
+    </default>
+
+    <default class="mount">
+      <geom rgba="0.25 0.45 0.70 1" group="1"
+            contype="0" conaffinity="0" type="mesh"/>
+    </default>
+
+    <default class="pin">
+      <geom rgba="0.90 0.50 0.10 1" group="1"
+            contype="0" conaffinity="0" type="mesh"/>
+    </default>
+
+    <default class="col">
+      <geom group="3" contype="1" conaffinity="1" type="mesh"/>
+    </default>
+  </default>
+
+  <!-- ========================  ASSETS  ======================== -->
+  <asset>
+    <mesh name="boton_base_link"    file="base_link.stl"    scale="0.001 0.001 0.001"/>
+    <mesh name="boton_Component1_1" file="Component1_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="boton_Component2_1" file="Component2_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="boton_Component1_2" file="Component1_2.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="boton_Component2_2" file="Component2_2.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="boton_Component1_3" file="Component1_3.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="boton_Component2_3" file="Component2_3.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="boton_Component1_4" file="Component1_4.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="boton_Component2_4" file="Component2_4.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="boton_Component1_5" file="Component1_5.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="boton_Component2_5" file="Component2_5.stl" scale="0.001 0.001 0.001"/>
+  </asset>
+
+  <!-- ========================  WORLDBODY  ======================== -->
+  <worldbody>
+
+    <!-- ── base_link (raíz fija al mundo) ── -->
+    <body name="boton_base_link" pos="0 0 0" quat="1 0 0 0">
+      <inertial pos="2.465495 6.26235 0.640476"
+                mass="13.7375"
+                diaginertia="0.044137 0.044137 0.06787"/>
+
+      <!-- visual -->
+      <geom name="boton_base_link_vis" class="base"
+            mesh="boton_base_link" pos="0 0 0"/>
+      <!-- colisión -->
+      <geom name="boton_base_link_col" class="col"
+            mesh="boton_base_link" pos="0 0 0"/>
+
+      <!-- ══════════════════════════════════════════════════════
+           RAMA 1 — Rigid 2 (fixed): base_link → Component2_1
+                    Cylindrical 1 (2 GDL): Component2_1 → Component1_1
+           ══════════════════════════════════════════════════════ -->
+      <body name="boton_Component2_1" pos="2.465495 6.26235 0.7">
+        <inertial pos="3.599e-07 7.502e-08 0.021955"
+                  mass="1.308439"
+                  diaginertia="0.000777 0.000777 0.001134"/>
+
+        <geom name="boton_Component2_1_vis" class="mount"
+              mesh="boton_Component2_1" pos="-2.465495 -6.26235 -0.7"/>
+        <geom name="boton_Component2_1_col" class="col"
+              mesh="boton_Component2_1" pos="-2.465495 -6.26235 -0.7"/>
+
+        <body name="boton_Component1_1" pos="0.001579 0.00332 0.044">
+          <joint name="boton_cyl1_slide" type="slide" axis="0 0 1"/>
+          <joint name="boton_cyl1_hinge" type="hinge" axis="0 0 1"/>
+          <inertial pos="-0.001579 -0.003320 0.006432"
+                    mass="0.263906"
+                    diaginertia="7e-05 7e-05 3.3e-05"/>
+
+          <geom name="boton_Component1_1_vis" class="pin"
+                mesh="boton_Component1_1" pos="-2.467074 -6.26567 -0.744"/>
+          <geom name="boton_Component1_1_col" class="col"
+                mesh="boton_Component1_1" pos="-2.467074 -6.26567 -0.744"/>
+        </body>
+      </body>
+
+      <!-- ══════════════════════════════════════════════════════
+           RAMA 2 — Rigid 4 (fixed): base_link → Component2_2
+                    Cylindrical 3 (2 GDL): Component2_2 → Component1_2
+           ══════════════════════════════════════════════════════ -->
+      <body name="boton_Component2_2" pos="2.565495 6.26235 0.65">
+        <inertial pos="0.015525 7.502e-08 0.015524"
+                  mass="1.308439"
+                  fullinertia="0.000956 0.000777 0.000956  0.0  0.000178  0.0"/>
+
+        <geom name="boton_Component2_2_vis" class="mount"
+              mesh="boton_Component2_2" pos="-2.565495 -6.26235 -0.65"/>
+        <geom name="boton_Component2_2_col" class="col"
+              mesh="boton_Component2_2" pos="-2.565495 -6.26235 -0.65"/>
+
+        <body name="boton_Component1_2" pos="-0.107182 -0.00332 0.080472">
+          <joint name="boton_cyl3_slide" type="slide" axis="0 0 1"/>
+          <joint name="boton_cyl3_hinge" type="hinge" axis="0 0 1"/>
+          <inertial pos="0.138760 0.003320 -0.048894"
+                    mass="0.263906"
+                    fullinertia="5.2e-05 7e-05 5.2e-05  0.0  -1.8e-05  0.0"/>
+
+          <geom name="boton_Component1_2_vis" class="pin"
+                mesh="boton_Component1_2" pos="-2.458313 -6.25903 -0.730472"/>
+          <geom name="boton_Component1_2_col" class="col"
+                mesh="boton_Component1_2" pos="-2.458313 -6.25903 -0.730472"/>
+        </body>
+      </body>
+
+      <!-- ══════════════════════════════════════════════════════
+           RAMA 3 — Rigid 6 (fixed): base_link → Component2_3
+                    Cylindrical 5 (2 GDL): Component2_3 → Component1_3
+           ══════════════════════════════════════════════════════ -->
+      <body name="boton_Component2_3" pos="2.465495 6.16235 0.65">
+        <inertial pos="3.599e-07 -0.015524 0.015524"
+                  mass="1.308439"
+                  fullinertia="0.000777 0.000956 0.000956  0.0  0.0  -0.000178"/>
+
+        <geom name="boton_Component2_3_vis" class="mount"
+              mesh="boton_Component2_3" pos="-2.465495 -6.16235 -0.65"/>
+        <geom name="boton_Component2_3_col" class="col"
+              mesh="boton_Component2_3" pos="-2.465495 -6.16235 -0.65"/>
+
+        <body name="boton_Component1_3" pos="0.001579 -0.077007 -0.103718">
+          <joint name="boton_cyl5_slide" type="slide" axis="0 0 1"/>
+          <joint name="boton_cyl5_hinge" type="hinge" axis="0 0 1"/>
+          <inertial pos="-0.001579 0.041187 0.139539"
+                    mass="0.263906"
+                    fullinertia="7e-05 5.2e-05 5.2e-05  0.0  0.0  1.8e-05"/>
+
+          <geom name="boton_Component1_3_vis" class="pin"
+                mesh="boton_Component1_3" pos="-2.467074 -6.085343 -0.546282"/>
+          <geom name="boton_Component1_3_col" class="col"
+                mesh="boton_Component1_3" pos="-2.467074 -6.085343 -0.546282"/>
+        </body>
+      </body>
+
+      <!-- ══════════════════════════════════════════════════════
+           RAMA 4 — Rigid 8 (fixed): base_link → Component2_4
+                    Cylindrical 7 (2 GDL): Component2_4 → Component1_4
+           ══════════════════════════════════════════════════════ -->
+      <body name="boton_Component2_4" pos="2.465495 6.36235 0.65">
+        <inertial pos="3.599e-07 0.015524 0.015524"
+                  mass="1.308439"
+                  fullinertia="0.000777 0.000956 0.000956  0.0  0.0  0.000178"/>
+
+        <geom name="boton_Component2_4_vis" class="mount"
+              mesh="boton_Component2_4" pos="-2.465495 -6.36235 -0.65"/>
+        <geom name="boton_Component2_4_col" class="col"
+              mesh="boton_Component2_4" pos="-2.465495 -6.36235 -0.65"/>
+
+        <body name="boton_Component1_4" pos="0.001579 0.081703 -0.108414">
+          <joint name="boton_cyl7_slide" type="slide" axis="0 0 1"/>
+          <joint name="boton_cyl7_hinge" type="hinge" axis="0 0 1"/>
+          <inertial pos="-0.001579 -0.045882 0.144235"
+                    mass="0.263906"
+                    fullinertia="7e-05 5.2e-05 5.2e-05  0.0  0.0  -1.8e-05"/>
+
+          <geom name="boton_Component1_4_vis" class="pin"
+                mesh="boton_Component1_4" pos="-2.467074 -6.444053 -0.541586"/>
+          <geom name="boton_Component1_4_col" class="col"
+                mesh="boton_Component1_4" pos="-2.467074 -6.444053 -0.541586"/>
+        </body>
+      </body>
+
+      <!-- ══════════════════════════════════════════════════════
+           RAMA 5 — Rigid 10 (fixed): base_link → Component2_5
+                    Cylindrical 9 (2 GDL): Component2_5 → Component1_5
+           ══════════════════════════════════════════════════════ -->
+      <body name="boton_Component2_5" pos="2.365495 6.26235 0.65">
+        <inertial pos="-0.015524 7.502e-08 0.015524"
+                  mass="1.308439"
+                  fullinertia="0.000956 0.000777 0.000956  0.0  -0.000178  0.0"/>
+
+        <geom name="boton_Component2_5_vis" class="mount"
+              mesh="boton_Component2_5" pos="-2.365495 -6.26235 -0.65"/>
+        <geom name="boton_Component2_5_col" class="col"
+              mesh="boton_Component2_5" pos="-2.365495 -6.26235 -0.65"/>
+
+        <body name="boton_Component1_5" pos="0.10495 -0.00332 0.078239">
+          <joint name="boton_cyl9_slide" type="slide" axis="0 0 1"/>
+          <joint name="boton_cyl9_hinge" type="hinge" axis="0 0 1"/>
+          <inertial pos="-0.140770 0.003320 -0.042418"
+                    mass="0.263906"
+                    fullinertia="5.2e-05 7e-05 5.2e-05  0.0  1.8e-05  0.0"/>
+
+          <geom name="boton_Component1_5_vis" class="pin"
+                mesh="boton_Component1_5" pos="-2.470445 -6.25903 -0.728239"/>
+          <geom name="boton_Component1_5_col" class="col"
+                mesh="boton_Component1_5" pos="-2.470445 -6.25903 -0.728239"/>
+        </body>
+      </body>
+
+    </body>
+  </worldbody>
+
+  <!-- ========================  ACTUADORES  ======================== -->
+  <actuator>
+    <motor name="boton_act_cyl1_slide" joint="boton_cyl1_slide" gear="1"/>
+    <motor name="boton_act_cyl1_hinge" joint="boton_cyl1_hinge" gear="1"/>
+    <motor name="boton_act_cyl3_slide" joint="boton_cyl3_slide" gear="1"/>
+    <motor name="boton_act_cyl3_hinge" joint="boton_cyl3_hinge" gear="1"/>
+    <motor name="boton_act_cyl5_slide" joint="boton_cyl5_slide" gear="1"/>
+    <motor name="boton_act_cyl5_hinge" joint="boton_cyl5_hinge" gear="1"/>
+    <motor name="boton_act_cyl7_slide" joint="boton_cyl7_slide" gear="1"/>
+    <motor name="boton_act_cyl7_hinge" joint="boton_cyl7_hinge" gear="1"/>
+    <motor name="boton_act_cyl9_slide" joint="boton_cyl9_slide" gear="1"/>
+    <motor name="boton_act_cyl9_hinge" joint="boton_cyl9_hinge" gear="1"/>
+  </actuator>
+
+</mujoco>
