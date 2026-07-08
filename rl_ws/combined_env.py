@@ -17,7 +17,8 @@ Acciones (modo joint, 14 valores en [-1,1]):
   [0]   v_lin       base velocidad lineal
   [1]   ω_ang       base velocidad angular
   [2..5] flipper_1..4  posición flippers
-  [6..11] joint_1..6  velocidad articular brazo
+  [6..8]  vx,vy,vz   velocidad lineal del end-effector (frame arm_base_link)
+  [9..11] wx,wy,wz   velocidad angular del end-effector (frame arm_base_link)
   [12]  dedo izq
   [13]  dedo der
 
@@ -45,8 +46,9 @@ from base_env import (
     CONTROL_DECIMATION
 )
 from arm_env import (
-    ArmMuJoCoEnv, ARM_JOINTS, FINGER_L, FINGER_R,
-    MAX_JOINT_VEL, JOINT_RANGE, REST_ANGLES
+    ARM_JOINTS, FINGER_L, FINGER_R, JOINT_RANGE, REST_ANGLES,
+    MAX_LINEAR_VEL as ARM_MAX_LINEAR_VEL, MAX_ANGULAR_VEL as ARM_MAX_ANGULAR_VEL,
+    cartesian_twist_to_joint_vel,
 )
 
 EPISODE_MAX_STEPS = 1000
@@ -191,9 +193,15 @@ class CombinedMuJoCoEnv:
                 for wid in self.ids_flip_wh.get(fid, []):
                     self.data.ctrl[wid] = np.clip(wvel, -1.0, 1.0)
 
-        # --- Brazo ---
+        # --- Brazo: twist cartesiano del EE -> IK (Jacobiano) -> integrador ---
         if not self.freeze_arm:
-            delta = np.clip(a[IDX_JOINTS], -1.0, 1.0) * MAX_JOINT_VEL * self._dt
+            twist_base = np.clip(a[IDX_JOINTS], -1.0, 1.0) * np.array(
+                [ARM_MAX_LINEAR_VEL] * 3 + [ARM_MAX_ANGULAR_VEL] * 3
+            )
+            qvel_arm = cartesian_twist_to_joint_vel(
+                self.model, self.data, self.ee_id, self.arm_qvel_adr, self.base_id, twist_base
+            )
+            delta = qvel_arm * self._dt
             self._joint_pos = np.clip(self._joint_pos + delta, -JOINT_RANGE, JOINT_RANGE)
             for k, aid in enumerate(self.ids_arm):
                 self.data.ctrl[aid] = self._joint_pos[k]

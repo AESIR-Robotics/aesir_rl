@@ -6,7 +6,7 @@ from launch_ros.substitutions import FindPackageShare
 from launch.substitutions import PathJoinSubstitution
 
 def generate_launch_description():
-    moveit_config = MoveItConfigsBuilder("custom_arm", package_name="robot_moveit_config").to_moveit_configs()
+    moveit_config = MoveItConfigsBuilder("rescue_robot", package_name="robot_moveit_config").to_moveit_configs()
 
 
     servo_yaml_file = PathJoinSubstitution([

@@ -38,8 +38,15 @@ def generate_launch_description():
         arguments=["flipper_controller", "-c", "/controller_manager"],
     )
 
+    gripper_controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=["gripper_controller", "-c", "/controller_manager"],
+    )
+
     return LaunchDescription([
         base_launch,
         servo_launch,
-        flipper_controller_spawner
+        flipper_controller_spawner,
+        gripper_controller_spawner
     ])
