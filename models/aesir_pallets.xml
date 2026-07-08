@@ -13,5 +13,6 @@
 
   <include file="aesir_mujoco_robot.xml"/>
   <include file="/home/aesir/aesir_rl/ros2_ws/src/aesir_robot_description/worlds/solo_pallets.xml"/>
+  <include file="/home/aesir/aesir_rl/ros2_ws/src/aesir_robot_description/worlds/boton.xml"/>
 
 </mujoco>
