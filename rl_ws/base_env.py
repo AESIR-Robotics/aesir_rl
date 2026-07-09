@@ -1,402 +1,394 @@
+#!/usr/bin/env python3
 """
-base_env.py  —  Env MuJoCo para Modelo B (base oruga).
+base_env.py — Env de la base (oruga + flippers), Gym-like, sobre el bridge ROS2.
 
-Observaciones — mismo formato que AesirMuJoCoEnv:
-  images      : 3 cámaras RGB (cam_gripper, cam_oakd, cam_back) → (9, H, W)
-  lidar       : 7 rangefinders normalizados                      → (7,)
-  joint_states: qpos+qvel de los actuadores de base              → (N,)
+Responsabilidad de este modulo: TODO lo que define "el mundo" que ve la
+politica — guia de navegacion, observacion, reward, terminacion, reset — igual
+que en la version directa-MuJoCo original (BaseMuJoCoEnv). La diferencia es
+que aqui la fisica no la posee este proceso: vive en mujoco_ros_bridge.py y se
+habla con ella por ROS2.
 
-Acciones (6 valores en [-1, 1]):
-  [0]    v_lin       → capa differential drive → vel_drive_l/r_*
-  [1]    ω_ang       → capa differential drive
-  [2..5] flipper_1..4  posición objetivo (±π)
+    BaseRosEnv.reset()        -> obs
+    BaseRosEnv.step(action)   -> obs, reward, done, info
 
-Las rueditas de los flippers (vel_flip*) se sincronizan automáticamente
-con la velocidad del tracker al que pertenecen (izq: flippers 0,2 — der: 1,3).
-vel_lidar_spin se mantiene constante, no es parte de la acción.
+Por dentro, en cada step():
+
+    accion [v, ω, flipper×4]
+        ── Twist ──────────▶ hardware_node/cmd_vel        (bridge)
+        ── JointControl ───▶ /commands_hardware            (bridge)
+    (se deja avanzar la fisica real del bridge ~1/control_hz segundos)
+        pose/twist/joints  ◀── hardware_node/pose, state_vel, joint_states
+    guia = global_navigator.step(xy, yaw)   -- A* + vortex APF
+    obs    = guia + feedback cinematico
+    reward = seguir velocidad/direccion objetivo + waypoint − castigos
+
+train_base.py es el script general (pipeline): importa BaseRosEnv, instancia
+la politica PPO y corre el bucle de entrenamiento — no conoce ROS ni reward.
+
+REQUIERE, en OTRA terminal, el bridge corriendo:
+    cd rl_ws && MUJOCO_GL=glfw python3 mujoco_ros_bridge.py
 """
 from __future__ import annotations
 
+import json
+import math
+import os
+import threading
+import time
+from typing import Dict, List, Optional, Tuple
+
 import numpy as np
-import mujoco
-from typing import Dict, List, Tuple
 
-# ──────────────────────────── Constantes ───────────────────────────────────
-CAMERA_NAMES        = ["cam_gripper", "cam_oakd", "cam_back"]
-CAMERA_H, CAMERA_W  = 84, 84
-NUM_LIDAR           = 7
-LIDAR_MAX           = 15.0
-LIDAR_SPIN_VEL      = 20.0
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import Twist, PoseStamped
+from sensor_msgs.msg import JointState
+from hardware.msg import JointControl
+from std_srvs.srv import Trigger
 
-TRACK_HALF_WIDTH    = 0.21
-WHEEL_RADIUS        = 0.05
-MAX_WHEEL_VEL       = 20.0
-MAX_LINEAR_VEL      = 1.5
-MAX_ANGULAR_VEL     = 2.0
+from global_navigator import plan_route, GlobalNavigator, quat_to_yaw
 
-DRIVE_LEFT   = ["vel_drive_l_1", "vel_drive_l_2", "vel_drive_l_3"]
-DRIVE_RIGHT  = ["vel_drive_r_1", "vel_drive_r_2", "vel_drive_r_3"]
-FLIPPERS     = ["pos_flipper_1", "pos_flipper_2", "pos_flipper_3", "pos_flipper_4"]
-FLIP_WHEELS  = {
-    "pos_flipper_1": ["vel_flip1_back", "vel_flip1_front"],
-    "pos_flipper_2": ["vel_flip2_back", "vel_flip2_front"],
-    "pos_flipper_3": ["vel_flip3_back", "vel_flip3_front"],
-    "pos_flipper_4": ["vel_flip4_back", "vel_flip4_front"],
-}
-LIDAR_SPIN   = "vel_lidar_spin"
+_HERE    = os.path.dirname(os.path.abspath(__file__))
+NAV_JSON = os.path.join(_HERE, "obstacles.json")
 
-OBS_ACTUATORS = DRIVE_LEFT + DRIVE_RIGHT + FLIPPERS
+# ── Escalas de comando (mismas unidades que el bridge) ───────────────────────
+V_MAX_MPS   = 0.6      # linear.x  a v_norm = 1
+W_MAX_RADPS = 1.5      # angular.z a w_norm = 1
+FLIPPER_MAX = 3.1416   # rad a flip = 1
+CONTROL_HZ  = 20.0     # frecuencia del lazo de control RL
 
-CONTROL_DECIMATION  = 10
-EPISODE_MAX_STEPS   = 1000
+# ── Mision (frame de aesir_complete.xml == frame de obstacles.json) ──────────
+# Spawn = SPAWN_POSE del bridge; meta = ultimo pallet de obstacles.json.
+START_XY: Tuple[float, float] = (-2.0, 4.0)
+GOAL_XY:  Optional[Tuple[float, float]] = None   # None -> ultimo pallet del JSON
+FINISH_DIST = 0.60
+EPISODE_MAX_STEPS = 2000
 
-# Ruta de checkpoints en orden de visita
-RUTA_PALLETS = [
-    "fatal_pallet 9",   # Spawn
-    "fatal_pallet 8",
-    "fatal_pallet 7",
-    "fatal_pallet 6",
-    "fatal_pallet 5",
-    "fatal_pallet 4",
-    "fatal_pallet 3",
-    "fatal_pallet 2",
-    "fatal_pallet 1",   # Fin rampa izquierda
-    "fatal_pallet 18",  # Inicio curva de conexión
-    "fatal_pallet 17",
-    "fatal_pallet 16",
-    "fatal_pallet 15",
-    "fatal_pallet 14",
-    "fatal_pallet 13",
-    "fatal_pallet 12",
-    "fatal_pallet 11",  # Meta final
-]
+FLIPPER_JOINTS = ["flipper_1_joint", "flipper_2_joint", "flipper_3_joint", "flipper_4_joint"]
 
-ARM_REST_POSITIONS = {
-    "joint_1": -0.0,
-    "joint_2": -3.14,
-    "joint_3":  3.14,
-    "joint_4": -1.57295,
-    "joint_5": -1.57295,
-    "joint_6":  1.57295,
-}
+# ── Pesos de reward ────────────────────────────────────────────────────────
+# Nuevo (pedido explicitamente): recompensar encarar + igualar la velocidad
+# objetivo que da la guia del vortex.
+W_DIRECTION    = 1.0     # encarar al objetivo (cos Δθ)
+W_VELOCITY     = 1.5     # igualar la velocidad forward objetivo
+# Conservado de la version directa-MuJoCo (BaseMuJoCoEnv._reward): misma
+# forma y mismas magnitudes, solo retargeteado de pallet_geom a waypoint A*.
+WP_BONUS       = 50.0    # bonus al cruzar un waypoint       (antes: pallet_bonus)
+TIME_PENALTY   = 0.02
+FALL_PENALTY   = 100.0
+STUCK_MAX      = 2.0
+ENERGY_W       = 1e-4    # costo de energia (antes: 1e-9 * ctrl^2, ahora accion^2)
+FLIPPER_JERK_W = 0.2
+TILT_W         = 5.0
 
-TIP_NAMES = [
-    "wheel_flip1_front",
-    "wheel_flip2_front",
-    "wheel_flip3_front",
-    "wheel_flip4_front",
-]
+# ── Tamaños expuestos a la politica ──────────────────────────────────────────
+OBS_DIM = 15   # guia(3) + twist_base(3) + flipper_qpos(4) + flipper_qvel(4) + upright(1)
+ACT_DIM = 6    # v, ω, flipper×4
 
 
-class BaseMuJoCoEnv:
+# ── Convencion "hardware" (espejo de topic_bridge_hardware.cpp) ──────────────
+def hw_to_ros(rad: float) -> float:
+    return math.fmod(rad, 2.0 * math.pi) - math.pi
+
+def ros_to_hw(rad: float) -> float:
+    return rad + math.pi
+
+def quat_upright(quat_wxyz) -> float:
+    """Componente z del eje z del chasis (R[2,2]): 1 = vertical, 0 = tumbado."""
+    w, x, y, z = quat_wxyz
+    return 1.0 - 2.0 * (x * x + y * y)
+
+
+# ──────────────────────────── Nodo ROS2: E/S con el bridge ─────────────────
+class _BridgeInterface(Node):
+    """Publica comandos al bridge y cachea el ultimo feedback recibido."""
+
+    def __init__(self):
+        super().__init__("base_env_bridge_interface")
+        self._lock = threading.Lock()
+
+        self._pose_xy   = None                      # np.array([x, y])
+        self._pose_z    = 0.0
+        self._yaw       = 0.0
+        self._upright   = 1.0
+        self._twist     = np.zeros(3, dtype=np.float32)  # [v_fwd, v_lat, omega_z]
+        self._flip_qpos = np.zeros(4, dtype=np.float32)
+        self._flip_qvel = np.zeros(4, dtype=np.float32)
+
+        self.cmd_vel_pub = self.create_publisher(Twist, "hardware_node/cmd_vel", 10)
+        self.joint_pub   = self.create_publisher(JointControl, "/commands_hardware", 10)
+        self.create_subscription(PoseStamped, "hardware_node/pose", self._pose_cb, 10)
+        self.create_subscription(Twist, "hardware_node/state_vel", self._vel_cb, 10)
+        self.create_subscription(JointState, "/hardware_node/joint_states", self._js_cb, 10)
+
+        self.reset_cli = self.create_client(Trigger, "/mujoco_ros_bridge/reset_sim")
+
+    # ── Callbacks de feedback ────────────────────────────────────────────────
+    def _pose_cb(self, msg: PoseStamped):
+        q = msg.pose.orientation
+        quat = np.array([q.w, q.x, q.y, q.z])
+        with self._lock:
+            self._pose_xy = np.array([msg.pose.position.x, msg.pose.position.y])
+            self._pose_z  = float(msg.pose.position.z)
+            self._yaw     = quat_to_yaw(quat)
+            self._upright = quat_upright(quat)
+
+    def _vel_cb(self, msg: Twist):
+        with self._lock:
+            self._twist = np.array([msg.linear.x, msg.linear.y, msg.angular.z], dtype=np.float32)
+
+    def _js_cb(self, msg: JointState):
+        idx = {n: i for i, n in enumerate(msg.name)}
+        qpos = np.zeros(4, dtype=np.float32)
+        qvel = np.zeros(4, dtype=np.float32)
+        for k, name in enumerate(FLIPPER_JOINTS):
+            i = idx.get(name)
+            if i is None:
+                continue
+            qpos[k] = hw_to_ros(msg.position[i]) if i < len(msg.position) else 0.0
+            qvel[k] = msg.velocity[i] if i < len(msg.velocity) else 0.0
+        with self._lock:
+            self._flip_qpos, self._flip_qvel = qpos, qvel
+
+    # ── Snapshot de feedback ─────────────────────────────────────────────────
+    def feedback(self) -> Optional[dict]:
+        with self._lock:
+            if self._pose_xy is None:
+                return None
+            return dict(
+                xy=self._pose_xy.copy(), z=self._pose_z, yaw=self._yaw,
+                upright=self._upright, twist=self._twist.copy(),
+                flip_qpos=self._flip_qpos.copy(), flip_qvel=self._flip_qvel.copy(),
+            )
+
+    # ── Publicar accion ──────────────────────────────────────────────────────
+    def publish_action(self, v_norm: float, w_norm: float, flippers: np.ndarray):
+        tw = Twist()
+        tw.linear.x  = float(np.clip(v_norm, -1.0, 1.0)) * V_MAX_MPS
+        tw.angular.z = float(np.clip(w_norm, -1.0, 1.0)) * W_MAX_RADPS
+        self.cmd_vel_pub.publish(tw)
+
+        jc = JointControl()
+        jc.header.stamp = self.get_clock().now().to_msg()
+        jc.joint_names  = list(FLIPPER_JOINTS)
+        jc.position     = [ros_to_hw(float(np.clip(f, -1.0, 1.0)) * FLIPPER_MAX) for f in flippers]
+        self.joint_pub.publish(jc)
+
+    def stop_robot(self):
+        self.publish_action(0.0, 0.0, np.zeros(4))
+
+    # ── Reset de episodio (servicio del bridge) ─────────────────────────────
+    def reset_sim(self, timeout: float = 5.0) -> bool:
+        if not self.reset_cli.wait_for_service(timeout_sec=timeout):
+            self.get_logger().warn("Servicio /mujoco_ros_bridge/reset_sim no disponible")
+            return False
+        fut = self.reset_cli.call_async(Trigger.Request())
+        t0 = time.time()
+        while not fut.done() and time.time() - t0 < timeout:
+            time.sleep(0.01)
+        return fut.done() and fut.result() is not None and fut.result().success
+
+
+# ──────────────────────────── Observacion y reward ─────────────────────────
+def _build_obs(guidance: dict, fb: dict) -> np.ndarray:
+    return np.concatenate([
+        guidance["obs"],                                    # 3
+        fb["twist"],                                        # 3  [v_fwd, v_lat, omega]
+        fb["flip_qpos"],                                    # 4
+        fb["flip_qvel"],                                    # 4
+        [fb["upright"]],                                    # 1
+    ]).astype(np.float32)
+
+
+class _RewardState:
+    """Estado entre pasos para el calculo de reward (progreso, stuck, jerk)."""
+    def __init__(self):
+        self.last_xy = None
+        self.last_dist_to_target = 0.0
+        self.last_wp = 0
+        self.last_flip = np.zeros(4, dtype=np.float32)
+        self.stuck = 0
+
+    def reset(self, xy: np.ndarray, dist_to_target: float):
+        self.last_xy = xy.copy()
+        self.last_dist_to_target = dist_to_target
+        self.last_wp = 0
+        self.last_flip = np.zeros(4, dtype=np.float32)
+        self.stuck = 0
+
+
+def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardState) -> float:
+    """Igual estructura que BaseMuJoCoEnv._reward (version directa-MuJoCo):
+    caida letal -> castigos conservados (stuck, energia, jerk de flippers,
+    inclinacion) -> progreso hacia el objetivo actual (misma formula con
+    boost exponencial de proximidad) -> bonus al cruzar el objetivo (retorno
+    temprano, igual que el pallet_bonus original). El objetivo ahora es el
+    waypoint de la ruta A* en vez del pallet, y se suma ademas la recompensa
+    NUEVA de encarar + igualar la velocidad que pide la guia del vortex."""
+    xy = fb["xy"]
+    dist_norm, sin_t, cos_t = guidance["obs"]
+    target_xy = np.asarray(guidance["target"], dtype=np.float64)
+    v_fwd = float(fb["twist"][0])
+
+    # 1. Caida letal
+    if fb["z"] < 0.10:
+        return -FALL_PENALTY
+
+    # 2. Inactividad (conservado)
+    move_dist = float(np.linalg.norm(xy - rs.last_xy))
+    rs.last_xy = xy.copy()
+    if move_dist < 0.005:
+        rs.stuck += 1
+        penalty_stuck = min(STUCK_MAX, 0.01 * rs.stuck)
+    else:
+        rs.stuck = 0
+        penalty_stuck = 0.0
+
+    # 3. Costo de energia (conservado; antes 1e-9 * ctrl_crudo^2, ahora sobre
+    #    la accion normalizada — mismo espiritu de penalizacion casi nula)
+    action_cost = ENERGY_W * float(np.square(action).mean())
+
+    # 4. Movimiento erratico de flippers (conservado)
+    current_flipper = action[2:6].astype(np.float32)
+    flipper_pen = FLIPPER_JERK_W * float(np.square(current_flipper - rs.last_flip).mean())
+    rs.last_flip = current_flipper.copy()
+
+    # 5. Inclinacion (conservado)
+    tilt_pen = max(0.0, 0.65 - float(fb["upright"])) * TILT_W
+
+    penalties = penalty_stuck + action_cost + flipper_pen + tilt_pen
+
+    # 6. Waypoint cruzado — igual que el pallet_bonus original: al cruzarlo
+    #    se devuelve solo el bonus mas las penalizaciones (sin progreso ni
+    #    direccion/velocidad ese paso).
+    if guidance["wp"] > rs.last_wp:
+        rs.last_wp = guidance["wp"]
+        rs.last_dist_to_target = float(np.linalg.norm(xy - target_xy))
+        return WP_BONUS - penalties
+
+    # 7. Progreso hacia el waypoint actual (conservado: delta_dist * boost
+    #    exponencial de proximidad, misma formula que la version pallet)
+    dist_to_target = float(np.linalg.norm(xy - target_xy))
+    delta_dist = rs.last_dist_to_target - dist_to_target
+    proximity_multiplier = float(np.exp(-dist_to_target))
+    progress_reward = delta_dist * (50.0 + 100.0 * proximity_multiplier)
+    rs.last_dist_to_target = dist_to_target
+
+    # 8. Direccion y velocidad objetivo (nuevo: seguir la guia del vortex)
+    direction_reward = W_DIRECTION * float(cos_t)
+    v_des = V_MAX_MPS * float(dist_norm) * max(0.0, float(cos_t))
+    speed_match = 1.0 - min(1.0, abs(v_fwd - v_des) / V_MAX_MPS)
+    velocity_reward = W_VELOCITY * speed_match
+
+    return progress_reward + direction_reward + velocity_reward - penalties - TIME_PENALTY
+
+
+def _terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int, max_steps: int) -> Tuple[bool, bool]:
+    """Igual estructura que BaseMuJoCoEnv._terminated. Devuelve (done, reached_goal)."""
+    if ep_steps >= max_steps:
+        print("[base_env] ⏰ Episodio terminado por limite de pasos")
+        return True, False
+    if fb["upright"] < 0.20:
+        print("[base_env] 🛑 Episodio terminado por caida (base demasiado inclinado)")
+        return True, False
+    if fb["z"] < 0.10:
+        print("[base_env] 🛑 Episodio terminado por caida (base demasiado bajo)")
+        return True, False
+    if float(np.linalg.norm(fb["xy"] - goal_xy)) < FINISH_DIST:
+        print("[base_env] 🏆 ¡Meta alcanzada!")
+        return True, True
+    return False, False
+
+
+# ──────────────────────────── Env Gym-like ──────────────────────────────────
+class BaseRosEnv:
+    """Env de entrenamiento de la base, sobre mujoco_ros_bridge.py via ROS2.
+
+    Uso (igual forma que la BaseMuJoCoEnv original):
+        env = BaseRosEnv()
+        obs = env.reset()
+        action = policy.act(obs)
+        obs, reward, done, info = env.step(action)
+    """
 
     def __init__(self,
-                 xml_path: str,
-                 camera_names: List[str] = CAMERA_NAMES,
-                 image_hw: Tuple[int, int] = (CAMERA_H, CAMERA_W),
-                 control_decimation: int = CONTROL_DECIMATION,
-                 max_steps: int = EPISODE_MAX_STEPS,
-                 render: bool = False):
+                 nav_json: str = NAV_JSON,
+                 start_xy: Tuple[float, float] = START_XY,
+                 goal_xy: Optional[Tuple[float, float]] = GOAL_XY,
+                 control_hz: float = CONTROL_HZ,
+                 max_steps: int = EPISODE_MAX_STEPS):
 
-        self.model = mujoco.MjModel.from_xml_path(xml_path)
-        self.data  = mujoco.MjData(self.model)
-        self.max_steps          = max_steps
-        self.control_decimation = control_decimation
+        self.obs_dim = OBS_DIM
+        self.act_len = ACT_DIM
+        self.dt = 1.0 / control_hz
+        self.max_steps = max_steps
 
-        # Solo añadir al array si el geom EXISTE, y guardar el nombre en paralelo
-        # para que current_pallet_idx siempre apunte al nombre correcto.
-        self.pallet_names: List[str] = []
-        self.pallet_geom_ids: List[int] = []
-        for name in RUTA_PALLETS:
-            gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
-            if gid >= 0:
-                self.pallet_names.append(name)
-                self.pallet_geom_ids.append(gid)
-            else:
-                print(f"[base_env] Aviso: geom '{name}' no encontrado en el modelo — se omite de la ruta")
+        # ── Ruta global (A*) una sola vez — geometria estatica del mapa ──────
+        self.start_xy = np.array(start_xy, dtype=np.float64)
+        if goal_xy is None:
+            goal_xy = tuple(json.load(open(nav_json))["pallets"][-1]["center_xy"])
+        self.goal_xy = np.array(goal_xy, dtype=np.float64)
+        self.waypoints = plan_route(nav_json, tuple(self.start_xy), tuple(self.goal_xy))
+        self.nav = GlobalNavigator(nav_json, waypoints=self.waypoints)
+        print(f"[base_env] Ruta: {tuple(self.start_xy)} -> {tuple(self.goal_xy)}  "
+              f"({len(self.waypoints)} waypoints)")
 
-        # Tips de flippers (para colisiones opcionales)
-        self.tip_ids: List[int] = []
-        for name in TIP_NAMES:
-            bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
-            if bid < 0:
-                print(f"[base_env] Aviso: body '{name}' no encontrado")
-            self.tip_ids.append(bid)
+        # ── ROS2 ───────────────────────────────────────────────────────────
+        if not rclpy.ok():
+            rclpy.init()
+        self._node = _BridgeInterface()
+        self._executor = rclpy.executors.SingleThreadedExecutor()
+        self._executor.add_node(self._node)
+        self._spin_thread = threading.Thread(target=self._executor.spin, daemon=True)
+        self._spin_thread.start()
 
-        # ── cámaras ────────────────────────────────────────────────────────
-        self.image_h, self.image_w = image_hw
-        self.renderer     = mujoco.Renderer(self.model,
-                                            height=self.image_h,
-                                            width=self.image_w)
-        self.camera_names = list(camera_names)
-        self.num_cameras  = len(self.camera_names)
+        print("[base_env] Esperando feedback del bridge en hardware_node/pose ...")
+        while self._node.feedback() is None and rclpy.ok():
+            time.sleep(0.05)
+        print("[base_env] Bridge conectado.")
 
-        # ── lidar ──────────────────────────────────────────────────────────
-        self.num_lidar = NUM_LIDAR
-        self.lidar_adr = []
-        for i in range(NUM_LIDAR):
-            sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, f"lidar_{i}")
-            if sid < 0:
-                raise ValueError(f"Sensor lidar_{i} no encontrado en el modelo")
-            self.lidar_adr.append(int(self.model.sensor_adr[sid]))
-        self.id_lidar_spin = self._aid(LIDAR_SPIN)
+        self._rs = _RewardState()
+        self._ep_steps = 0
+        self._fb: Optional[dict] = None
 
-        # ── actuadores de base ─────────────────────────────────────────────
-        self.ids_drive_l  = [self._aid(n) for n in DRIVE_LEFT]
-        self.ids_drive_r  = [self._aid(n) for n in DRIVE_RIGHT]
-        self.ids_flippers = [self._aid(n) for n in FLIPPERS]
-        self.ids_flip_wh  = {
-            self._aid(fname): [self._aid(w) for w in wnames]
-            for fname, wnames in FLIP_WHEELS.items()
-        }
+    # ── Reset ────────────────────────────────────────────────────────────────
+    def reset(self) -> np.ndarray:
+        self._node.stop_robot()
+        self._node.reset_sim()
+        time.sleep(0.1)                       # deja llegar el primer feedback nuevo
+        fb = self._node.feedback()
+        while fb is None and rclpy.ok():
+            time.sleep(0.02)
+            fb = self._node.feedback()
 
-        # ── joint_states ───────────────────────────────────────────────────
-        self._obs_act_ids = np.array([self._aid(n) for n in OBS_ACTUATORS], dtype=np.int32)
-        _jnt_ids          = [int(self.model.actuator_trnid[i, 0]) for i in self._obs_act_ids]
-        self._qpos_adr    = np.array([self.model.jnt_qposadr[j] for j in _jnt_ids], dtype=np.int32)
-        self._qvel_adr    = np.array([self.model.jnt_dofadr[j]  for j in _jnt_ids], dtype=np.int32)
+        self.nav.reset(fb["xy"])
+        guidance = self.nav.step(fb["xy"], fb["yaw"])
+        self._rs.reset(fb["xy"], float(np.linalg.norm(fb["xy"] - np.asarray(guidance["target"]))))
+        self._ep_steps = 0
+        self._fb = fb
+        return _build_obs(guidance, fb)
 
-        # ── base body ──────────────────────────────────────────────────────
-        self.base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "base_link")
-        if self.base_id < 0:
-            self.base_id = 1
-
-        # ── tamaños expuestos ──────────────────────────────────────────────
-        self.image_shape = (3 * self.num_cameras, self.image_h, self.image_w)
-        self.lidar_shape = (NUM_LIDAR,)
-        self.joint_len   = 2 * len(self._obs_act_ids)
-        self.joint_shape = (self.joint_len,)
-        self.act_len     = 6
-
-        # antes del primer reset()
-        self._reset_state()
-
-        # ── viewer ─────────────────────────────────────────────────────────
-        self.viewer = None
-        if render:
-            self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
-            self.viewer.cam.distance  = 4.0
-            self.viewer.cam.elevation = -20
-
-    def _reset_state(self):
-        """Inicializa todas las variables de estado. Llamado en __init__ y reset()."""
-        self._step_count          = 0
-        self._stuck_counter       = 0
-        self._last_base_xy        = np.zeros(2)
-        self._last_flipper_action = np.zeros(4, dtype=np.float32)
-        self.current_pallet_idx   = 0
-        self.last_dist_to_target  = 0.0
-
-    # ── utilidad ───────────────────────────────────────────────────────────
-    def _aid(self, name: str) -> int:
-        i = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)
-        if i < 0:
-            raise ValueError(f"Actuador no encontrado: '{name}'")
-        return i
-
-    # ── Capa differential drive ────────────────────────────────────────────
-    def _apply_action(self, action: np.ndarray):
-        a     = np.clip(action, -1.0, 1.0)
-        v_lin = float(a[0]) * MAX_LINEAR_VEL
-        omega = float(a[1]) * MAX_ANGULAR_VEL
-
-        vl = float(np.clip(
-            (v_lin - omega * TRACK_HALF_WIDTH) / WHEEL_RADIUS,
-            -MAX_WHEEL_VEL, MAX_WHEEL_VEL
-        ))
-        vr = float(np.clip(
-            (v_lin + omega * TRACK_HALF_WIDTH) / WHEEL_RADIUS,
-            -MAX_WHEEL_VEL, MAX_WHEEL_VEL
-        ))
-
-        for i in self.ids_drive_l: self.data.ctrl[i] = vl
-        for i in self.ids_drive_r: self.data.ctrl[i] = vr
-
-        for k, fid in enumerate(self.ids_flippers):
-            fp = float(np.clip(a[2 + k] * 3.1416, -3.1416, 3.1416))
-            self.data.ctrl[fid] = fp
-            # FIX Bug 3: izq = flippers 0,2 — der = flippers 1,3
-            wvel = vl if k in (0, 2) else vr
-            for wid in self.ids_flip_wh.get(fid, []):
-                self.data.ctrl[wid] = wvel
-
-        self.data.ctrl[self.id_lidar_spin] = LIDAR_SPIN_VEL
-
-    # ── Observaciones ──────────────────────────────────────────────────────
-    def _read_cameras(self) -> np.ndarray:
-        frames = []
-        for cam in self.camera_names:
-            self.renderer.update_scene(self.data, camera=cam)
-            img = np.flip(self.renderer.render(), axis=(0, 1))
-            frames.append(img.astype(np.float32) / 255.0)
-        return np.transpose(np.concatenate(frames, axis=-1), (2, 0, 1))
-
-    def _read_lidar(self) -> np.ndarray:
-        lidar = np.empty(NUM_LIDAR, dtype=np.float32)
-        for i, adr in enumerate(self.lidar_adr):
-            d = float(self.data.sensordata[adr])
-            if d <= 0.0 or d >= LIDAR_MAX:
-                d = LIDAR_MAX
-            lidar[i] = d / LIDAR_MAX
-        return lidar
-
-    def _read_joint_state(self) -> np.ndarray:
-        return np.concatenate([
-            self.data.qpos[self._qpos_adr],
-            self.data.qvel[self._qvel_adr],
-        ]).astype(np.float32)
-
-    def _observation(self) -> Dict[str, np.ndarray]:
-        return {
-            "images":       self._read_cameras(),
-            "lidar":        self._read_lidar(),
-            "joint_states": self._read_joint_state(),
-        }
-
-    # ── Reward ────────────────────────────────────────────────────────────
-    def _reward(self, obs: Dict[str, np.ndarray], action: np.ndarray) -> float:
-        base_pos = self.data.xpos[self.base_id]
-        base_xy  = base_pos[:2].copy()
-        base_z   = float(base_pos[2])
-
-        # 1. Caída letal
-        if base_z < 0.10:
-            return -100.0
-
-        # 2. Inactividad
-        move_dist = float(np.linalg.norm(base_xy - self._last_base_xy))
-        self._last_base_xy = base_xy.copy()
-        if move_dist < 0.005:
-            self._stuck_counter += 1
-            penalty_stuck = min(2.0, 0.01 * self._stuck_counter)
-        else:
-            self._stuck_counter = 0
-            penalty_stuck = 0.0
-
-        # 3. Obstáculos lidar
-        min_lidar    = float(obs["lidar"].min())
-        obstacle_pen = max(0.0, 0.0001 - min_lidar) * 5.0
-
-        # 4. Costo de energía
-        action_cost = 1e-9 * float(np.square(self.data.ctrl[self._obs_act_ids]).mean())
-
-        # 5. Movimiento errático de flippers
-        current_flipper = action[2:6].astype(np.float32)
-        flipper_pen = 0.2 * float(np.square(current_flipper - self._last_flipper_action).mean())
-        self._last_flipper_action = current_flipper.copy()
-
-        # 6. Inclinación
-        zmat      = self.data.xmat[self.base_id].reshape(3, 3)
-        tilt_pen  = max(0.0, 0.65 - float(zmat[2, 2])) * 5.0
-
-        # 7. Progreso hacia pallet actual
-        progress_reward = 0.0
-        pallet_bonus    = 0.0
-
-        if self.current_pallet_idx < len(self.pallet_geom_ids):
-            target_gid = self.pallet_geom_ids[self.current_pallet_idx]
-            target_pos = self.data.geom_xpos[target_gid][:2]
-            dist       = float(np.linalg.norm(base_xy - target_pos))
-
-            delta_dist           = self.last_dist_to_target - dist
-            proximity_multiplier = float(np.exp(-dist))
-            progress_reward      = delta_dist * (50 + 100.0 * proximity_multiplier)
-            self.last_dist_to_target = dist
-
-            if dist < 0.45:
-                pallet_name = self.pallet_names[self.current_pallet_idx]
-                pallet_bonus = 50.0
-                #print(f"[base_env] ✅ Pallet alcanzado: {pallet_name} "
-                #      f"(idx {self.current_pallet_idx + 1}/{len(self.pallet_geom_ids)})")
-                self.current_pallet_idx += 1
-                #print(f"[base_env] Próximo objetivo: "
-                #      f"{self.pallet_names[self.current_pallet_idx] if self.current_pallet_idx < len(self.pallet_names) else 'Ninguno, pista completada'}")
-
-                # Actualizar distancia al siguiente pallet
-                if self.current_pallet_idx < len(self.pallet_geom_ids):
-                    next_pos = self.data.geom_xpos[
-                        self.pallet_geom_ids[self.current_pallet_idx]
-                    ][:2]
-                    self.last_dist_to_target = float(np.linalg.norm(base_xy - next_pos))
-                else:
-                    self.last_dist_to_target = 0.0
-
-                # Devolver solo el bonus más penalizaciones al pisar el pallet
-                return pallet_bonus - penalty_stuck - obstacle_pen - action_cost - flipper_pen - tilt_pen
-
-        return progress_reward + pallet_bonus - penalty_stuck - obstacle_pen - action_cost - flipper_pen - tilt_pen
-
-    # ── Terminación ───────────────────────────────────────────────────────
-    def _terminated(self) -> bool:
-        if self._step_count >= self.max_steps:
-            #print("[base_env] ⏰ Episodio terminado por límite de pasos")
-            return True
-        zmat = self.data.xmat[self.base_id].reshape(3, 3)
-        if float(zmat[2, 2]) < 0.20:
-            #print("[base_env] 🛑 Episodio terminado por caída (base demasiado inclinado)")
-            return True
-        if float(self.data.xpos[self.base_id, 2]) < 0.10:
-            #print("[base_env] 🛑 Episodio terminado por caída (base demasiado bajo)")
-            return True
-        if self.current_pallet_idx >= len(self.pallet_geom_ids):
-            print("[base_env] 🏆 ¡Pista completada!")
-            return True
-        return False
-
-    # ── Reset ─────────────────────────────────────────────────────────────
-    def reset(self) -> Dict[str, np.ndarray]:
-        mujoco.mj_resetData(self.model, self.data)
-        self.data.qpos[0] = -1.5
-        self.data.qpos[1] =  3.5
-        self.data.qpos[2] =  0.2
-
-        # Poner brazo en posición de reposo
-        for joint_name, target_angle in ARM_REST_POSITIONS.items():
-            jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, joint_name)
-            if jid >= 0:
-                self.data.qpos[self.model.jnt_qposadr[jid]] = target_angle
-            act_id = mujoco.mj_name2id(
-                self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"pos_{joint_name}"
-            )
-            if act_id >= 0:
-                self.data.ctrl[act_id] = target_angle
-
-        self.data.ctrl[self.id_lidar_spin] = LIDAR_SPIN_VEL
-
-        for _ in range(10):
-            mujoco.mj_step(self.model, self.data)
-
-        # FIX Bug 4: un solo bloque de inicialización de estado
-        self._reset_state()
-        self._last_base_xy = self.data.xpos[self.base_id, :2].copy()
-
-        # Distancia inicial al primer pallet
-        if len(self.pallet_geom_ids) > 0:
-            first_pos = self.data.geom_xpos[self.pallet_geom_ids[0]][:2]
-            self.last_dist_to_target = float(
-                np.linalg.norm(self._last_base_xy - first_pos)
-            )
-
-        if self.viewer and self.viewer.is_running():
-            self.viewer.sync()
-
-        return self._observation()
-
+    # ── Step ─────────────────────────────────────────────────────────────────
     def step(self, action: np.ndarray):
-        self._apply_action(action)
-        for _ in range(self.control_decimation):
-            mujoco.mj_step(self.model, self.data)
-        if self.viewer and self.viewer.is_running():
-            self.viewer.sync()
-        self._step_count += 1
-        obs  = self._observation()
-        rew  = self._reward(obs, action)
-        done = self._terminated()
-        return obs, rew, done, {}
+        self._node.publish_action(action[0], action[1], action[2:6])
+        time.sleep(self.dt)                   # deja avanzar la fisica del bridge
 
+        fb = self._node.feedback()
+        guidance = self.nav.step(fb["xy"], fb["yaw"])
+        reward = _compute_reward(fb, guidance, action, self._rs)
+
+        self._ep_steps += 1
+        done, reached = _terminated(fb, self.goal_xy, self._ep_steps, self.max_steps)
+
+        obs = _build_obs(guidance, fb)
+        info = {"wp": guidance["wp"], "reached": reached,
+                "dist_goal": float(np.linalg.norm(fb["xy"] - self.goal_xy))}
+        self._fb = fb
+        return obs, reward, done, info
+
+    # ── Cierre ───────────────────────────────────────────────────────────────
     def close(self):
-        if self.viewer:
-            try: self.viewer.close()
-            except Exception: pass
-        try: self.renderer.close()
-        except Exception: pass
+        self._node.stop_robot()
+        self._node.destroy_node()
+        if rclpy.ok():
+            rclpy.try_shutdown()

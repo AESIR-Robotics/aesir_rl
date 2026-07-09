@@ -38,7 +38,7 @@ import mujoco.viewer
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist, PoseStamped
 from hardware.msg import JointControl
 from std_srvs.srv import Trigger
 
@@ -70,6 +70,11 @@ ARM_RESET_POSE = {
     "joint_1": 0.0, "joint_2": -1.0, "joint_3": 1.8,
     "joint_4": 0.0, "joint_5": -1.4, "joint_6": 0.0,
 }
+
+# Spawn del chasis para el reset de episodio RL (frame de aesir_complete.xml,
+# mismo frame que obstacles.json). x, y, z, yaw(rad).
+SPAWN_POSE = (-2.0, 4.0, 0.20, 0.0)
+SPAWN_SETTLE_STEPS = 50  # substeps de fisica para asentar tras teletransportar
 
 # ── Limites de movimiento tipo AVR446 (rampa trapezoidal), en radianes ──────
 # PLACEHOLDER: max_vel (rad/s) y max_accel (rad/s^2) — reemplazar con los
@@ -205,9 +210,21 @@ class MujocoHardwareBridge(Node):
             Twist, "hardware_node/cmd_vel", self._cmd_vel_cb, 10
         )
 
-        # Reset rapido para RL: teletransporta el brazo a ARM_RESET_POSE 
+        self.pose_pub = self.create_publisher(
+            PoseStamped, "hardware_node/pose", 10
+        )
+
+        # Reset rapido para RL: teletransporta el brazo a ARM_RESET_POSE
         self._reset_srv = self.create_service(
             Trigger, "/mujoco_ros_bridge/reset_arm", self._reset_arm_cb
+        )
+
+        # Reset de EPISODIO completo para RL (train_base.py): reinicia toda la
+        # simulacion — chasis al spawn, brazo en reposo, velocidades y rampas a
+        # cero — y deja la fisica asentada. Lo llama el trainer al empezar cada
+        # episodio via el cliente del servicio /mujoco_ros_bridge/reset_sim.
+        self._reset_sim_srv = self.create_service(
+            Trigger, "/mujoco_ros_bridge/reset_sim", self._reset_sim_cb
         )
 
         self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
@@ -233,6 +250,50 @@ class MujocoHardwareBridge(Node):
             mujoco.mj_forward(self.model, self.data)
         response.success = True
         response.message = "Arm reset to ARM_RESET_POSE"
+        return response
+
+    def _reset_sim_cb(self, request, response) -> Trigger.Response:
+        """Reset de episodio completo para RL: mj_resetData, chasis al SPAWN_POSE,
+        brazo en reposo, velocidades y rampas a cero, y unos substeps para
+        asentar. Deja la sim lista para un episodio nuevo y determinista."""
+        with self._lock:
+            mujoco.mj_resetData(self.model, self.data)
+
+            # Chasis al spawn (qpos del freejoint: x y z + quat wxyz).
+            sx, sy, sz, syaw = SPAWN_POSE
+            a = self._base_qpos_adr
+            self.data.qpos[a + 0] = sx
+            self.data.qpos[a + 1] = sy
+            self.data.qpos[a + 2] = sz
+            self.data.qpos[a + 3] = math.cos(0.5 * syaw)   # w
+            self.data.qpos[a + 4] = 0.0
+            self.data.qpos[a + 5] = 0.0
+            self.data.qpos[a + 6] = math.sin(0.5 * syaw)   # z
+
+            # Brazo en reposo (qpos + ctrl + rampa).
+            for name, angle in ARM_RESET_POSE.items():
+                self.data.qpos[self._qpos_adr[name]] = angle
+                self.data.qvel[self._qvel_adr[name]] = 0.0
+                self.data.ctrl[self._aid[name]] = angle
+
+            # Rampas de posicion a la qpos actual, rampas de velocidad a cero.
+            for name in POSITION_JOINT_LIMITS:
+                p = float(self.data.qpos[self._qpos_adr[name]])
+                self._pos_ramp_target[name] = p
+                self._pos_ramp_pos[name]    = p
+                self._pos_ramp_vel[name]    = 0.0
+            for aid in self._vel_ramp_target:
+                self._vel_ramp_target[aid]  = 0.0
+                self._vel_ramp_current[aid] = 0.0
+                self.data.ctrl[aid] = 0.0
+
+            mujoco.mj_forward(self.model, self.data)
+            for _ in range(SPAWN_SETTLE_STEPS):
+                self.data.qfrc_applied[self._arm_dof_adr] = self.data.qfrc_bias[self._arm_dof_adr]
+                mujoco.mj_step(self.model, self.data)
+
+        response.success = True
+        response.message = f"Sim reset to spawn {SPAWN_POSE}"
         return response
 
     def _command_cb(self, msg: JointControl) -> None:
@@ -311,6 +372,19 @@ class MujocoHardwareBridge(Node):
             vel_msg.angular.y = float(ang_body[1])
             vel_msg.angular.z = float(ang_body[2])
             self.vel_state_pub.publish(vel_msg)
+
+            pos = self.data.qpos[self._base_qpos_adr:self._base_qpos_adr + 3]
+            pose_msg = PoseStamped()
+            pose_msg.header.stamp = state.header.stamp
+            pose_msg.header.frame_id = "map"
+            pose_msg.pose.position.x = float(pos[0])
+            pose_msg.pose.position.y = float(pos[1])
+            pose_msg.pose.position.z = float(pos[2])
+            pose_msg.pose.orientation.w = float(quat[0])
+            pose_msg.pose.orientation.x = float(quat[1])
+            pose_msg.pose.orientation.y = float(quat[2])
+            pose_msg.pose.orientation.z = float(quat[3])
+            self.pose_pub.publish(pose_msg)
 
         if self.viewer.is_running():
             self.viewer.sync()
