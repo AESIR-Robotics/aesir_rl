@@ -51,7 +51,7 @@ from global_navigator import plan_route, GlobalNavigator, quat_to_yaw
 _HERE    = os.path.dirname(os.path.abspath(__file__))
 NAV_JSON = os.path.join(_HERE, "obstacles.json")
 
-# ── Escalas de comando (mismas unidades que el bridge) ───────────────────────
+# ── Escalas de comando ───────────────────────
 V_MAX_MPS   = 0.6      # linear.x  a v_norm = 1
 W_MAX_RADPS = 1.5      # angular.z a w_norm = 1
 FLIPPER_MAX = 3.1416   # rad a flip = 1
@@ -59,26 +59,24 @@ CONTROL_HZ  = 20.0     # frecuencia del lazo de control RL
 
 # ── Mision (frame de aesir_complete.xml == frame de obstacles.json) ──────────
 # Spawn = SPAWN_POSE del bridge; meta = ultimo pallet de obstacles.json.
-START_XY: Tuple[float, float] = (-2.0, 4.0)
+START_XY: Tuple[float, float] = (-2.2, 4.2)
 GOAL_XY:  Optional[Tuple[float, float]] = None   # None -> ultimo pallet del JSON
 FINISH_DIST = 0.60
-EPISODE_MAX_STEPS = 2000
+EPISODE_MAX_STEPS = 2500
 
 FLIPPER_JOINTS = ["flipper_1_joint", "flipper_2_joint", "flipper_3_joint", "flipper_4_joint"]
 
 # ── Pesos de reward ────────────────────────────────────────────────────────
-# Nuevo (pedido explicitamente): recompensar encarar + igualar la velocidad
 # objetivo que da la guia del vortex.
 W_DIRECTION    = 1.0     # encarar al objetivo (cos Δθ)
 W_VELOCITY     = 1.5     # igualar la velocidad forward objetivo
-# Conservado de la version directa-MuJoCo (BaseMuJoCoEnv._reward): misma
-# forma y mismas magnitudes, solo retargeteado de pallet_geom a waypoint A*.
-WP_BONUS       = 50.0    # bonus al cruzar un waypoint       (antes: pallet_bonus)
+
+WP_BONUS       = 50.0    # bonus al cruzar un waypoint       
 TIME_PENALTY   = 0.02
 FALL_PENALTY   = 100.0
 STUCK_MAX      = 2.0
 ENERGY_W       = 1e-4    # costo de energia (antes: 1e-9 * ctrl^2, ahora accion^2)
-FLIPPER_JERK_W = 0.2
+FLIPPER_JERK_W = 0.5
 TILT_W         = 5.0
 
 # ── Tamaños expuestos a la politica ──────────────────────────────────────────
@@ -234,7 +232,7 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     if fb["z"] < 0.10:
         return -FALL_PENALTY
 
-    # 2. Inactividad (conservado)
+    # 2. Inactividad 
     move_dist = float(np.linalg.norm(xy - rs.last_xy))
     rs.last_xy = xy.copy()
     if move_dist < 0.005:
@@ -248,17 +246,17 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     #    la accion normalizada — mismo espiritu de penalizacion casi nula)
     action_cost = ENERGY_W * float(np.square(action).mean())
 
-    # 4. Movimiento erratico de flippers (conservado)
+    # 4. Movimiento erratico de flippers
     current_flipper = action[2:6].astype(np.float32)
     flipper_pen = FLIPPER_JERK_W * float(np.square(current_flipper - rs.last_flip).mean())
     rs.last_flip = current_flipper.copy()
 
-    # 5. Inclinacion (conservado)
+    # 5. Inclinacion 
     tilt_pen = max(0.0, 0.65 - float(fb["upright"])) * TILT_W
 
     penalties = penalty_stuck + action_cost + flipper_pen + tilt_pen
 
-    # 6. Waypoint cruzado — igual que el pallet_bonus original: al cruzarlo
+    # 6. Waypoint cruzado — al cruzarlo
     #    se devuelve solo el bonus mas las penalizaciones (sin progreso ni
     #    direccion/velocidad ese paso).
     if guidance["wp"] > rs.last_wp:
@@ -266,7 +264,7 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
         rs.last_dist_to_target = float(np.linalg.norm(xy - target_xy))
         return WP_BONUS - penalties
 
-    # 7. Progreso hacia el waypoint actual (conservado: delta_dist * boost
+    # 7. Progreso hacia el waypoint actual (delta_dist * boost
     #    exponencial de proximidad, misma formula que la version pallet)
     dist_to_target = float(np.linalg.norm(xy - target_xy))
     delta_dist = rs.last_dist_to_target - dist_to_target
@@ -274,7 +272,7 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     progress_reward = delta_dist * (50.0 + 100.0 * proximity_multiplier)
     rs.last_dist_to_target = dist_to_target
 
-    # 8. Direccion y velocidad objetivo (nuevo: seguir la guia del vortex)
+    # 8. Direccion y velocidad objetivo (la guia del vortex)
     direction_reward = W_DIRECTION * float(cos_t)
     v_des = V_MAX_MPS * float(dist_norm) * max(0.0, float(cos_t))
     speed_match = 1.0 - min(1.0, abs(v_fwd - v_des) / V_MAX_MPS)

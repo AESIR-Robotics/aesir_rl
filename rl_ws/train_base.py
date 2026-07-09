@@ -261,5 +261,5 @@ def train(num_iterations: int = 500,
 if __name__ == "__main__":
     train(
         use_wandb=False,
-        # resume_from="./checkpoints_base/base_best.pt",
+        resume_from="./checkpoints_base/base_best.pt",
     )

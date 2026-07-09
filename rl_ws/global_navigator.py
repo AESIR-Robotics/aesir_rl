@@ -3,12 +3,12 @@ import os
 import numpy as np
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.geometry import Point as ShapelyPoint
-from shapely.ops import unary_union
+from shapely.ops import unary_union, nearest_points
 
 ROBOT_RADIUS = 0.26         
 GAP_BRIDGE_DISTANCE = 0.15  
 GRID_RESOLUTION = 0.05 
-REACH_DIST = 0.30           
+REACH_DIST = 0.10           
 MAX_GUIDE_DIST = 5.0
 
 def box_corners_2d(center_xy: np.ndarray, half_sizes: np.ndarray, rot_mat: np.ndarray) -> np.ndarray:
@@ -47,7 +47,7 @@ def _aabb_dist(b1: tuple, b2: tuple) -> float:
     return np.sqrt(dx*dx + dy*dy)
 
 def vortex_apf(robot_xy: np.ndarray, target_xy: np.ndarray, obstacles: list[Obstacle2D], 
-               safe: float = 0.5, k: float = 0.35, rh: float = 0.28) -> np.ndarray:
+               safe: float = 0.35, k: float = 0.35, rh: float = 0.30) -> np.ndarray:
     rx, ry = float(robot_xy[0]), float(robot_xy[1])
     tx, ty = float(target_xy[0]), float(target_xy[1])
     dx, dy = tx - rx, ty - ry
@@ -65,14 +65,61 @@ def vortex_apf(robot_xy: np.ndarray, target_xy: np.ndarray, obstacles: list[Obst
     
     for o in obstacles:
         do = _aabb_dist(rb, o.bounds())
-        if 0.01 < do < safe:
-            m = k * (1. / do - 1. / safe) / (do**2) * min(1., dt / safe)
+        if do < safe:
+            # do = hueco entre la caja del robot (media anchura rh) y el
+            # obstaculo. Cuando el cuerpo del robot SOLAPA el obstaculo,
+            # _aabb_dist devuelve 0: antes el guard "0.01 < do" apagaba la
+            # repulsion justo ahi (el robot ya rozando/dentro) -> anillo muerto
+            # entre el obstaculo y el campo. Ahora acotamos do a un piso para
+            # que el solape de repulsion FUERTE (finita, sin 1/0) en vez de
+            # cero: la repulsion es continua desde el borde del obstaculo.
+            do_eff = max(do, 0.05)
+            m = k * (1. / do_eff - 1. / safe) / (do_eff**2) * min(1., dt / safe)
             d = np.hypot(rx - o.x, ry - o.y) + 1e-9
             rx_ = (rx - o.x) / d * m
             ry_ = (ry - o.y) / d * m
             rpx += rx_ - ry_
             rpy += ry_ + rx_
-            
+
+    attr_mag = np.hypot(adx, ady)
+
+    # (1) Acota la MAGNITUD total de la repulsion a REP_CAP * atraccion. La
+    # repulsion cruda es enorme cerca de un obstaculo (m ~ 1/do^2, cientos o
+    # miles) frente a la atraccion (<=1). Como la guia final es solo la
+    # DIRECCION de (vortex_pt - robot), una repulsion que domina hace que la
+    # direccion sea casi puramente tangencial (el swirl) -> el robot orbita el
+    # obstaculo sin avanzar. Acotarla a un multiplo de la atraccion deja que
+    # los obstaculos DESVIEN el rumbo pero nunca lo dominen. (Necesario sobre
+    # todo tras rellenar el "hueco": el solape ahora repele fuerte y sin este
+    # tope el robot circularia en pasillos estrechos.)
+    REP_CAP = 2.0
+    rep_mag = np.hypot(rpx, rpy)
+    cap = REP_CAP * attr_mag
+    if rep_mag > cap > 0.0:
+        s = cap / rep_mag
+        rpx *= s
+        rpy *= s
+
+    # (2) Si 2+ obstaculos se activan a la vez (p.ej. el robot pasando entre dos
+    # fatal_stick muy cercanos), la repulsion (ya acotada) todavia puede apuntar
+    # casi en contra de la atraccion y producir un ciclo estable: el robot rebota
+    # entre un punto con doble repulsion (lo empuja hacia atras) y uno con
+    # repulsion simple (lo vuelve a atraer). Acotar solo la magnitud no basta si
+    # el vector sigue casi opuesto. La correccion es recortar unicamente la
+    # componente de la repulsion que se OPONE al avance (su proyeccion sobre la
+    # direccion de atraccion), dejando intacta la componente perpendicular (la
+    # que esquiva). Asi el progreso neto hacia el objetivo es SIEMPRE > 0
+    # mientras haya atraccion, lo que hace imposible un ciclo estable.
+    if attr_mag > 1e-9:
+        ux, uy = adx / attr_mag, ady / attr_mag
+        rep_along = rpx * ux + rpy * uy
+        if rep_along < 0.0:
+            max_opposing = 0.9 * attr_mag       # deja siempre >=10% de avance neto
+            clipped = max(rep_along, -max_opposing)
+            delta = clipped - rep_along
+            rpx += delta * ux
+            rpy += delta * uy
+
     vx = adx + rpx
     vy = ady + rpy
     return np.array([rx + vx, ry + vy])
@@ -90,7 +137,20 @@ def _plan_segment(json_path: str, start_xy: tuple, goal_xy: tuple) -> list[tuple
     dilated = merged_pallets.buffer(GAP_BRIDGE_DISTANCE)
     closed = dilated.buffer(-GAP_BRIDGE_DISTANCE)
     safe_zone_union = closed.buffer(-ROBOT_RADIUS)
-    
+
+    blocker_polys = []
+    for s in data.get("sticks", []):
+        corners = box_corners_2d(np.array(s["center_xy"]), np.array(s["size"]), np.array(s["rot_mat"]))
+        blocker_polys.append(ShapelyPolygon(corners))
+    for o in data.get("obstacles", []):
+        if o["name"] == "col_manija":
+            continue
+        corners = box_corners_2d(np.array(o["center_xy"]), np.array(o["size"]), np.array(o["rot_mat"]))
+        blocker_polys.append(ShapelyPolygon(corners))
+    if blocker_polys:
+        blockers_inflated = unary_union(blocker_polys).buffer(ROBOT_RADIUS)
+        safe_zone_union = safe_zone_union.difference(blockers_inflated)
+
     all_pts = [np.array(p["center_xy"]) for p in data["pallets"]] + [np.array(start_xy), np.array(goal_xy)]
     xs = [pt[0] for pt in all_pts]
     ys = [pt[1] for pt in all_pts]

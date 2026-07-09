@@ -73,7 +73,7 @@ ARM_RESET_POSE = {
 
 # Spawn del chasis para el reset de episodio RL (frame de aesir_complete.xml,
 # mismo frame que obstacles.json). x, y, z, yaw(rad).
-SPAWN_POSE = (-2.0, 4.0, 0.20, 0.0)
+SPAWN_POSE = (-2.2, 4.2, 0.20, 0.0)
 SPAWN_SETTLE_STEPS = 50  # substeps de fisica para asentar tras teletransportar
 
 # ── Limites de movimiento tipo AVR446 (rampa trapezoidal), en radianes ──────
@@ -219,10 +219,6 @@ class MujocoHardwareBridge(Node):
             Trigger, "/mujoco_ros_bridge/reset_arm", self._reset_arm_cb
         )
 
-        # Reset de EPISODIO completo para RL (train_base.py): reinicia toda la
-        # simulacion — chasis al spawn, brazo en reposo, velocidades y rampas a
-        # cero — y deja la fisica asentada. Lo llama el trainer al empezar cada
-        # episodio via el cliente del servicio /mujoco_ros_bridge/reset_sim.
         self._reset_sim_srv = self.create_service(
             Trigger, "/mujoco_ros_bridge/reset_sim", self._reset_sim_cb
         )
@@ -352,10 +348,6 @@ class MujocoHardwareBridge(Node):
             state.velocity = [float(self.data.qvel[self._qvel_adr[n]]) for n in state.name]
             self.feedback_pub.publish(state)
 
-            # Velocidad base: qvel del freejoint es [lineal en frame mundo (3),
-            # angular en frame local del cuerpo (3)] — se rota la parte lineal
-            # a frame local para que Twist.linear.x sea "adelante" del chasis,
-            # igual que espera un consumidor de hardware_node/state_vel.
             lin_world = self.data.qvel[self._base_dof_adr:self._base_dof_adr + 3]
             ang_body  = self.data.qvel[self._base_dof_adr + 3:self._base_dof_adr + 6]
             quat      = self.data.qpos[self._base_qpos_adr + 3:self._base_qpos_adr + 7]
