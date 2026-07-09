@@ -152,21 +152,37 @@ _FIELD_VMIN, _FIELD_VMAX = 0.0, 1.5
 _FIELD_NORM = Normalize(vmin=_FIELD_VMIN, vmax=_FIELD_VMAX)
 
 
-def _field_vec(p, target, obstacles, safe, k, rh, repulsion_only):
+def _field_vec(p, target, obstacles, edges, att_gain, att_range, rep_gain, rep_range,
+              rh, swirl, min_progress, repulsion_only):
     """Vector de guia en el punto p. repulsion_only=True resta la atraccion
-    para dejar SOLO la repulsion (el remolino que empuja lejos del obstaculo);
-    False devuelve el campo completo (atraccion + repulsion) que ve el robot."""
-    full = vortex_apf(p, target, obstacles, safe, k, rh) - p
+    para dejar SOLO la repulsion (obstaculos + bordes de pallets); False
+    devuelve el campo completo (atraccion + repulsion) que ve el robot.
+
+    IMPORTANTE: recibe TODOS los parametros del campo (no solo rep_gain/
+    rep_range/rh) para que el quiver dibujado sea matematicamente el MISMO
+    campo que evalua GlobalNavigator.step() -> vortex_apf() durante la
+    simulacion. Antes, swirl/att_gain/att_range/min_progress no se pasaban
+    y vortex_apf() caia en sus propios defaults de modulo -- coincidian
+    por casualidad con los defaults de GlobalNavigator, pero se
+    desincronizaban en silencio si 'nav' se construia con otros valores."""
+    full = vortex_apf(p, target, obstacles, edges=edges,
+                      att_gain=att_gain, att_range=att_range,
+                      rep_gain=rep_gain, rep_range=rep_range,
+                      rh=rh, swirl=swirl, min_progress=min_progress) - p
     if not repulsion_only:
         return full
     tgt = np.asarray(target, dtype=float)
     d = tgt - p
     dt = float(np.hypot(*d))
-    att = (d / dt) * min(1.0, dt) if dt > 1e-9 else np.zeros(2)
+    # atraccion con los MISMOS att_gain/att_range que usa el campo completo
+    # (antes estaba hardcodeada a att_gain=1, att_range=1 sin importar el
+    # valor real pasado/usado por nav).
+    att = (d / dt) * att_gain * min(dt / att_range, 1.0) if dt > 1e-9 else np.zeros(2)
     return full - att
 
 
-def _quiver_field(ax, X, Y, target, obstacles, safe, k, rh, repulsion_only):
+def _quiver_field(ax, X, Y, target, obstacles, edges, att_gain, att_range, rep_gain,
+                  rep_range, rh, swirl, min_progress, repulsion_only):
     """Dibuja un quiver coloreado por magnitud sobre la grilla X,Y."""
     U = np.zeros_like(X)
     V = np.zeros_like(Y)
@@ -174,7 +190,8 @@ def _quiver_field(ax, X, Y, target, obstacles, safe, k, rh, repulsion_only):
     for r in range(X.shape[0]):
         for c in range(X.shape[1]):
             p = np.array([X[r, c], Y[r, c]])
-            vec = _field_vec(p, target, obstacles, safe, k, rh, repulsion_only)
+            vec = _field_vec(p, target, obstacles, edges, att_gain, att_range,
+                             rep_gain, rep_range, rh, swirl, min_progress, repulsion_only)
             nrm = float(np.hypot(*vec))
             M[r, c] = nrm
             if nrm > 1e-6:
@@ -185,7 +202,8 @@ def _quiver_field(ax, X, Y, target, obstacles, safe, k, rh, repulsion_only):
 
 
 def draw_vortex_field(ax, nav: GlobalNavigator, goal_xy, xlim, ylim,
-                      safe=0.35, k=0.35, rh=0.1, repulsion_only=False, n=32):
+                      att_gain=1.0, att_range=1.0, rep_gain=0.35, rep_range=0.35,
+                      rh=0.30, swirl=1.0, min_progress=0.1, repulsion_only=False, n=32):
     """Campo vortex coloreado por magnitud tomando la meta FINAL como atractor
     unico global. Vista de conjunto rapida (--field-mode global). El campo REAL
     por tramo lo da draw_vortex_field_route."""
@@ -193,17 +211,19 @@ def draw_vortex_field(ax, nav: GlobalNavigator, goal_xy, xlim, ylim,
     ys = np.linspace(ylim[0], ylim[1], n)
     X, Y = np.meshgrid(xs, ys)
     return _quiver_field(ax, X, Y, np.array(goal_xy, float),
-                         nav._vo, safe, k, rh, repulsion_only)
+                         nav._vo, nav._edges, att_gain, att_range, rep_gain,
+                         rep_range, rh, swirl, min_progress, repulsion_only)
 
 
 def draw_vortex_field_route(ax, nav: GlobalNavigator, waypoints, density=10.0,
                             local_margin=0.7, min_grid=5,
-                            safe=0.35, k=0.35, rh=0.30, repulsion_only=False):
+                            att_gain=1.0, att_range=1.0, rep_gain=0.35, rep_range=0.35,
+                            rh=0.30, swirl=1.0, min_progress=0.1, repulsion_only=False):
     """Campo vortex REAL a lo largo de TODA la ruta, coloreado por magnitud:
     para cada tramo wps[i] -> wps[i+1] el atractor es wps[i+1] -- exactamente
     el target que usa GlobalNavigator.step() mientras self._wi == i+1 -- en vez
     de la meta final fija. Mosaico de quivers locales, uno por tramo, para que
-    el remolino de repulsion alrededor de cada obstaculo/stick se vea tal como
+    el remolino de repulsion (obstaculos + bordes de pallets) se vea tal como
     lo experimenta el robot en ESE tramo.
 
     density = puntos de grilla por metro (mas alto = mas denso/lento)."""
@@ -218,7 +238,8 @@ def draw_vortex_field_route(ax, nav: GlobalNavigator, waypoints, density=10.0,
         xs = np.linspace(*seg_xlim, nx)
         ys = np.linspace(*seg_ylim, ny)
         X, Y = np.meshgrid(xs, ys)
-        q = _quiver_field(ax, X, Y, p1, nav._vo, safe, k, rh, repulsion_only)
+        q = _quiver_field(ax, X, Y, p1, nav._vo, nav._edges, att_gain, att_range,
+                          rep_gain, rep_range, rh, swirl, min_progress, repulsion_only)
     return q
 
 
@@ -234,13 +255,22 @@ def main():
                         help="puntos de grilla por metro en modo --field-mode=route")
     parser.add_argument("--repulsion", action="store_true",
                         help="dibujar SOLO la repulsion (resta la atraccion) — muestra"
-                             " el remolino puro alrededor de obstaculos/sticks")
-    parser.add_argument("--safe", type=float, default=0.35,
-                        help="rango de activacion de repulsion [m] (vortex_apf.safe)")
-    parser.add_argument("--k", type=float, default=0.35,
-                        help="ganancia de repulsion (vortex_apf.k)")
-    parser.add_argument("--rh", type=float, default=0.30,
-                        help="media anchura del robot [m] (vortex_apf.rh)")
+                             " el remolino puro de obstaculos + bordes de pallets")
+    parser.add_argument("--rep-gain", type=float, default=None,
+                        help="grado de repulsion (default: el mismo que usa 'nav', "
+                             "que es el que realmente siguio el robot)")
+    parser.add_argument("--rep-range", type=float, default=None,
+                        help="distancia de repulsion [m] (default: el de 'nav')")
+    parser.add_argument("--rh", type=float, default=None,
+                        help="media anchura del robot [m] (default: el de 'nav')")
+    parser.add_argument("--att-gain", type=float, default=None,
+                        help="grado de atraccion (default: el de 'nav')")
+    parser.add_argument("--att-range", type=float, default=None,
+                        help="distancia de atraccion [m] (default: el de 'nav')")
+    parser.add_argument("--swirl", type=float, default=None,
+                        help="peso de la componente tangencial (default: el de 'nav')")
+    parser.add_argument("--min-progress", type=float, default=None,
+                        help="fraccion minima de avance garantizado (default: el de 'nav')")
     parser.add_argument("--start", type=float, nargs=2, default=list(SPAWN_XYZ[:2]))
     parser.add_argument("--goal", type=float, nargs=2, default=list(GOAL_XY))
     args = parser.parse_args()
@@ -289,17 +319,29 @@ def main():
     ylim = (min(ys) - 1.5, max(ys) + 1.5)
 
     if args.field:
+        # Los parametros del campo se toman de 'nav' por default -- el MISMO
+        # objeto que genero vortex_path -- y solo se pisan si el usuario los
+        # especifico explicitamente por CLI. Asi el quiver siempre es fiel a
+        # la trayectoria dibujada, salvo que uno pida explorar "que pasaria
+        # si..." con otros valores.
+        field_params = dict(
+            att_gain=args.att_gain if args.att_gain is not None else nav._att_gain,
+            att_range=args.att_range if args.att_range is not None else nav._att_range,
+            rep_gain=args.rep_gain if args.rep_gain is not None else nav._rep_gain,
+            rep_range=args.rep_range if args.rep_range is not None else nav._rep_range,
+            rh=args.rh if args.rh is not None else nav._rh,
+            swirl=args.swirl if args.swirl is not None else nav._swirl,
+            min_progress=args.min_progress if args.min_progress is not None else nav._min_progress,
+        )
         kind = "repulsion pura" if args.repulsion else "campo completo (atrac+repul)"
-        print(f"Dibujando campo vortex (modo={args.field_mode}, {kind}, "
-              f"safe={args.safe} k={args.k} rh={args.rh}) ...")
+        print(f"Dibujando campo vortex (modo={args.field_mode}, {kind}) con los "
+              f"parametros REALES de nav: {field_params}")
         if args.field_mode == "route":
             draw_vortex_field_route(ax, nav, waypoints, density=args.density,
-                                    safe=args.safe, k=args.k, rh=args.rh,
-                                    repulsion_only=args.repulsion)
+                                    repulsion_only=args.repulsion, **field_params)
         else:
             draw_vortex_field(ax, nav, goal_xy, xlim, ylim,
-                              safe=args.safe, k=args.k, rh=args.rh,
-                              repulsion_only=args.repulsion)
+                              repulsion_only=args.repulsion, **field_params)
         # Colorbar de la magnitud del campo (una sola, escala compartida).
         sm = ScalarMappable(norm=_FIELD_NORM, cmap=_FIELD_CMAP)
         cbar = fig.colorbar(sm, ax=ax, fraction=0.035, pad=0.02)
