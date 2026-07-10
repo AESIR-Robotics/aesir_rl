@@ -45,6 +45,7 @@ from geometry_msgs.msg import Twist, PoseStamped
 from sensor_msgs.msg import JointState
 from hardware.msg import JointControl
 from std_srvs.srv import Trigger
+from std_msgs.msg import Int32
 
 from global_navigator import plan_route, GlobalNavigator, quat_to_yaw
 
@@ -59,7 +60,7 @@ CONTROL_HZ  = 20.0     # frecuencia del lazo de control RL
 
 # ── Mision (frame de aesir_complete.xml == frame de obstacles.json) ──────────
 # Spawn = SPAWN_POSE del bridge; meta = ultimo pallet de obstacles.json.
-START_XY: Tuple[float, float] = (-2.2, 4.2)
+START_XY: Tuple[float, float] = (-2.1, 4.1)
 GOAL_XY:  Optional[Tuple[float, float]] = None   # None -> ultimo pallet del JSON
 FINISH_DIST = 0.60
 EPISODE_MAX_STEPS = 2500
@@ -68,16 +69,28 @@ FLIPPER_JOINTS = ["flipper_1_joint", "flipper_2_joint", "flipper_3_joint", "flip
 
 # ── Pesos de reward ────────────────────────────────────────────────────────
 # objetivo que da la guia del vortex.
-W_DIRECTION    = 1.0     # encarar al objetivo (cos Δθ)
-W_VELOCITY     = 1.5     # igualar la velocidad forward objetivo
+W_DIRECTION    = 0.5     # encarar al objetivo (cos Δθ)
+W_VELOCITY     = 0.5     # igualar la velocidad forward objetivo
 
-WP_BONUS       = 50.0    # bonus al cruzar un waypoint       
-TIME_PENALTY   = 0.02
-FALL_PENALTY   = 100.0
+WP_BONUS       = 200.0    # bonus al cruzar un waypoint
+TIME_PENALTY   = 0.1
+FALL_PENALTY   = 250.0
 STUCK_MAX      = 2.0
 ENERGY_W       = 1e-4    # costo de energia (antes: 1e-9 * ctrl^2, ahora accion^2)
 FLIPPER_JERK_W = 0.5
 TILT_W         = 5.0
+FLIPPER_COLLISION_W = 50.0   # castigo por auto-colision de flippers (x penetracion)
+
+# ── Geometria de flippers (para detectar auto-colision desde los angulos) ────
+FLIPPER_MOUNTS = np.array([
+    [-0.24, -0.274, 0.06],   # flipper_1  (atras-izq)
+    [ 0.24, -0.274, 0.06],   # flipper_2  (atras-der)
+    [ 0.24,  0.274, 0.06],   # flipper_3  (frente-der)
+    [-0.24,  0.274, 0.06],   # flipper_4  (frente-izq)
+], dtype=np.float64)
+FLIPPER_AXIS_SIGN      = np.array([-1.0, -1.0, 1.0, 1.0])  # eje (0,-1,0) vs (0,1,0)
+FLIPPER_L              = 0.35   # pivote -> punta (centro de la rueda del extremo)
+FLIPPER_COLLISION_DIST = 0.13   # 2*radio_rueda(0.055) + margen: mas cerca = colision
 
 # ── Tamaños expuestos a la politica ──────────────────────────────────────────
 OBS_DIM = 15   # guia(3) + twist_base(3) + flipper_qpos(4) + flipper_qvel(4) + upright(1)
@@ -112,12 +125,14 @@ class _BridgeInterface(Node):
         self._twist     = np.zeros(3, dtype=np.float32)  # [v_fwd, v_lat, omega_z]
         self._flip_qpos = np.zeros(4, dtype=np.float32)
         self._flip_qvel = np.zeros(4, dtype=np.float32)
+        self._floor_contact = 0                          # nº de contactos robot<->piso
 
         self.cmd_vel_pub = self.create_publisher(Twist, "hardware_node/cmd_vel", 10)
         self.joint_pub   = self.create_publisher(JointControl, "/commands_hardware", 10)
         self.create_subscription(PoseStamped, "hardware_node/pose", self._pose_cb, 10)
         self.create_subscription(Twist, "hardware_node/state_vel", self._vel_cb, 10)
         self.create_subscription(JointState, "/hardware_node/joint_states", self._js_cb, 10)
+        self.create_subscription(Int32, "/hardware_node/floor_contact", self._floor_cb, 10)
 
         self.reset_cli = self.create_client(Trigger, "/mujoco_ros_bridge/reset_sim")
 
@@ -148,6 +163,10 @@ class _BridgeInterface(Node):
         with self._lock:
             self._flip_qpos, self._flip_qvel = qpos, qvel
 
+    def _floor_cb(self, msg: Int32):
+        with self._lock:
+            self._floor_contact = int(msg.data)
+
     # ── Snapshot de feedback ─────────────────────────────────────────────────
     def feedback(self) -> Optional[dict]:
         with self._lock:
@@ -157,6 +176,7 @@ class _BridgeInterface(Node):
                 xy=self._pose_xy.copy(), z=self._pose_z, yaw=self._yaw,
                 upright=self._upright, twist=self._twist.copy(),
                 flip_qpos=self._flip_qpos.copy(), flip_qvel=self._flip_qvel.copy(),
+                floor_contact=self._floor_contact,
             )
 
     # ── Publicar accion ──────────────────────────────────────────────────────
@@ -215,6 +235,33 @@ class _RewardState:
         self.stuck = 0
 
 
+def _flipper_tips(flip_qpos: np.ndarray) -> np.ndarray:
+    """Posicion 3D (x,y,z) de la punta de cada flipper dado su angulo de pivote
+    (rad, convencion ROS). Pivote sobre eje y:
+        tip = mount + (axis_sign * L * sin(theta), 0, L * cos(theta))"""
+    th = np.asarray(flip_qpos, dtype=np.float64)
+    tips = FLIPPER_MOUNTS.copy()
+    tips[:, 0] += FLIPPER_AXIS_SIGN * FLIPPER_L * np.sin(th)
+    tips[:, 2] += FLIPPER_L * np.cos(th)
+    return tips
+
+
+def _flipper_collision_penalty(flip_qpos: np.ndarray) -> float:
+    """Castigo por auto-colision de flippers: por cada par de puntas mas cercano
+    que FLIPPER_COLLISION_DIST, castigo proporcional a la penetracion. Los pares
+    que geometricamente NO pueden chocar (flippers de lados y opuestos) quedan
+    siempre lejos del umbral, asi que no disparan. Colisionan sobre todo el par
+    trasero (1,2) y el delantero (3,4) al girar uno hacia el otro."""
+    tips = _flipper_tips(flip_qpos)
+    pen = 0.0
+    for i in range(4):
+        for j in range(i + 1, 4):
+            d = float(np.linalg.norm(tips[i] - tips[j]))
+            if d < FLIPPER_COLLISION_DIST:
+                pen += FLIPPER_COLLISION_DIST - d
+    return FLIPPER_COLLISION_W * pen
+
+
 def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardState) -> float:
     """Igual estructura que BaseMuJoCoEnv._reward (version directa-MuJoCo):
     caida letal -> castigos conservados (stuck, energia, jerk de flippers,
@@ -228,8 +275,8 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     target_xy = np.asarray(guidance["target"], dtype=np.float64)
     v_fwd = float(fb["twist"][0])
 
-    # 1. Caida letal
-    if fb["z"] < 0.10:
+    # 1. Caida letal (chasis muy bajo) o tocar piso (salirse de los pallets):
+    if fb["z"] < 0.10 or fb.get("floor_contact", 0) > 0:
         return -FALL_PENALTY
 
     # 2. Inactividad 
@@ -251,12 +298,16 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     flipper_pen = FLIPPER_JERK_W * float(np.square(current_flipper - rs.last_flip).mean())
     rs.last_flip = current_flipper.copy()
 
-    # 5. Inclinacion 
+    # 5. Inclinacion
     tilt_pen = max(0.0, 0.65 - float(fb["upright"])) * TILT_W
 
-    penalties = penalty_stuck + action_cost + flipper_pen + tilt_pen
+    # 6. Auto-colision de flippers (dos flippers cuyas puntas se tocan) — se
+    #    evalua sobre los angulos REALES medidos (fb["flip_qpos"]).
+    flipper_collision_pen = _flipper_collision_penalty(fb["flip_qpos"])
 
-    # 6. Waypoint cruzado — al cruzarlo
+    penalties = penalty_stuck + action_cost + flipper_pen + tilt_pen + flipper_collision_pen
+
+    # 7. Waypoint cruzado — al cruzarlo
     #    se devuelve solo el bonus mas las penalizaciones (sin progreso ni
     #    direccion/velocidad ese paso).
     if guidance["wp"] > rs.last_wp:
@@ -264,7 +315,7 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
         rs.last_dist_to_target = float(np.linalg.norm(xy - target_xy))
         return WP_BONUS - penalties
 
-    # 7. Progreso hacia el waypoint actual (delta_dist * boost
+    # 8. Progreso hacia el waypoint actual (delta_dist * boost
     #    exponencial de proximidad, misma formula que la version pallet)
     dist_to_target = float(np.linalg.norm(xy - target_xy))
     delta_dist = rs.last_dist_to_target - dist_to_target
@@ -272,11 +323,16 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     progress_reward = delta_dist * (50.0 + 100.0 * proximity_multiplier)
     rs.last_dist_to_target = dist_to_target
 
-    # 8. Direccion y velocidad objetivo (la guia del vortex)
-    direction_reward = W_DIRECTION * float(cos_t)
-    v_des = V_MAX_MPS * float(dist_norm) * max(0.0, float(cos_t))
-    speed_match = 1.0 - min(1.0, abs(v_fwd - v_des) / V_MAX_MPS)
-    velocity_reward = W_VELOCITY * speed_match
+    # 9. Direccion y velocidad objetivo (SOLO SI AVANZA)
+    # Solo damos esta recompensa si delta_dist es positivo (se acerco al objetivo)
+    if delta_dist > 0:
+        direction_reward = W_DIRECTION * float(cos_t)
+        v_des = V_MAX_MPS * float(dist_norm) * max(0.0, float(cos_t))
+        speed_match = 1.0 - min(1.0, abs(v_fwd - v_des) / V_MAX_MPS)
+        velocity_reward = W_VELOCITY * speed_match
+    else:
+        direction_reward = 0.0
+        velocity_reward = 0.0
 
     return progress_reward + direction_reward + velocity_reward - penalties - TIME_PENALTY
 
@@ -291,6 +347,9 @@ def _terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int, max_steps: int) ->
         return True, False
     if fb["z"] < 0.10:
         print("[base_env] 🛑 Episodio terminado por caida (base demasiado bajo)")
+        return True, False
+    if fb.get("floor_contact", 0) > 0:
+        print("[base_env] 🛑 Episodio terminado: una parte del robot toco el piso")
         return True, False
     if float(np.linalg.norm(fb["xy"] - goal_xy)) < FINISH_DIST:
         print("[base_env] 🏆 ¡Meta alcanzada!")

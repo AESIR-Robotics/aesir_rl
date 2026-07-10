@@ -5,7 +5,7 @@ from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.geometry import Point as ShapelyPoint
 from shapely.ops import unary_union, nearest_points
 
-ROBOT_RADIUS = 0.26
+ROBOT_RADIUS = 0.30
 GAP_BRIDGE_DISTANCE = 0.15
 GRID_RESOLUTION = 0.05
 REACH_DIST = 0.10
@@ -14,7 +14,7 @@ CORNER_DOT_THRESHOLD = 0.99  # turn is kept as a corner if dot(v1, v2) < this va
 MAX_WAYPOINT_DIST = 0.50     # max spacing (m) between consecutive waypoints on straight segments
 
 ATT_GAIN   = 1.0    # grado de atraccion (magnitud maxima del pull al waypoint)
-ATT_RANGE  = 1.0    # distancia sobre la que la atraccion crece de 0 a ATT_GAIN
+ATT_RANGE  = 0.1    # distancia sobre la que la atraccion crece de 0 a ATT_GAIN
 REP_GAIN   = 1.0    # grado de repulsion (magnitud maxima del push por fuente)
 REP_RANGE  = 0.1   # distancia (del cuerpo del robot) a la que empieza a repeler
 ROBOT_HALF = 0.30   # media anchura del robot (su cuerpo, no un punto)

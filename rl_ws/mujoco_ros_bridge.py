@@ -41,6 +41,7 @@ from sensor_msgs.msg import JointState
 from geometry_msgs.msg import Twist, PoseStamped
 from hardware.msg import JointControl
 from std_srvs.srv import Trigger
+from std_msgs.msg import Int32
 
 _HERE    = os.path.dirname(os.path.abspath(__file__))
 _FULL    = os.path.join(_HERE, "../models/aesir_complete.xml")
@@ -73,7 +74,7 @@ ARM_RESET_POSE = {
 
 # Spawn del chasis para el reset de episodio RL (frame de aesir_complete.xml,
 # mismo frame que obstacles.json). x, y, z, yaw(rad).
-SPAWN_POSE = (-2.2, 4.2, 0.20, 0.0)
+SPAWN_POSE = (-2.1, 4.1, 0.20, 0.0)
 SPAWN_SETTLE_STEPS = 50  # substeps de fisica para asentar tras teletransportar
 
 # ── Limites de movimiento tipo AVR446 (rampa trapezoidal), en radianes ──────
@@ -196,8 +197,27 @@ class MujocoHardwareBridge(Node):
         self._base_qpos_adr = self.model.jnt_qposadr[base_jid]
         self._base_dof_adr  = self.model.jnt_dofadr[base_jid]
 
+        # Deteccion de contacto robot <-> PISO (el suelo a evitar, no los pallets).
+        # 'floor' = todos los geoms tipo plano (muerte_suelo_penalizacion en z=0 y
+        # el floor por defecto en z=-1). 'robot' = todos los geoms cuyo cuerpo raiz
+        # es el chasis (footprint_link, el que tiene el freejoint) -> excluye
+        # pallets/sticks/puerta, que son estaticos. Un contacto entre ambos = una
+        # parte del robot toco el piso -> se publica el conteo para castigarlo.
+        self._floor_gids = {
+            gid for gid in range(self.model.ngeom)
+            if int(self.model.geom_type[gid]) == mujoco.mjtGeom.mjGEOM_PLANE
+        }
+        robot_root = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "footprint_link")
+        self._robot_gids = {
+            gid for gid in range(self.model.ngeom)
+            if int(self.model.body_rootid[self.model.geom_bodyid[gid]]) == robot_root
+        }
+
         self.feedback_pub = self.create_publisher(
             JointState, "/hardware_node/joint_states", 10
+        )
+        self.floor_contact_pub = self.create_publisher(
+            Int32, "/hardware_node/floor_contact", 10
         )
         self.command_sub = self.create_subscription(
             JointControl, "/commands_hardware", self._command_cb, 10
@@ -223,8 +243,8 @@ class MujocoHardwareBridge(Node):
             Trigger, "/mujoco_ros_bridge/reset_sim", self._reset_sim_cb
         )
 
-        self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
-        self.viewer.cam.distance = 1.5
+        #self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+        #self.viewer.cam.distance = 1.5
 
         self._timer = self.create_timer(1.0 / PHYSICS_HZ, self._physics_step)
         self.get_logger().info(
@@ -378,16 +398,25 @@ class MujocoHardwareBridge(Node):
             pose_msg.pose.orientation.z = float(quat[3])
             self.pose_pub.publish(pose_msg)
 
-        if self.viewer.is_running():
-            self.viewer.sync()
-        else:
-            rclpy.shutdown()
+            n_floor = 0
+            for i in range(self.data.ncon):
+                c = self.data.contact[i]
+                g1, g2 = int(c.geom1), int(c.geom2)
+                if ((g1 in self._floor_gids and g2 in self._robot_gids) or
+                        (g2 in self._floor_gids and g1 in self._robot_gids)):
+                    n_floor += 1
+            self.floor_contact_pub.publish(Int32(data=n_floor))
+
+        #if self.viewer.is_running():
+        #    self.viewer.sync()
+        #else:
+        #    rclpy.shutdown()
 
     def destroy_node(self) -> None:
-        try:
-            self.viewer.close()
-        except Exception:
-            pass
+        #try:
+        #    self.viewer.close()
+        #except Exception:
+        #    pass
         super().destroy_node()
 
 
