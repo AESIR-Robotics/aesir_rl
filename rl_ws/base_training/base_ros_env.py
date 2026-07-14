@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-base_env.py — Env de la base (oruga + flippers), Gym-like, sobre el bridge ROS2.
+base_ros_env.py — Env de la base (oruga + flippers), Gym-like, sobre el bridge ROS2.
 
 Responsabilidad de este modulo: TODO lo que define "el mundo" que ve la
 politica — guia de navegacion, observacion, reward, terminacion, reset — igual
 que en la version directa-MuJoCo original (BaseMuJoCoEnv). La diferencia es
-que aqui la fisica no la posee este proceso: vive en mujoco_ros_bridge.py y se
+que aqui la fisica no la posee este proceso: vive en mujoco_sim_rosbridge.py y se
 habla con ella por ROS2.
 
     BaseRosEnv.reset()        -> obs
@@ -26,7 +26,7 @@ train_base.py es el script general (pipeline): importa BaseRosEnv, instancia
 la politica PPO y corre el bucle de entrenamiento — no conoce ROS ni reward.
 
 REQUIERE, en OTRA terminal, el bridge corriendo:
-    cd rl_ws && MUJOCO_GL=glfw python3 mujoco_ros_bridge.py
+    cd rl_ws && MUJOCO_GL=glfw python3 base_training/mujoco_sim_rosbridge.py
 """
 from __future__ import annotations
 
@@ -47,73 +47,23 @@ from hardware.msg import JointControl
 from std_srvs.srv import Trigger
 from std_msgs.msg import Int32
 
-from rl_ws.global_navigator import plan_route, GlobalNavigator, quat_to_yaw
+from rl_ws.global_navigator import plan_route, GlobalNavigator, quat_to_yaw, quat_upright
 
-_HERE    = os.path.dirname(os.path.abspath(__file__))
-NAV_JSON = os.path.join(_HERE, "obstacles.json")
-
-# ── Escalas de comando ───────────────────────
-V_MAX_MPS   = 0.6      # linear.x  a v_norm = 1
-W_MAX_RADPS = 1.5      # angular.z a w_norm = 1
-FLIPPER_MAX = 3.1416   # rad a flip = 1
-# Limite de recorrido de los flippers (por software), asimetrico.
-FLIPPER_MIN_RAD = -1.3
-FLIPPER_MAX_RAD = 3.14159
-CONTROL_HZ  = 20.0     # frecuencia del lazo de control RL (periodo de sim = 1/CONTROL_HZ)
-
-SIM_SPEEDUP = 2.5
-
-# ── Mision (frame de aesir_complete.xml == frame de obstacles.json) ──────────
-# Spawn = SPAWN_POSE del bridge; meta = ultimo pallet de obstacles.json.
-START_XY: Tuple[float, float] = (-1.5, 3.5)
-GOAL_XY:  Optional[Tuple[float, float]] = None   # None -> ultimo pallet del JSON
-FINISH_DIST = 0.60
-EPISODE_MAX_STEPS = 5000
-
-FLIPPER_JOINTS = ["flipper_1_joint", "flipper_2_joint", "flipper_3_joint", "flipper_4_joint"]
-
-# ── Pesos de reward ────────────────────────────────────────────────────────
-# objetivo que da la guia del vortex.
-W_DIRECTION    = 0.7     # encarar al objetivo (cos Δθ)
-W_VELOCITY     = 0.7     # igualar la velocidad forward objetivo
-WP_BONUS       = 200.0    # bonus al cruzar un waypoint
-TIME_PENALTY   = 0.1
-FALL_PENALTY   = 250.0
-STUCK_MAX      = 2.0
-ENERGY_W       = 1e-8    # costo de energia 
-FLIPPER_JERK_W = 0.5
-TILT_W         = 5.0
-FLIPPER_COLLISION_W = 50.0   # castigo por auto-colision de flippers (x penetracion)
-# Castigo por aceleraciones FUERTES del chasis (cuidar la integridad del robot):
-# cambio del twist base entre pasos, normalizado; zona muerta deja pasar la
-# aceleracion normal (ir rapido) y solo castiga el exceso (jolts) al cuadrado.
-ACCEL_W        = 1.5
-ACCEL_DEADZONE = 0.3
-# Velocidad deseada = DISTANCIA al punto-guia del vortex (lejos -> rapido, cerca
-# -> lento). Se premia alcanzarla encarando la guia; retroceder se castiga.
-GUIDE_SPEED_SCALE = 1.0   # [m] distancia del guia que ya pide velocidad plena V_MAX
-BACKWARD_W        = 2.0   # castigo por retroceder (x fraccion de V_MAX en reversa)
-
-# ── Geometria de flippers (para detectar auto-colision desde los angulos) ────
-FLIPPER_MOUNTS = np.array([
-    [ 0.24,  0.274, 0.06],   # flipper_1  (frente-izq)
-    [ 0.24, -0.274, 0.06],   # flipper_2  (frente-der)
-    [-0.24,  0.274, 0.06],   # flipper_3  (atras-izq)
-    [-0.24, -0.274, 0.06],   # flipper_4  (atras-der)
-], dtype=np.float64)
-# flipper_1,2 (frente) eje (0,1,0) -> +1 ; flipper_3,4 (atras) eje (0,-1,0) -> -1
-FLIPPER_AXIS_SIGN      = np.array([1.0, 1.0, -1.0, -1.0])
-FLIPPER_L              = 0.35   # pivote -> punta (centro de la rueda del extremo)
-FLIPPER_COLLISION_DIST = 0.13   # 2*radio_rueda(0.055) + margen: mas cerca = colision
-
-# ── Lookahead de la trayectoria (puntos futuros del vortex que ve la politica)
-N_LOOKAHEAD    = 5      # nº de puntos futuros del rollout del vortex
-LOOKAHEAD_STEP = 0.30   # avance (m) del rollout por punto
-
-# ── Tamaños expuestos a la politica ──────────────────────────────────────────
-# guia(3) + lookahead(3*N) + twist_base(3) + flipper_qpos(4) + flipper_qvel(4) + upright(1)
-OBS_DIM = 15 + 3 * N_LOOKAHEAD
-ACT_DIM = 6    # v, ω, flipper×4  (la politica controla base + flippers)
+# TODOS los parametros (escalas de comando, mision, pesos de reward, geometria
+# de flippers, lookahead, OBS/ACT y la seccion ROS2) viven en base_training/
+# config.py — el MISMO archivo que usa el pipeline de entrenamiento rapido, asi
+# la politica ve identica tarea aqui que en train_fast.
+from rl_ws.base_training.config import (
+    NAV_JSON,
+    V_MAX_MPS, W_MAX_RADPS, FLIPPER_MAX, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD,
+    START_XY, GOAL_XY, FINISH_DIST, EPISODE_MAX_STEPS,
+    W_DIRECTION, W_VELOCITY, WP_BONUS, TIME_PENALTY, FALL_PENALTY,
+    STUCK_MAX, ENERGY_W, FLIPPER_JERK_W, TILT_W, FLIPPER_COLLISION_W,
+    ACCEL_W, ACCEL_DEADZONE, GUIDE_SPEED_SCALE, BACKWARD_W,
+    FLIPPER_MOUNTS, FLIPPER_AXIS_SIGN, FLIPPER_L, FLIPPER_COLLISION_DIST,
+    N_LOOKAHEAD, LOOKAHEAD_STEP, OBS_DIM, ACT_DIM,
+    FLIPPER_JOINTS, CONTROL_HZ, SIM_SPEEDUP,
+)
 
 
 # ── Convencion "hardware" (espejo de topic_bridge_hardware.cpp) ──────────────
@@ -122,11 +72,6 @@ def hw_to_ros(rad: float) -> float:
 
 def ros_to_hw(rad: float) -> float:
     return rad + math.pi
-
-def quat_upright(quat_wxyz) -> float:
-    """Componente z del eje z del chasis (R[2,2]): 1 = vertical, 0 = tumbado."""
-    w, x, y, z = quat_wxyz
-    return 1.0 - 2.0 * (x * x + y * y)
 
 
 # ──────────────────────────── Nodo ROS2: E/S con el bridge ─────────────────
@@ -435,7 +380,7 @@ def _terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int, max_steps: int) ->
 
 # ──────────────────────────── Env Gym-like ──────────────────────────────────
 class BaseRosEnv:
-    """Env de entrenamiento de la base, sobre mujoco_ros_bridge.py via ROS2.
+    """Env de entrenamiento de la base, sobre mujoco_sim_rosbridge.py via ROS2.
 
     Uso (igual forma que la BaseMuJoCoEnv original):
         env = BaseRosEnv()

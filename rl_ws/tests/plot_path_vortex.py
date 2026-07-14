@@ -40,10 +40,15 @@ if _RL_WS_ROOT not in sys.path:
 from global_navigator import (
     plan_route, box_corners_2d, GlobalNavigator, vortex_apf, REACH_DIST,
 )
-# Inicio/meta del pipeline ACTUAL (mismos valores que usan base_ros_env y
-# train_base) tomados de world_base, que es su fuente pura — sin arrastrar
+# TODOS los parametros compartidos (inicio/meta de la mision, escalas de
+# comando, geometria de la zona segura) salen de base_training/config.py — la
+# misma fuente que usan los dos backends de entrenamiento. Sin arrastrar
 # ROS/mujoco/torch, asi este script sigue corriendo sin sourcear el workspace.
-from base_training.base_env import START_XY as _START_XY, GOAL_XY as _GOAL_XY, NAV_JSON as _WB_NAV
+from base_training.config import (
+    START_XY as _START_XY, GOAL_XY as _GOAL_XY, NAV_JSON as _WB_NAV, SPAWN_Z,
+    V_MAX_MPS, W_MAX_RADPS, FINISH_DIST,
+    ROBOT_RADIUS, GAP_BRIDGE_DISTANCE,
+)
 
 def _resolve_goal():
     if _GOAL_XY is not None:
@@ -51,30 +56,25 @@ def _resolve_goal():
     with open(_WB_NAV, "r") as _f:                 # None -> ultimo pallet del JSON
         return tuple(json.load(_f)["pallets"][-1]["center_xy"])
 
-SPAWN_XYZ = (float(_START_XY[0]), float(_START_XY[1]), 0.25)   # compat: [:2] es el inicio
+SPAWN_XYZ = (float(_START_XY[0]), float(_START_XY[1]), float(SPAWN_Z))   # compat: [:2] es el inicio
 GOAL_XY   = _resolve_goal()
-
-ROBOT_RADIUS = 0.1
-GAP_BRIDGE_DISTANCE = 0.15
 
 STYLE_OBSTACLE    = dict(fc="#2f3542", ec="#000000", alpha=0.90, zorder=2, lw=0.8)
 STYLE_STICK       = dict(fc="#e17055", ec="#d63031", alpha=0.95, zorder=2, lw=1.2)
 STYLE_REAL_PALLET = dict(fc="#ced6e0", ec="#a4b0be", alpha=0.50, zorder=1, lw=0.8)
 STYLE_SAFE_PALLET = dict(fc="#00b894", ec="#00cec9", alpha=0.85, zorder=3, lw=0.8)
 
-FINISH_DIST = 0.10    # a que distancia de la meta consideramos que llego
 MAX_ITERS   = 20000   # tope de ticks para evitar bucle infinito si se atasca
 
-# Cinematica diferencial acotada (misma que usan test_path.py / test_nav_ros2.py
-# como controlador de respaldo) en vez de "teletransportarse" hacia vortex_pt
-# cada tick. Un punto sin inercia que salta directo al punto vortex amplifica
-# cualquier fluctuacion de direccion en desplazamiento real -- puede marcar
-# "atascado" por una oscilacion de guia que un robot con velocidad angular
-# acotada jamas notaria, porque no puede girar 180 grados en un tick. Esto
-# hace que la trayectoria dibujada (y la deteccion de atasco) reflejen lo que
-# el robot real -- o una politica PPO ya entrenada -- efectivamente haria.
-V_MAX_MPS      = 0.6
-W_MAX_RADPS    = 1.5
+# Controlador de respaldo del simulador puntual (mismo que test_path.py /
+# test_nav_ros2.py): cinematica diferencial acotada en vez de "teletransportarse"
+# hacia vortex_pt cada tick. Un punto sin inercia que salta directo al punto
+# vortex amplifica cualquier fluctuacion de direccion en desplazamiento real --
+# puede marcar "atascado" por una oscilacion de guia que un robot con velocidad
+# angular acotada jamas notaria, porque no puede girar 180 grados en un tick.
+# Esto hace que la trayectoria dibujada (y la deteccion de atasco) reflejen lo
+# que el robot real -- o una politica PPO ya entrenada -- efectivamente haria.
+# (V_MAX_MPS / W_MAX_RADPS / FINISH_DIST vienen de config; esto es solo del plot)
 CONTROL_DT     = 0.05
 SPIN_THRESHOLD = 0.50
 K_SPEED        = 0.60
@@ -257,7 +257,8 @@ def draw_vortex_field_route(ax, nav: GlobalNavigator, waypoints, density=10.0,
 
 def main():
     parser = argparse.ArgumentParser(description="Vortex APF path visualizer")
-    parser.add_argument("--json", default="obstacles.json")
+    parser.add_argument("--json", default=_WB_NAV,
+                        help="mapa de obstaculos (default: el de config, no depende del CWD)")
     parser.add_argument("--save", default=None)
     parser.add_argument("--field", action="store_true", help="dibujar campo vectorial vortex")
     parser.add_argument("--field-mode", choices=["route", "global"], default="route",

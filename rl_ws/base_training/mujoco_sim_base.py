@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """
-base_mujoco_env.py — Backend de entrenamiento RAPIDO: MuJoCo DIRECTO (sin ROS).
+mujoco_sim_base.py — Backend de entrenamiento RAPIDO: MuJoCo DIRECTO (sin ROS).
 
 BaseMujocoEnv es dueño de su propio (MjModel, MjData) y avanza la fisica sin
 tiempo real ni bridge — corre a la velocidad de la CPU (~2000 pasos/s), no a los
-~40/s del lazo ROS. La logica de tarea (obs, reward, terminacion, guia del
-navegador) es EXACTAMENTE la misma que el backend ROS: viene de world_base.py.
-La accion [v, ω, flipper×4] se aplica por la MISMA interfaz de actuadores que el
+~40/s del lazo ROS. La accion [v, ω, flipper×4] se aplica por la MISMA interfaz de actuadores que el
 bridge — cinematica diferencial + rampas AVR446 (robot_control.RampController) —
 asi que la respuesta dinamica es identica y la politica es desplegable sin gap.
+Todas las constantes (rutas, decimacion, brazo, escalas) vienen de config.py.
 
 VecMujocoEnv corre N envs en THREADS. MuJoCo libera el GIL en mj_step, asi que
 los threads dan paralelismo real (medido ~5x con 6 envs) sin la complejidad de
@@ -22,37 +21,16 @@ Uso tipico (desde train_fast.py):
 from __future__ import annotations
 
 import json
-import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import mujoco
 
+import rl_ws.base_training.config as C
 import rl_ws.base_training.base_env as W
 from rl_ws.base_training.robot_control import RampController
 from rl_ws.global_navigator import plan_route, GlobalNavigator, quat_to_yaw
-
-_HERE    = os.path.dirname(os.path.abspath(__file__))
-_MODELS  = os.path.join(_HERE, "..", "..", "models")
-_FULL    = os.path.join(_MODELS, "aesir_complete.xml")
-_ROBOT   = os.path.join(_MODELS, "aesir_mujoco_robot.xml")
-XML_PATH = _FULL if os.path.exists(_FULL) else _ROBOT
-
-# Cinematica diferencial de las orugas (igual que el bridge).
-TRACK_SEPARATION = 0.36
-WHEEL_RADIUS     = 0.15
-
-ARM_JOINTS     = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
-ARM_ACTUATORS  = ["pos_joint_1", "pos_joint_2", "pos_joint_3",
-                  "pos_joint_4", "pos_joint_5", "pos_joint_6"]
-ARM_REST_POSE  = {"joint_1": 0.0, "joint_2": -2.86234, "joint_3": 2.86234,
-                  "joint_4": -1.5708, "joint_5": -1.5708, "joint_6": 1.5708}
-FLIPPER_JOINTS = ["flipper_1_joint", "flipper_2_joint", "flipper_3_joint", "flipper_4_joint"]
-FLIPPER_ACTS   = ["pos_flipper_1", "pos_flipper_2", "pos_flipper_3", "pos_flipper_4"]
-
-CONTROL_DECIMATION = 25   # 25 * timestep(0.002) = 0.05 s por paso de control (20 Hz sim)
-SPAWN_SETTLE_STEPS = 50
 
 
 def _quat_upright(q) -> float:
@@ -64,11 +42,11 @@ class BaseMujocoEnv:
     """Un env MuJoCo directo. Misma tarea/obs/reward/accion que BaseRosEnv."""
 
     def __init__(self, waypoints, model: mujoco.MjModel = None,
-                 goal_xy=None, control_decimation: int = CONTROL_DECIMATION,
-                 max_steps: int = W.EPISODE_MAX_STEPS):
+                 goal_xy=None, control_decimation: int = C.CONTROL_DECIMATION,
+                 max_steps: int = C.EPISODE_MAX_STEPS):
         # Un modelo por env (mismo XML). Se puede compartir el MjModel (read-only)
         # entre envs; cada uno tiene su MjData.
-        self.model = model if model is not None else mujoco.MjModel.from_xml_path(XML_PATH)
+        self.model = model if model is not None else mujoco.MjModel.from_xml_path(C.XML_PATH)
         self.data  = mujoco.MjData(self.model)
         self.decim = control_decimation
         self.max_steps = max_steps
@@ -82,16 +60,16 @@ class BaseMujocoEnv:
         # rampas AVR446 que el bridge de despliegue -> misma respuesta dinamica.
         self.ctrl = RampController(m, self.data)
         # Actuadores de posicion del brazo (parado en reposo, no lo controla RL).
-        self._a_arm = [aid(n) for n in ARM_ACTUATORS]
+        self._a_arm = [aid(n) for n in C.ARM_ACTUATORS]
 
         # qpos/qvel adr: chasis (freejoint), flippers, brazo.
         base_j = jid("base_freejoint")
         self._base_qadr = int(m.jnt_qposadr[base_j])
         self._base_vadr = int(m.jnt_dofadr[base_j])
-        self._flip_qadr = [int(m.jnt_qposadr[jid(n)]) for n in FLIPPER_JOINTS]
-        self._flip_vadr = [int(m.jnt_dofadr[jid(n)])  for n in FLIPPER_JOINTS]
-        self._arm_qadr  = [int(m.jnt_qposadr[jid(n)]) for n in ARM_JOINTS]
-        self._arm_vadr  = [int(m.jnt_dofadr[jid(n)])  for n in ARM_JOINTS]
+        self._flip_qadr = [int(m.jnt_qposadr[jid(n)]) for n in C.FLIPPER_JOINTS]
+        self._flip_vadr = [int(m.jnt_dofadr[jid(n)])  for n in C.FLIPPER_JOINTS]
+        self._arm_qadr  = [int(m.jnt_qposadr[jid(n)]) for n in C.ARM_JOINTS]
+        self._arm_vadr  = [int(m.jnt_dofadr[jid(n)])  for n in C.ARM_JOINTS]
 
         # Geoms para deteccion de contacto robot<->piso (igual que el bridge).
         self._floor_gids = {g for g in range(m.ngeom)
@@ -102,12 +80,12 @@ class BaseMujocoEnv:
 
         # Mision.
         if goal_xy is None:
-            goal_xy = W.GOAL_XY or tuple(json.load(open(W.NAV_JSON))["pallets"][-1]["center_xy"])
+            goal_xy = C.GOAL_XY or tuple(json.load(open(C.NAV_JSON))["pallets"][-1]["center_xy"])
         self.goal_xy = np.array(goal_xy, dtype=np.float64)
-        # n_lookahead debe salir de world_base (define OBS_DIM); lookahead_step
+        # n_lookahead debe salir de config (define OBS_DIM); lookahead_step
         # no afecta la dimension -> se usa el default de global_navigator.
-        self.nav = GlobalNavigator(W.NAV_JSON, waypoints=waypoints,
-                                   n_lookahead=W.N_LOOKAHEAD)
+        self.nav = GlobalNavigator(C.NAV_JSON, waypoints=waypoints,
+                                   n_lookahead=C.N_LOOKAHEAD)
 
         self._rs = W.RewardState()
         self._ep_steps = 0
@@ -147,27 +125,27 @@ class BaseMujocoEnv:
     # ── Fijar objetivos de la accion (las rampas los persiguen en apply) ────
     def _apply_action(self, action: np.ndarray):
         a = np.clip(action, -1.0, 1.0)
-        self.ctrl.set_base_twist(float(a[0]) * W.V_MAX_MPS, float(a[1]) * W.W_MAX_RADPS)
+        self.ctrl.set_base_twist(float(a[0]) * C.V_MAX_MPS, float(a[1]) * C.W_MAX_RADPS)
         # Recorta el recorrido de los flippers al limite asimetrico por software.
-        flip_rad = np.clip(a[2:6] * W.FLIPPER_MAX, W.FLIPPER_MIN_RAD, W.FLIPPER_MAX_RAD)
+        flip_rad = np.clip(a[2:6] * C.FLIPPER_MAX, C.FLIPPER_MIN_RAD, C.FLIPPER_MAX_RAD)
         self.ctrl.set_flippers(flip_rad)
 
     # ── Reset ────────────────────────────────────────────────────────────────
     def reset(self) -> np.ndarray:
         mujoco.mj_resetData(self.model, self.data)
         a = self._base_qadr
-        self.data.qpos[a + 0] = W.START_XY[0]
-        self.data.qpos[a + 1] = W.START_XY[1]
-        self.data.qpos[a + 2] = W.SPAWN_Z
+        self.data.qpos[a + 0] = C.START_XY[0]
+        self.data.qpos[a + 1] = C.START_XY[1]
+        self.data.qpos[a + 2] = C.SPAWN_Z
         self.data.qpos[a + 3:a + 7] = [1.0, 0.0, 0.0, 0.0]
         # Brazo en reposo (qpos + ctrl del actuador de posicion).
-        for name, qadr, act in zip(ARM_JOINTS, self._arm_qadr, self._a_arm):
-            self.data.qpos[qadr] = ARM_REST_POSE[name]
-            self.data.ctrl[act]  = ARM_REST_POSE[name]
+        for name, qadr, act in zip(C.ARM_JOINTS, self._arm_qadr, self._a_arm):
+            self.data.qpos[qadr] = C.ARM_REST_POSE[name]
+            self.data.ctrl[act]  = C.ARM_REST_POSE[name]
         mujoco.mj_forward(self.model, self.data)
         self.ctrl.sync_from_data()          # rampas al estado nuevo (flippers en 0, vel 0)
         self._grav_comp_arm()
-        for _ in range(SPAWN_SETTLE_STEPS):
+        for _ in range(C.SPAWN_SETTLE_STEPS):
             self.ctrl.apply(self._dt)
             mujoco.mj_step(self.model, self.data)
 
@@ -211,22 +189,22 @@ class VecMujocoEnv:
     (convencion gym/SB3); el reward/done terminal se devuelven igual para el
     buffer de PPO."""
 
-    def __init__(self, n_envs: int = 6, control_decimation: int = CONTROL_DECIMATION,
-                 max_steps: int = W.EPISODE_MAX_STEPS, verbose: bool = True):
+    def __init__(self, n_envs: int = C.N_ENVS, control_decimation: int = C.CONTROL_DECIMATION,
+                 max_steps: int = C.EPISODE_MAX_STEPS, verbose: bool = True):
         self.n = n_envs
-        self.obs_dim = W.OBS_DIM
-        self.act_dim = W.ACT_DIM
+        self.obs_dim = C.OBS_DIM
+        self.act_dim = C.ACT_DIM
         self.verbose = verbose
 
         # Planear la ruta A* UNA vez (mapa estatico) y compartir waypoints.
-        goal = W.GOAL_XY or tuple(json.load(open(W.NAV_JSON))["pallets"][-1]["center_xy"])
-        waypoints = plan_route(W.NAV_JSON, W.START_XY, goal)
+        goal = C.GOAL_XY or tuple(json.load(open(C.NAV_JSON))["pallets"][-1]["center_xy"])
+        waypoints = plan_route(C.NAV_JSON, C.START_XY, goal)
         if verbose:
-            print(f"[vec] Ruta: {W.START_XY} -> {tuple(goal)}  ({len(waypoints)} waypoints)  "
+            print(f"[vec] Ruta: {C.START_XY} -> {tuple(goal)}  ({len(waypoints)} waypoints)  "
                   f"| n_envs={n_envs}")
 
         # Un MjModel compartido (read-only) entre envs; cada env su MjData.
-        shared_model = mujoco.MjModel.from_xml_path(XML_PATH)
+        shared_model = mujoco.MjModel.from_xml_path(C.XML_PATH)
         self.envs = [BaseMujocoEnv(waypoints, model=shared_model,
                                    goal_xy=goal, control_decimation=control_decimation,
                                    max_steps=max_steps) for _ in range(n_envs)]

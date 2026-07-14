@@ -1,10 +1,10 @@
 """
 test_base.py — Corre/visualiza una politica base entrenada (.pt) sobre el MISMO
-pipeline ROS2 que el entrenamiento: BaseRosEnv <-> mujoco_ros_bridge.py. El
+pipeline ROS2 que el entrenamiento: BaseRosEnv <-> mujoco_sim_rosbridge.py. El
 viewer de MuJoCo lo abre el bridge, asi que ves el robot ejecutando la politica.
 
 REQUIERE, en OTRA terminal, el bridge corriendo:
-    cd rl_ws && MUJOCO_GL=glfw python3 mujoco_ros_bridge.py
+    cd rl_ws && MUJOCO_GL=glfw python3 base_training/mujoco_sim_rosbridge.py
 
 Uso:
     cd rl_ws
@@ -31,8 +31,8 @@ for _p in (_ROOT, _HERE):                            # _HERE: para importar plot
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from rl_ws.base_ros_env import BaseRosEnv, NAV_JSON   # noqa: E402
-from rl_ws.train_base import MLPActorCritic          # noqa: E402
+from rl_ws.base_training.base_ros_env import BaseRosEnv, NAV_JSON      # noqa: E402
+from rl_ws.base_training.ppo import MLPActorCritic       # noqa: E402  (misma red que train_fast/train_base)
 
 DEFAULT_CKPT = os.path.join(_ROOT, "checkpoints_base", "fast_best.pt")
 

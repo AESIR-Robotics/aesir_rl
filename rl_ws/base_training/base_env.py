@@ -1,15 +1,16 @@
 """
-world_base.py — Logica de "mundo" compartida por los backends del env base.
+base_env.py — Logica de "mundo" compartida por los backends del env base.
 
 Contiene TODO lo que define la tarea y es independiente de como se simula la
-fisica: constantes de mision, pesos de reward, geometria de flippers,
-observacion, reward y terminacion. Son funciones PURAS que reciben un dict `fb`
-(feedback cinematico) + `guidance` (del global_navigator) — no dependen de ROS
-ni de MuJoCo. Asi las comparten:
+fisica: observacion, reward y terminacion. Son funciones PURAS que reciben un
+dict `fb` (feedback cinematico) + `guidance` (del global_navigator) — no
+dependen de ROS ni de MuJoCo. Todas las constantes ajustables (mision, pesos
+de reward, escalas de comando, geometria) viven en config.py y aqui solo se
+re-exportan por compatibilidad. Asi las comparten:
 
-  - base_env.py        (BaseRosEnv, backend ROS2/bridge — despliegue/MoveIt)
-  - base_mujoco_env.py (BaseMujocoEnv, backend MuJoCo directo — entrenamiento
-                        rapido, sin tiempo real, paralelizable por threads)
+  - base_ros_env.py     (BaseRosEnv, backend ROS2/bridge — despliegue/MoveIt)
+  - mujoco_sim_base.py  (BaseMujocoEnv, backend MuJoCo directo — entrenamiento
+                         rapido, sin tiempo real, paralelizable por threads)
 
 El dict `fb` que ambos backends deben producir:
     xy            np.array([x, y])        posicion del chasis (frame mapa)
@@ -23,68 +24,22 @@ El dict `fb` que ambos backends deben producir:
 """
 from __future__ import annotations
 
-import os
 from typing import Optional, Tuple
 
 import numpy as np
 
-_HERE    = os.path.dirname(os.path.abspath(__file__))
-NAV_JSON = os.path.join(_HERE, "..", "obstacles.json")
-
-# ── Escalas de comando ───────────────────────────────────────────────────────
-V_MAX_MPS   = 0.6      # linear.x  a v_norm = 1
-W_MAX_RADPS = 1.5      # angular.z a w_norm = 1
-FLIPPER_MAX = 3.1416   # rad a flip = 1
-# Limite de recorrido de los flippers (por software)
-FLIPPER_MIN_RAD = -1.3
-FLIPPER_MAX_RAD = 3.14159
-
-# ── Mision (frame de aesir_complete.xml == frame de obstacles.json) ──────────
-START_XY: Tuple[float, float] = (-1.5, 3.5)
-GOAL_XY:  Optional[Tuple[float, float]] = None   # None -> ultimo pallet del JSON
-SPAWN_Z   = 0.20
-FINISH_DIST       = 0.10
-EPISODE_MAX_STEPS = 15000
-
-# ── Pesos de reward ──────────────────────────────────────────────────────────
-W_DIRECTION    = 0.6     # encarar al objetivo (cos Δθ)
-W_VELOCITY     = 0.6     # igualar la velocidad forward objetivo
-WP_BONUS       = 200.0   # bonus al cruzar un waypoint
-TIME_PENALTY   = 0.1
-FALL_PENALTY   = 250.0
-STUCK_MAX      = 1.0
-ENERGY_W       = 1e-8
-FLIPPER_JERK_W = 1.0
-TILT_W         = 5.0
-FLIPPER_COLLISION_W = 50.0
-# Castigo por aceleraciones FUERTES del chasis (cuidar la integridad del robot
-# en terreno dificil).
-ACCEL_W        = 1.5
-ACCEL_DEADZONE = 0.3
-# Velocidad deseada = DISTANCIA al punto-guia del vortex (lejos -> rapido, cerca
-# -> lento). Se premia alcanzarla encarando la guia; retroceder se castiga.
-GUIDE_SPEED_SCALE = 1.0   # [m] distancia del guia que ya pide velocidad plena V_MAX
-BACKWARD_W        = 2.0   # castigo por retroceder (x fraccion de V_MAX en reversa)
-
-# ── Geometria de flippers (para detectar auto-colision desde los angulos) ────
-FLIPPER_MOUNTS = np.array([
-    [ 0.24,  0.274, 0.06],   # flipper_1  (frente-izq)
-    [ 0.24, -0.274, 0.06],   # flipper_2  (frente-der)
-    [-0.24,  0.274, 0.06],   # flipper_3  (atras-izq)
-    [-0.24, -0.274, 0.06],   # flipper_4  (atras-der)
-], dtype=np.float64)
-# flipper_1,2 (frente) eje (0,1,0) -> +1 ; flipper_3,4 (atras) eje (0,-1,0) -> -1
-FLIPPER_AXIS_SIGN      = np.array([1.0, 1.0, -1.0, -1.0])
-FLIPPER_L              = 0.35
-FLIPPER_COLLISION_DIST = 0.13
-
-# ── Lookahead de la trayectoria (puntos futuros del vortex que ve la politica)
-N_LOOKAHEAD    = 5      # nº de puntos futuros del rollout del vortex
-
-# ── Tamaños expuestos a la politica ──────────────────────────────────────────
-# guia(3) + lookahead(3*N) + twist_base(3) + flipper_qpos(4) + flipper_qvel(4) + upright(1)
-OBS_DIM = 15 + 3 * N_LOOKAHEAD
-ACT_DIM = 6    # v, ω, flipper×4
+# Constantes de la tarea — TODAS viven en config.py; se re-exportan aqui para
+# que `from base_training.base_env import START_XY, ...` siga funcionando.
+from .config import (
+    NAV_JSON,
+    V_MAX_MPS, W_MAX_RADPS, FLIPPER_MAX, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD,
+    START_XY, GOAL_XY, SPAWN_Z, FINISH_DIST, EPISODE_MAX_STEPS,
+    W_DIRECTION, W_VELOCITY, WP_BONUS, TIME_PENALTY, FALL_PENALTY,
+    STUCK_MAX, ENERGY_W, FLIPPER_JERK_W, TILT_W, FLIPPER_COLLISION_W,
+    ACCEL_W, ACCEL_DEADZONE, GUIDE_SPEED_SCALE, BACKWARD_W,
+    FLIPPER_MOUNTS, FLIPPER_AXIS_SIGN, FLIPPER_L, FLIPPER_COLLISION_DIST,
+    N_LOOKAHEAD, OBS_DIM, ACT_DIM,
+)
 
 
 # ── Observacion ──────────────────────────────────────────────────────────────

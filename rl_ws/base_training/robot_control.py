@@ -5,27 +5,24 @@ robot_control.py — Interfaz de control de actuadores COMPARTIDA (sin ROS).
 Cinematica diferencial de las orugas + rampas trapezoidales tipo AVR446 para la
 VELOCIDAD de los tracks y la POSICION de los flippers — identicas a las que
 aplica mujoco_ros_bridge.py por substep. La idea es que el env de entrenamiento
-directo (base_mujoco_env.py) comande los actuadores EXACTAMENTE igual que el
+directo (mujoco_sim_base.py) comande los actuadores EXACTAMENTE igual que el
 bridge de despliegue, para que la respuesta dinamica sea la misma y la politica
 entrenada rapido sea desplegable sin gap sim-to-real.
 
-No depende de ROS ni de rclpy (el bridge si, por eso este modulo va aparte y lo
-importan los dos).
+Los limites (aceleraciones/velocidades de rampa, geometria de las orugas) viven
+en config.py. No depende de ROS ni de rclpy (el bridge si, por eso este modulo
+va aparte y lo importan los dos).
 """
 from __future__ import annotations
 
 import math
 import mujoco
 
-# ── Cinematica diferencial de las orugas (igual que el bridge) ───────────────
-TRACK_SEPARATION = 0.36
-WHEEL_RADIUS     = 0.15
-
-# ── Limites AVR446 (rampa trapezoidal) ───────────────────────────────────────
-VELOCITY_MAX_ACCEL = 15.0                       # rad/s^2 de los tracks (velocidad)
-FLIPPER_MAX_VEL    = 3.0                         # rad/s   de los flippers (posicion)
-FLIPPER_MAX_ACCEL  = 10.0                        # rad/s^2 de los flippers
-FLIPPER_ACTS = ["pos_flipper_1", "pos_flipper_2", "pos_flipper_3", "pos_flipper_4"]
+from .config import (
+    TRACK_SEPARATION, WHEEL_RADIUS,
+    VELOCITY_MAX_ACCEL, FLIPPER_MAX_VEL, FLIPPER_MAX_ACCEL,
+    FLIPPER_ACTS,
+)
 
 
 def ramp_toward_position(pos, vel, target, max_vel, max_accel, dt):

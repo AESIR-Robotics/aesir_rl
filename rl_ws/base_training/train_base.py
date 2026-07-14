@@ -16,33 +16,33 @@ Pipeline (visto desde aqui):
         si listo: ppo_update(...)
 
 REQUIERE, en OTRA terminal, el bridge corriendo:
-    cd rl_ws && MUJOCO_GL=glfw python3 mujoco_ros_bridge.py
+    cd rl_ws && MUJOCO_GL=glfw python3 base_training/mujoco_sim_rosbridge.py
 
 Uso:
-    cd rl_ws && python3 train_base.py
+    cd rl_ws && python3 base_training/train_base.py
 """
 from __future__ import annotations
 
 import os
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.distributions import Normal
-from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 
 # Raiz del proyecto (aesir_rl) al path para resolver `rl_ws.*` corriendo directo.
+# (base_training/ -> rl_ws/ -> aesir_rl/)
 import sys
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
-from rl_ws.base_ros_env import BaseRosEnv
+from rl_ws.base_training.base_ros_env import BaseRosEnv
+import rl_ws.base_training.config as C
+# La MISMA red y update de PPO que el pipeline rapido (base_training/ppo.py):
+# los checkpoints son 100% intercambiables entre train_base y train_fast.
+from rl_ws.base_training.ppo import MLPActorCritic, ppo_update
 
 try:
     import wandb
@@ -50,46 +50,8 @@ try:
 except ImportError:
     _HAS_WANDB = False
 
-CHECKPOINT_DIR = Path(_ROOT) / "checkpoints_base"   # absoluto (no depende del CWD)
+CHECKPOINT_DIR = C.CHECKPOINT_DIR   # absoluto (no depende del CWD)
 CHECKPOINT_DIR.mkdir(exist_ok=True)
-
-
-# ──────────────────────────── Red (MLP, obs vectorial) ─────────────────────
-class MLPActorCritic(nn.Module):
-    def __init__(self, obs_dim: int, act_dim: int,
-                 hidden: int = 256, log_std_init: float = -0.5):
-        super().__init__()
-        self.trunk = nn.Sequential(
-            nn.Linear(obs_dim, hidden), nn.Tanh(),
-            nn.Linear(hidden,  hidden), nn.Tanh(),
-        )
-        self.actor_mu = nn.Linear(hidden, act_dim)
-        self.critic   = nn.Linear(hidden, 1)
-        self.log_std  = nn.Parameter(torch.full((act_dim,), log_std_init))
-        self.act_dim  = act_dim
-
-    def forward(self, obs):
-        z       = self.trunk(obs)
-        mu      = torch.tanh(self.actor_mu(z))
-        value   = self.critic(z)
-        log_std = torch.clamp(self.log_std, -5.0, 1.0)
-        return mu, log_std.exp().expand_as(mu), value
-
-    @torch.no_grad()
-    def act(self, obs_np: np.ndarray, device):
-        obs = torch.as_tensor(obs_np, dtype=torch.float32, device=device).unsqueeze(0)
-        mu, std, value = self(obs)
-        dist = Normal(mu, std)
-        raw  = dist.sample()
-        logp = dist.log_prob(raw).sum(dim=-1)
-        return raw.squeeze(0).cpu().numpy(), float(logp.item()), float(value.item())
-
-    def evaluate(self, obs, actions):
-        mu, std, value = self(obs)
-        dist    = Normal(mu, std)
-        logp    = dist.log_prob(actions).sum(dim=-1, keepdim=True)
-        entropy = dist.entropy().sum(dim=-1).mean()
-        return logp, value, entropy
 
 
 # ──────────────────────────── Buffer (obs vectorial) ───────────────────────
@@ -138,31 +100,6 @@ class RolloutBuffer:
         return (adv - adv.mean()) / (adv.std() + 1e-8), ret
 
 
-# ──────────────────────────── PPO ──────────────────────────────────────────
-def ppo_update(policy, opt, buf, adv, ret, epochs, batch, clip, vf_c, ent_c, device):
-    obs     = torch.as_tensor(buf.obs,     dtype=torch.float32, device=device)
-    actions = torch.as_tensor(buf.actions, dtype=torch.float32, device=device)
-    old_log = torch.as_tensor(buf.logps,   dtype=torch.float32, device=device).unsqueeze(-1)
-    adv_t   = torch.as_tensor(adv, dtype=torch.float32, device=device).unsqueeze(-1)
-    ret_t   = torch.as_tensor(ret, dtype=torch.float32, device=device).unsqueeze(-1)
-
-    m = {"pi": 0.0, "v": 0.0, "ent": 0.0}
-    for _ in range(epochs):
-        for idx in BatchSampler(SubsetRandomSampler(range(buf.capacity)), batch, False):
-            lp, val, ent = policy.evaluate(obs[idx], actions[idx])
-            r  = torch.exp(lp - old_log[idx])
-            pl = -torch.min(r * adv_t[idx],
-                            torch.clamp(r, 1 - clip, 1 + clip) * adv_t[idx]).mean()
-            vl = F.smooth_l1_loss(val, ret_t[idx])
-            loss = pl + vf_c * vl - ent_c * ent
-            opt.zero_grad()
-            loss.backward()
-            nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
-            opt.step()
-            m["pi"] = pl.item(); m["v"] = vl.item(); m["ent"] = ent.item()
-    return m
-
-
 # ──────────────────────────── Helpers ──────────────────────────────────────
 def save_checkpoint(path, policy, opt, it, avg):
     torch.save({"iter": it, "policy": policy.state_dict(),
@@ -170,20 +107,20 @@ def save_checkpoint(path, policy, opt, it, avg):
 
 
 # ──────────────────────────── Training loop ────────────────────────────────
-def train(num_iterations: int = 500,
-          steps_per_iter: int = 1024,
-          ppo_epochs:     int = 10,
-          batch_size:     int = 256,
-          gamma:          float = 0.99,
-          gae_lambda:     float = 0.95,
-          clip_param:     float = 0.2,
-          vf_coef:        float = 0.5,
-          ent_coef:       float = 0.005,
-          lr:             float = 3e-4,
-          save_every:     int = 25,
-          device_str:     str = "auto",
+def train(num_iterations: int = C.ROS_ITERS,
+          steps_per_iter: int = C.ROS_STEPS_PER_ITER,
+          ppo_epochs:     int = C.PPO_EPOCHS,
+          batch_size:     int = C.ROS_BATCH_SIZE,
+          gamma:          float = C.GAMMA,
+          gae_lambda:     float = C.GAE_LAMBDA,
+          clip_param:     float = C.CLIP,
+          vf_coef:        float = C.VF_COEF,
+          ent_coef:       float = C.ENT_COEF,
+          lr:             float = C.LR,
+          save_every:     int = C.ROS_SAVE_EVERY,
+          device_str:     str = C.DEVICE,
           use_wandb:      bool = True,
-          wandb_project:  str = "AIDL-PPO-AESIR-BASE",
+          wandb_project:  str = C.WANDB_PROJECT_ROS,
           resume_from:    Optional[str] = None):
 
     device = torch.device(
@@ -237,7 +174,7 @@ def train(num_iterations: int = 500,
                 _, _, lv = policy(torch.as_tensor(obs, dtype=torch.float32,
                                                   device=device).unsqueeze(0))
             adv, ret = buf.compute_gae(float(lv.item()), gamma, gae_lambda)
-            m = ppo_update(policy, opt, buf, adv, ret,
+            m = ppo_update(policy, opt, buf.obs, buf.actions, buf.logps, adv, ret,
                            ppo_epochs, batch_size, clip_param, vf_coef, ent_coef, device)
 
             avg = float(np.mean(ep_history)) if ep_history else float("nan")
@@ -267,5 +204,5 @@ def train(num_iterations: int = 500,
 if __name__ == "__main__":
     train(
         use_wandb=True,   # logea metricas a Weights & Biases (requiere `wandb login`)
-        resume_from="./checkpoints_base/base_best.pt",
+        resume_from=str(C.CHECKPOINT_DIR / "base_best.pt"),   # absoluto, no depende del CWD
     )

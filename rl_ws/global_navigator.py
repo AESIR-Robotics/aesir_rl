@@ -1,3 +1,12 @@
+"""
+global_navigator.py — Navegacion global compartida: planeacion A* sobre la zona
+segura de pallets + seguimiento con vortex APF (atraccion al waypoint, repulsion
+de obstaculos/bordes con componente tangencial anti-minimo-local) + lookahead.
+
+Lo usan los DOS backends (mujoco_sim_base.py directo y base_ros_env.py sobre el
+bridge ROS2) y los scripts de visualizacion/tests. Todos los parametros
+ajustables viven en base_training/config.py.
+"""
 import json
 import os
 import numpy as np
@@ -5,28 +14,23 @@ from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.geometry import Point as ShapelyPoint
 from shapely.ops import unary_union, nearest_points
 
-ROBOT_RADIUS = 0.30
-GAP_BRIDGE_DISTANCE = 0.15
-GRID_RESOLUTION = 0.05
-REACH_DIST = 0.05
-MAX_GUIDE_DIST = 5.0
-CORNER_DOT_THRESHOLD = 0.99  # turn is kept as a corner if dot(v1, v2) < this value
-MAX_WAYPOINT_DIST = 0.50     # max spacing (m) between consecutive waypoints on straight segments
-
-# Lookahead: cuantos puntos futuros de la trayectoria del vortex ve la politica,
-# y cuanto avanza (m) el rollout por punto. 0 -> sin lookahead (compat. otros usos).
-N_LOOKAHEAD    = 5
-LOOKAHEAD_STEP = 0.20
-
-ATT_GAIN   = 1.0    # grado de atraccion (magnitud maxima del pull al waypoint)
-ATT_RANGE  = 0.1    # distancia sobre la que la atraccion crece de 0 a ATT_GAIN
-REP_GAIN   = 1.0    # grado de repulsion (magnitud maxima del push por fuente)
-REP_RANGE  = 0.1   # distancia (del cuerpo del robot) a la que empieza a repeler
-ROBOT_HALF = 0.30   # media anchura del robot (su cuerpo, no un punto)
-SWIRL      = 1.0    # peso de la componente tangencial (0 = APF plano, 1 = vortex)
-MIN_PROGRESS = 0.1  # fraccion de la atraccion que SIEMPRE sobrevive (garantia
-                    # anti-minimo-local: la repulsion nunca frena mas del
-                    # (1-MIN_PROGRESS) del avance hacia el waypoint)
+# Parametros desde config.py (import dual: este modulo se usa tanto como
+# `rl_ws.global_navigator` — sys.path en aesir_rl/ — como `global_navigator`
+# a secas — sys.path en rl_ws/, p.ej. los scripts de tests/).
+try:
+    from rl_ws.base_training.config import (
+        ROBOT_RADIUS, GAP_BRIDGE_DISTANCE, GRID_RESOLUTION,
+        CORNER_DOT_THRESHOLD, MAX_WAYPOINT_DIST,
+        REACH_DIST, MAX_GUIDE_DIST, N_LOOKAHEAD, LOOKAHEAD_STEP,
+        ATT_GAIN, ATT_RANGE, REP_GAIN, REP_RANGE, ROBOT_HALF, SWIRL, MIN_PROGRESS,
+    )
+except ImportError:
+    from base_training.config import (
+        ROBOT_RADIUS, GAP_BRIDGE_DISTANCE, GRID_RESOLUTION,
+        CORNER_DOT_THRESHOLD, MAX_WAYPOINT_DIST,
+        REACH_DIST, MAX_GUIDE_DIST, N_LOOKAHEAD, LOOKAHEAD_STEP,
+        ATT_GAIN, ATT_RANGE, REP_GAIN, REP_RANGE, ROBOT_HALF, SWIRL, MIN_PROGRESS,
+    )
 
 def box_corners_2d(center_xy: np.ndarray, half_sizes: np.ndarray, rot_mat: np.ndarray) -> np.ndarray:
     hx, hy = half_sizes[0], half_sizes[1]
@@ -379,3 +383,8 @@ class GlobalNavigator:
 def quat_to_yaw(xquat: np.ndarray) -> float:
     w, x, y, z = xquat
     return np.arctan2(2. * (w * z + x * y), 1. - 2. * (y * y + z * z))
+
+def quat_upright(xquat) -> float:
+    """Componente z del eje z del chasis (R[2,2]): 1 = vertical, 0 = tumbado."""
+    w, x, y, z = xquat
+    return 1.0 - 2.0 * (x * x + y * y)

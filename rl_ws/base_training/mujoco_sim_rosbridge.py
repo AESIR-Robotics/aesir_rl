@@ -25,9 +25,10 @@ publican en /hardware_node/joint_states.
 
 Uso (con el resto del stack ya corriendo: bringup_viz.launch.py):
     cd rl_ws
-    MUJOCO_GL=glfw python3 mujoco_hardware_bridge.py
+    MUJOCO_GL=glfw python3 base_training/mujoco_sim_rosbridge.py
 """
 import os
+import sys
 import math
 import threading
 
@@ -43,10 +44,20 @@ from hardware.msg import JointControl
 from std_srvs.srv import Trigger
 from std_msgs.msg import Int32
 
-_HERE    = os.path.dirname(os.path.abspath(__file__))
-_FULL    = os.path.join(_HERE, "../models/aesir_complete.xml")
-_ROBOT   = os.path.join(_HERE, "../models/aesir_mujoco_robot.xml")
-XML_PATH = _FULL if os.path.exists(_FULL) else _ROBOT
+# Raiz del proyecto (aesir_rl) al path para resolver `rl_ws.*` corriendo directo.
+# (base_training/ -> rl_ws/ -> aesir_rl/)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(os.path.dirname(_HERE))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+# Constantes compartidas (rutas del XML, spawn, SIM_SPEEDUP, cinematica y
+# limites de rampa) + las MISMAS funciones de rampa AVR446 que usa el
+# entrenamiento directo (robot_control) -> identica respuesta dinamica.
+import rl_ws.base_training.config as C
+from rl_ws.base_training.robot_control import ramp_toward_position, ramp_toward_velocity
+
+XML_PATH = C.XML_PATH
 
 # Nombre de joint ROS -> actuador MuJoCo.
 JOINT_TO_ACTUATOR = {
@@ -57,49 +68,20 @@ JOINT_TO_ACTUATOR = {
     "left_finger_joint": "pos_left_finger", "right_finger_joint": "pos_right_finger",
 }
 
-PHYSICS_HZ = 100.0  # debe igualar update_rate en ros2_controllers.yaml
+PHYSICS_HZ  = C.PHYSICS_HZ    # debe igualar update_rate en ros2_controllers.yaml
+SIM_SPEEDUP = C.SIM_SPEEDUP   # mismo valor que duerme BaseRosEnv (dt/SIM_SPEEDUP)
 
-# Factor de aceleracion respecto a TIEMPO REAL para acelerar el entrenamiento:
-# el bridge avanza SIM_SPEEDUP veces mas simulacion por segundo de reloj (hace
-# mas substeps por tick del timer). El cuello es el computo — para este modelo
-# se midio ~2.7x maximo (colision robot<->pallets), asi que 2.5 deja margen; si
-# lo subes de mas, el timer se satura y cae solo al limite de computo (no rompe).
-# ATENCION: base_env.SIM_SPEEDUP DEBE coincidir (duerme dt/SIM_SPEEDUP). Pon 1.0
-# para volver a tiempo real exacto (p.ej. si conectas hardware real / RViz).
-SIM_SPEEDUP = 2.5
-
-# Cinematica diferencial de las orugas: separacion entre eje izquierdo/derecho
-# (wheel_l/r_* estan en y=+-0.18, ver aesir_mujoco_robot.xml) y radio de rueda
-# motriz (geom cylinder size[0] de wheel_l_*/wheel_r_*).
-TRACK_SEPARATION = 0.36
-WHEEL_RADIUS     = 0.15
-
-# Pose de reset del brazo.
-ARM_RESET_POSE = {
-    "joint_1": 0.0, "joint_2": -2.86234, "joint_3": 2.86234,
-    "joint_4": -1.5708, "joint_5": -1.5708, "joint_6": 1.5708,
-}
-
-# Spawn del chasis para el reset de episodio RL 
-SPAWN_POSE = (-1.5, 3.5, 0.25, 0.0)
-SPAWN_SETTLE_STEPS = 50  # substeps de fisica para asentar tras teletransportar
+# Spawn del chasis para el reset de episodio RL (mision de config).
+SPAWN_POSE = (C.START_XY[0], C.START_XY[1], C.SPAWN_Z, C.SPAWN_YAW)
 
 # ── Limites de movimiento tipo AVR446 (rampa trapezoidal), en radianes ──────
-POSITION_JOINT_LIMITS = {
-    "joint_1": dict(max_vel=6.0, max_accel=10.0),
-    "joint_2": dict(max_vel=3.0, max_accel=10.0),
-    "joint_3": dict(max_vel=6.0, max_accel=10.0),
-    "joint_4": dict(max_vel=9.0, max_accel=10.0),
-    "joint_5": dict(max_vel=9.0, max_accel=10.0),
-    "joint_6": dict(max_vel=9.0, max_accel=10.0),
-    "flipper_1_joint": dict(max_vel=3.0, max_accel=10.0),
-    "flipper_2_joint": dict(max_vel=3.0, max_accel=10.0),
-    "flipper_3_joint": dict(max_vel=3.0, max_accel=10.0),
-    "flipper_4_joint": dict(max_vel=3.0, max_accel=10.0),
-}
-
-# PLACEHOLDER: aceleracion maxima (rad/s^2) de los actuadores de VELOCIDAD
-VELOCITY_MAX_ACCEL = 15.0
+# Brazo desde config.ARM_JOINT_LIMITS; flippers con los MISMOS limites que el
+# entrenamiento directo (FLIPPER_MAX_VEL / FLIPPER_MAX_ACCEL).
+POSITION_JOINT_LIMITS = dict(C.ARM_JOINT_LIMITS)
+POSITION_JOINT_LIMITS.update({
+    name: dict(max_vel=C.FLIPPER_MAX_VEL, max_accel=C.FLIPPER_MAX_ACCEL)
+    for name in C.FLIPPER_JOINTS
+})
 
 
 # ── Conversion de convencion, espejo exacto de topic_bridge_hardware.cpp ───────
@@ -119,36 +101,6 @@ def duty_to_omega(duty: float, omega_max: float) -> float:
     velocidad bajo carga a mano — el limite de fuerza del actuador
     (forcerange/actuatorfrcrange) + kv ya reproduce ese efecto."""
     return duty * omega_max
-
-
-def _ramp_toward_position(pos: float, vel: float, target: float,
-                           max_vel: float, max_accel: float, dt: float):
-    """Un paso de rampa trapezoidal (equivalente continuo del calculo de
-    tiempo-entre-pasos de AVR446): acelera/frena respetando max_accel, sin
-    superar max_vel, y frena a tiempo para llegar a 'target' con velocidad
-    cero — no hay overshoot ni oscilacion."""
-    error = target - pos
-    direction = 1.0 if error >= 0.0 else -1.0
-    stoppable_speed = math.sqrt(max(2.0 * max_accel * abs(error), 0.0))
-    desired_vel = direction * min(max_vel, stoppable_speed)
-
-    max_dv = max_accel * dt
-    dv = max(-max_dv, min(max_dv, desired_vel - vel))
-    new_vel = vel + dv
-    new_pos = pos + new_vel * dt
-
-    if (target - new_pos) * error < 0.0: 
-        return target, 0.0
-    return new_pos, new_vel
-
-
-def _ramp_toward_velocity(vel: float, target_vel: float, max_accel: float, dt: float) -> float:
-    """Igual que _ramp_toward_position pero sin objetivo de posicion — solo
-    limita la aceleracion con la que la velocidad comandada puede cambiar
-    (para ruedas/rodillos, que giran continuamente sin un angulo objetivo)."""
-    max_dv = max_accel * dt
-    dv = max(-max_dv, min(max_dv, target_vel - vel))
-    return vel + dv
 
 
 class MujocoHardwareBridge(Node):
@@ -223,7 +175,7 @@ class MujocoHardwareBridge(Node):
             PoseStamped, "hardware_node/pose", 10
         )
 
-        # Reset rapido para RL: teletransporta el brazo a ARM_RESET_POSE
+        # Reset rapido para RL: teletransporta el brazo a C.ARM_REST_POSE
         self._reset_srv = self.create_service(
             Trigger, "/mujoco_ros_bridge/reset_arm", self._reset_arm_cb
         )
@@ -242,7 +194,7 @@ class MujocoHardwareBridge(Node):
 
     def _reset_arm_cb(self, request, response) -> Trigger.Response:
         with self._lock:
-            for name, angle in ARM_RESET_POSE.items():
+            for name, angle in C.ARM_REST_POSE.items():
                 qpos_adr = self._qpos_adr[name]
                 qvel_adr = self._qvel_adr[name]
                 self.data.qpos[qpos_adr] = angle
@@ -254,7 +206,7 @@ class MujocoHardwareBridge(Node):
                     self._pos_ramp_vel[name]    = 0.0
             mujoco.mj_forward(self.model, self.data)
         response.success = True
-        response.message = "Arm reset to ARM_RESET_POSE"
+        response.message = "Arm reset to C.ARM_REST_POSE"
         return response
 
     def _reset_sim_cb(self, request, response) -> Trigger.Response:
@@ -276,7 +228,7 @@ class MujocoHardwareBridge(Node):
             self.data.qpos[a + 6] = math.sin(0.5 * syaw)   # z
 
             # Brazo en reposo (qpos + ctrl + rampa).
-            for name, angle in ARM_RESET_POSE.items():
+            for name, angle in C.ARM_REST_POSE.items():
                 self.data.qpos[self._qpos_adr[name]] = angle
                 self.data.qvel[self._qvel_adr[name]] = 0.0
                 self.data.ctrl[self._aid[name]] = angle
@@ -293,7 +245,7 @@ class MujocoHardwareBridge(Node):
                 self.data.ctrl[aid] = 0.0
 
             mujoco.mj_forward(self.model, self.data)
-            for _ in range(SPAWN_SETTLE_STEPS):
+            for _ in range(C.SPAWN_SETTLE_STEPS):
                 self.data.qfrc_applied[self._arm_dof_adr] = self.data.qfrc_bias[self._arm_dof_adr]
                 mujoco.mj_step(self.model, self.data)
 
@@ -318,12 +270,12 @@ class MujocoHardwareBridge(Node):
         rad/s de rueda dividiendo por el radio. El limite de velocidad ya lo
         aplica MuJoCo via ctrlrange en vel_track_left/right; aqui solo se
         fija el objetivo — la rampa de aceleracion se aplica en
-        _physics_step via _ramp_toward_velocity. El resto de ruedas y
+        _physics_step via ramp_toward_velocity. El resto de ruedas y
         rodillos de flipper del mismo lado siguen automaticamente por las
         equality constraints del XML. """
         v, w  = msg.linear.x, msg.angular.z
-        omega_left  = (v - w * TRACK_SEPARATION / 2.0) / WHEEL_RADIUS
-        omega_right = (v + w * TRACK_SEPARATION / 2.0) / WHEEL_RADIUS
+        omega_left  = (v - w * C.TRACK_SEPARATION / 2.0) / C.WHEEL_RADIUS
+        omega_right = (v + w * C.TRACK_SEPARATION / 2.0) / C.WHEEL_RADIUS
         with self._lock:
             self._vel_ramp_target[self._left_wheel_aid]  = omega_left
             self._vel_ramp_target[self._right_wheel_aid] = omega_right
@@ -333,7 +285,7 @@ class MujocoHardwareBridge(Node):
         with self._lock:
             for _ in range(self._substeps):
                 for name, lim in POSITION_JOINT_LIMITS.items():
-                    pos, vel = _ramp_toward_position(
+                    pos, vel = ramp_toward_position(
                         self._pos_ramp_pos[name], self._pos_ramp_vel[name],
                         self._pos_ramp_target[name], lim["max_vel"], lim["max_accel"], dt,
                     )
@@ -341,8 +293,8 @@ class MujocoHardwareBridge(Node):
                     self.data.ctrl[self._aid[name]] = pos
 
                 for aid, target_vel in self._vel_ramp_target.items():
-                    new_vel = _ramp_toward_velocity(
-                        self._vel_ramp_current[aid], target_vel, VELOCITY_MAX_ACCEL, dt,
+                    new_vel = ramp_toward_velocity(
+                        self._vel_ramp_current[aid], target_vel, C.VELOCITY_MAX_ACCEL, dt,
                     )
                     self._vel_ramp_current[aid] = new_vel
                     self.data.ctrl[aid] = new_vel
