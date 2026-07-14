@@ -8,10 +8,15 @@ from shapely.ops import unary_union, nearest_points
 ROBOT_RADIUS = 0.30
 GAP_BRIDGE_DISTANCE = 0.15
 GRID_RESOLUTION = 0.05
-REACH_DIST = 0.10
+REACH_DIST = 0.05
 MAX_GUIDE_DIST = 5.0
 CORNER_DOT_THRESHOLD = 0.99  # turn is kept as a corner if dot(v1, v2) < this value
 MAX_WAYPOINT_DIST = 0.50     # max spacing (m) between consecutive waypoints on straight segments
+
+# Lookahead: cuantos puntos futuros de la trayectoria del vortex ve la politica,
+# y cuanto avanza (m) el rollout por punto. 0 -> sin lookahead (compat. otros usos).
+N_LOOKAHEAD    = 5
+LOOKAHEAD_STEP = 0.20
 
 ATT_GAIN   = 1.0    # grado de atraccion (magnitud maxima del pull al waypoint)
 ATT_RANGE  = 0.1    # distancia sobre la que la atraccion crece de 0 a ATT_GAIN
@@ -154,6 +159,17 @@ def vortex_apf(robot_xy: np.ndarray, target_xy: np.ndarray, obstacles: list[Obst
 
     return robot + att + rep
 
+def _rel_obs(rel_xy: np.ndarray, robot_yaw: float) -> np.ndarray:
+    """Codifica un punto RELATIVO al robot (vector robot->punto en frame mapa)
+    como (dist_norm, sin(ang), cos(ang)) en el frame del robot — misma
+    representacion que usa la guia inmediata."""
+    d = float(np.hypot(rel_xy[0], rel_xy[1]))
+    if d < 1e-5:
+        return np.array([0., 0., 1.], dtype=np.float32)
+    ang = np.arctan2(rel_xy[1], rel_xy[0]) - robot_yaw
+    return np.array([min(d / MAX_GUIDE_DIST, 1.), np.sin(ang), np.cos(ang)], dtype=np.float32)
+
+
 def _plan_segment(json_path: str, start_xy: tuple, goal_xy: tuple) -> list[tuple]:
     with open(json_path, "r") as f:
         data = json.load(f)
@@ -277,7 +293,9 @@ class GlobalNavigator:
                  rep_gain: float = REP_GAIN, rep_range: float = REP_RANGE,
                  rh: float = ROBOT_HALF, swirl: float = SWIRL,
                  min_progress: float = MIN_PROGRESS,
-                 pallet_edges: bool = True):
+                 pallet_edges: bool = True,
+                 n_lookahead: int = N_LOOKAHEAD,
+                 lookahead_step: float = LOOKAHEAD_STEP):
         with open(json_path, "r") as f:
             data = json.load(f)
         self._wps = [np.array(w) for w in waypoints]
@@ -298,10 +316,50 @@ class GlobalNavigator:
         self._rep_gain, self._rep_range = rep_gain, rep_range
         self._rh, self._swirl = rh, swirl
         self._min_progress = min_progress
+        self._n_look = int(n_lookahead)
+        self._look_step = float(lookahead_step)
         self._wi = 0
 
     def reset(self, robot_xy: np.ndarray):
         self._wi = 0
+
+    def _vortex_at(self, pos: np.ndarray, target: np.ndarray) -> np.ndarray:
+        return vortex_apf(pos, target, self._vo, edges=self._edges,
+                          att_gain=self._att_gain, att_range=self._att_range,
+                          rep_gain=self._rep_gain, rep_range=self._rep_range,
+                          rh=self._rh, swirl=self._swirl,
+                          min_progress=self._min_progress)
+
+    def _lookahead(self, robot_xy: np.ndarray, robot_yaw: float) -> np.ndarray:
+        """Previsualizacion de la trayectoria: muestrea la ruta A* que viene
+        (robot -> waypoints restantes) a espaciado fijo de arco (lookahead_step),
+        n_lookahead puntos. La ruta ya rodea sticks y se queda en los pallets, y
+        el vortex solo la rastrea localmente; asi la politica ve la FORMA del
+        camino (curvas, giros) para anticiparse. Monotona hacia adelante y barata
+        (sin evaluar el vortex). Devuelve 3*n_lookahead: (dist_norm, sin, cos)
+        de cada punto relativo al robot. Si la ruta se acaba, satura en la meta."""
+        if self._n_look <= 0:
+            return np.zeros(0, dtype=np.float32), np.zeros((0, 2), dtype=float)
+        origin = np.array([float(robot_xy[0]), float(robot_xy[1])])
+        pts = [origin] + [self._wps[i] for i in range(self._wi, len(self._wps))]
+        cum = np.concatenate([[0.0], np.cumsum(
+            [float(np.hypot(*(pts[i + 1] - pts[i]))) for i in range(len(pts) - 1)])])
+        total = float(cum[-1])
+        feats, samples = [], []
+        for k in range(1, self._n_look + 1):
+            s = min(k * self._look_step, total)
+            j = int(min(np.searchsorted(cum, s, side="right") - 1, len(pts) - 2))
+            j = max(j, 0)
+            if len(pts) < 2:
+                sample = pts[0]
+            else:
+                seglen = float(cum[j + 1] - cum[j])
+                t = 0.0 if seglen < 1e-9 else (s - float(cum[j])) / seglen
+                sample = pts[j] + t * (pts[j + 1] - pts[j])
+            feats.append(_rel_obs(sample - origin, robot_yaw))
+            samples.append(sample)
+        # feats: lo que ve la politica (relativo); samples: mundo (para dibujar)
+        return np.concatenate(feats).astype(np.float32), np.asarray(samples, dtype=float)
 
     def step(self, robot_xy: np.ndarray, robot_yaw: float) -> dict:
         if self._wi < len(self._wps):
@@ -310,21 +368,13 @@ class GlobalNavigator:
                 self._wi += 1
 
         target = self._wps[min(self._wi, len(self._wps) - 1)]
-        vortex_pt = vortex_apf(robot_xy, target, self._vo, edges=self._edges,
-                               att_gain=self._att_gain, att_range=self._att_range,
-                               rep_gain=self._rep_gain, rep_range=self._rep_range,
-                               rh=self._rh, swirl=self._swirl,
-                               min_progress=self._min_progress)
-        
-        dx, dy = float(vortex_pt[0] - robot_xy[0]), float(vortex_pt[1] - robot_xy[1])
-        d = np.hypot(dx, dy)
-        if d < 1e-5:
-            obs = np.array([0., 0., 1.], dtype=np.float32)
-        else:
-            angle = np.arctan2(dy, dx) - robot_yaw
-            obs = np.array([min(d / MAX_GUIDE_DIST, 1.), np.sin(angle), np.cos(angle)], dtype=np.float32)
-            
-        return {"obs": obs, "target": target, "vortex": vortex_pt, "wp": self._wi}
+        vortex_pt = self._vortex_at(robot_xy, target)
+        obs = _rel_obs(vortex_pt - np.asarray(robot_xy, dtype=float), robot_yaw)
+        lookahead, lookahead_xy = self._lookahead(robot_xy, robot_yaw)
+
+        return {"obs": obs, "target": target, "vortex": vortex_pt, "wp": self._wi,
+                "lookahead": lookahead, "lookahead_xy": lookahead_xy,
+                "goal": self._wps[-1]}     # meta final (ultimo waypoint), para modular velocidad
 
 def quat_to_yaw(xquat: np.ndarray) -> float:
     w, x, y, z = xquat

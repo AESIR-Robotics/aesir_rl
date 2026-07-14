@@ -59,28 +59,32 @@ JOINT_TO_ACTUATOR = {
 
 PHYSICS_HZ = 100.0  # debe igualar update_rate en ros2_controllers.yaml
 
+# Factor de aceleracion respecto a TIEMPO REAL para acelerar el entrenamiento:
+# el bridge avanza SIM_SPEEDUP veces mas simulacion por segundo de reloj (hace
+# mas substeps por tick del timer). El cuello es el computo — para este modelo
+# se midio ~2.7x maximo (colision robot<->pallets), asi que 2.5 deja margen; si
+# lo subes de mas, el timer se satura y cae solo al limite de computo (no rompe).
+# ATENCION: base_env.SIM_SPEEDUP DEBE coincidir (duerme dt/SIM_SPEEDUP). Pon 1.0
+# para volver a tiempo real exacto (p.ej. si conectas hardware real / RViz).
+SIM_SPEEDUP = 2.5
+
 # Cinematica diferencial de las orugas: separacion entre eje izquierdo/derecho
 # (wheel_l/r_* estan en y=+-0.18, ver aesir_mujoco_robot.xml) y radio de rueda
 # motriz (geom cylinder size[0] de wheel_l_*/wheel_r_*).
 TRACK_SEPARATION = 0.36
 WHEEL_RADIUS     = 0.15
 
-# Pose de reset del brazo — verificada contra el modelo: cond(J)=8.08 (lejos de
-# singularidad) y sin self-colision (ncon=8, igual al baseline sin brazo).
+# Pose de reset del brazo.
 ARM_RESET_POSE = {
-    "joint_1": 0.0, "joint_2": -1.0, "joint_3": 1.8,
-    "joint_4": 0.0, "joint_5": -1.4, "joint_6": 0.0,
+    "joint_1": 0.0, "joint_2": -2.86234, "joint_3": 2.86234,
+    "joint_4": -1.5708, "joint_5": -1.5708, "joint_6": 1.5708,
 }
 
-# Spawn del chasis para el reset de episodio RL (frame de aesir_complete.xml,
-# mismo frame que obstacles.json). x, y, z, yaw(rad).
-SPAWN_POSE = (-2.1, 4.1, 0.20, 0.0)
+# Spawn del chasis para el reset de episodio RL 
+SPAWN_POSE = (-1.5, 3.5, 0.25, 0.0)
 SPAWN_SETTLE_STEPS = 50  # substeps de fisica para asentar tras teletransportar
 
 # ── Limites de movimiento tipo AVR446 (rampa trapezoidal), en radianes ──────
-# PLACEHOLDER: max_vel (rad/s) y max_accel (rad/s^2) — reemplazar con los
-# valores reales del motor/reductor (datasheet: steps/rev + RPM max -> rad/s,
-# rad/s^2 segun la reduccion mecanica) cuando esten disponibles.
 POSITION_JOINT_LIMITS = {
     "joint_1": dict(max_vel=6.0, max_accel=10.0),
     "joint_2": dict(max_vel=3.0, max_accel=10.0),
@@ -95,9 +99,6 @@ POSITION_JOINT_LIMITS = {
 }
 
 # PLACEHOLDER: aceleracion maxima (rad/s^2) de los actuadores de VELOCIDAD
-# (ruedas de oruga + rodillos de flipper). Aqui no hay "posicion objetivo",
-# solo se limita que tan rapido puede cambiar la velocidad comandada — el
-# limite de velocidad en si ya lo da el ctrlrange de cada actuador en el XML.
 VELOCITY_MAX_ACCEL = 15.0
 
 
@@ -157,7 +158,7 @@ class MujocoHardwareBridge(Node):
         self.model = mujoco.MjModel.from_xml_path(XML_PATH)
         self.data  = mujoco.MjData(self.model)
         self._lock = threading.Lock()
-        self._substeps = max(1, round((1.0 / PHYSICS_HZ) / self.model.opt.timestep))
+        self._substeps = max(1, round(SIM_SPEEDUP * (1.0 / PHYSICS_HZ) / self.model.opt.timestep))
 
         self._aid, self._qpos_adr, self._qvel_adr = {}, {}, {}
         for ros_name, act_name in JOINT_TO_ACTUATOR.items():
@@ -172,13 +173,6 @@ class MujocoHardwareBridge(Node):
         self._arm_dof_adr = [self._qvel_adr[n] for n in
                               ("joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6")]
 
-        """ Orugas: UN actuador de velocidad por lado (vel_track_left/right),
-        que mueve el joint "maestro" de cada lado (drive_l_1/drive_r_1). El
-        resto de ruedas y rodillos de flipper de ese lado quedan acoplados
-        rigidamente al maestro via <equality><joint .../></equality> en el
-        XML (polycoef = relacion de radios/engranaje) — no hace falta
-        comandarlos por separado, MuJoCo los sincroniza via fuerzas de
-        restriccion. El limite de velocidad ya esta en el XML (ctrlrange)."""
         self._left_wheel_aid  = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "vel_track_left")
         self._right_wheel_aid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, "vel_track_right")
         self._vel_ramp_target  = {self._left_wheel_aid: 0.0, self._right_wheel_aid: 0.0}
@@ -198,11 +192,6 @@ class MujocoHardwareBridge(Node):
         self._base_dof_adr  = self.model.jnt_dofadr[base_jid]
 
         # Deteccion de contacto robot <-> PISO (el suelo a evitar, no los pallets).
-        # 'floor' = todos los geoms tipo plano (muerte_suelo_penalizacion en z=0 y
-        # el floor por defecto en z=-1). 'robot' = todos los geoms cuyo cuerpo raiz
-        # es el chasis (footprint_link, el que tiene el freejoint) -> excluye
-        # pallets/sticks/puerta, que son estaticos. Un contacto entre ambos = una
-        # parte del robot toco el piso -> se publica el conteo para castigarlo.
         self._floor_gids = {
             gid for gid in range(self.model.ngeom)
             if int(self.model.geom_type[gid]) == mujoco.mjtGeom.mjGEOM_PLANE
@@ -243,8 +232,8 @@ class MujocoHardwareBridge(Node):
             Trigger, "/mujoco_ros_bridge/reset_sim", self._reset_sim_cb
         )
 
-        #self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
-        #self.viewer.cam.distance = 1.5
+        self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+        self.viewer.cam.distance = 1.5
 
         self._timer = self.create_timer(1.0 / PHYSICS_HZ, self._physics_step)
         self.get_logger().info(
@@ -407,16 +396,16 @@ class MujocoHardwareBridge(Node):
                     n_floor += 1
             self.floor_contact_pub.publish(Int32(data=n_floor))
 
-        #if self.viewer.is_running():
-        #    self.viewer.sync()
-        #else:
-        #    rclpy.shutdown()
+        if self.viewer.is_running():
+            self.viewer.sync()
+        else:
+            rclpy.shutdown()
 
     def destroy_node(self) -> None:
-        #try:
-        #    self.viewer.close()
-        #except Exception:
-        #    pass
+        try:
+            self.viewer.close()
+        except Exception:
+            pass
         super().destroy_node()
 
 

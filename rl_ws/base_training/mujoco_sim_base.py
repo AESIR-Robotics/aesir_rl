@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""
+base_mujoco_env.py — Backend de entrenamiento RAPIDO: MuJoCo DIRECTO (sin ROS).
+
+BaseMujocoEnv es dueño de su propio (MjModel, MjData) y avanza la fisica sin
+tiempo real ni bridge — corre a la velocidad de la CPU (~2000 pasos/s), no a los
+~40/s del lazo ROS. La logica de tarea (obs, reward, terminacion, guia del
+navegador) es EXACTAMENTE la misma que el backend ROS: viene de world_base.py.
+La accion [v, ω, flipper×4] se aplica por la MISMA interfaz de actuadores que el
+bridge — cinematica diferencial + rampas AVR446 (robot_control.RampController) —
+asi que la respuesta dinamica es identica y la politica es desplegable sin gap.
+
+VecMujocoEnv corre N envs en THREADS. MuJoCo libera el GIL en mj_step, asi que
+los threads dan paralelismo real (medido ~5x con 6 envs) sin la complejidad de
+multiprocessing (memoria compartida, sin pickling, sin fork).
+
+Uso tipico (desde train_fast.py):
+    venv = VecMujocoEnv(n_envs=6)
+    obs = venv.reset()                       # (N, OBS_DIM)
+    obs, rew, done, info = venv.step(acts)   # acts (N, ACT_DIM)
+"""
+from __future__ import annotations
+
+import json
+import os
+from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional, Tuple
+
+import numpy as np
+import mujoco
+
+import rl_ws.base_training.base_env as W
+from rl_ws.base_training.robot_control import RampController
+from rl_ws.global_navigator import plan_route, GlobalNavigator, quat_to_yaw
+
+_HERE    = os.path.dirname(os.path.abspath(__file__))
+_MODELS  = os.path.join(_HERE, "..", "..", "models")
+_FULL    = os.path.join(_MODELS, "aesir_complete.xml")
+_ROBOT   = os.path.join(_MODELS, "aesir_mujoco_robot.xml")
+XML_PATH = _FULL if os.path.exists(_FULL) else _ROBOT
+
+# Cinematica diferencial de las orugas (igual que el bridge).
+TRACK_SEPARATION = 0.36
+WHEEL_RADIUS     = 0.15
+
+ARM_JOINTS     = ["joint_1", "joint_2", "joint_3", "joint_4", "joint_5", "joint_6"]
+ARM_ACTUATORS  = ["pos_joint_1", "pos_joint_2", "pos_joint_3",
+                  "pos_joint_4", "pos_joint_5", "pos_joint_6"]
+ARM_REST_POSE  = {"joint_1": 0.0, "joint_2": -2.86234, "joint_3": 2.86234,
+                  "joint_4": -1.5708, "joint_5": -1.5708, "joint_6": 1.5708}
+FLIPPER_JOINTS = ["flipper_1_joint", "flipper_2_joint", "flipper_3_joint", "flipper_4_joint"]
+FLIPPER_ACTS   = ["pos_flipper_1", "pos_flipper_2", "pos_flipper_3", "pos_flipper_4"]
+
+CONTROL_DECIMATION = 25   # 25 * timestep(0.002) = 0.05 s por paso de control (20 Hz sim)
+SPAWN_SETTLE_STEPS = 50
+
+
+def _quat_upright(q) -> float:
+    w, x, y, z = q
+    return 1.0 - 2.0 * (x * x + y * y)
+
+
+class BaseMujocoEnv:
+    """Un env MuJoCo directo. Misma tarea/obs/reward/accion que BaseRosEnv."""
+
+    def __init__(self, waypoints, model: mujoco.MjModel = None,
+                 goal_xy=None, control_decimation: int = CONTROL_DECIMATION,
+                 max_steps: int = W.EPISODE_MAX_STEPS):
+        # Un modelo por env (mismo XML). Se puede compartir el MjModel (read-only)
+        # entre envs; cada uno tiene su MjData.
+        self.model = model if model is not None else mujoco.MjModel.from_xml_path(XML_PATH)
+        self.data  = mujoco.MjData(self.model)
+        self.decim = control_decimation
+        self.max_steps = max_steps
+        self._dt = float(self.model.opt.timestep)
+
+        m = self.model
+        aid = lambda n: mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, n)
+        jid = lambda n: mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_JOINT, n)
+
+        # Control de tracks (velocidad) + flippers (posicion) con las MISMAS
+        # rampas AVR446 que el bridge de despliegue -> misma respuesta dinamica.
+        self.ctrl = RampController(m, self.data)
+        # Actuadores de posicion del brazo (parado en reposo, no lo controla RL).
+        self._a_arm = [aid(n) for n in ARM_ACTUATORS]
+
+        # qpos/qvel adr: chasis (freejoint), flippers, brazo.
+        base_j = jid("base_freejoint")
+        self._base_qadr = int(m.jnt_qposadr[base_j])
+        self._base_vadr = int(m.jnt_dofadr[base_j])
+        self._flip_qadr = [int(m.jnt_qposadr[jid(n)]) for n in FLIPPER_JOINTS]
+        self._flip_vadr = [int(m.jnt_dofadr[jid(n)])  for n in FLIPPER_JOINTS]
+        self._arm_qadr  = [int(m.jnt_qposadr[jid(n)]) for n in ARM_JOINTS]
+        self._arm_vadr  = [int(m.jnt_dofadr[jid(n)])  for n in ARM_JOINTS]
+
+        # Geoms para deteccion de contacto robot<->piso (igual que el bridge).
+        self._floor_gids = {g for g in range(m.ngeom)
+                            if int(m.geom_type[g]) == mujoco.mjtGeom.mjGEOM_PLANE}
+        root = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "footprint_link")
+        self._robot_gids = {g for g in range(m.ngeom)
+                            if int(m.body_rootid[m.geom_bodyid[g]]) == root}
+
+        # Mision.
+        if goal_xy is None:
+            goal_xy = W.GOAL_XY or tuple(json.load(open(W.NAV_JSON))["pallets"][-1]["center_xy"])
+        self.goal_xy = np.array(goal_xy, dtype=np.float64)
+        # n_lookahead debe salir de world_base (define OBS_DIM); lookahead_step
+        # no afecta la dimension -> se usa el default de global_navigator.
+        self.nav = GlobalNavigator(W.NAV_JSON, waypoints=waypoints,
+                                   n_lookahead=W.N_LOOKAHEAD)
+
+        self._rs = W.RewardState()
+        self._ep_steps = 0
+
+    # ── Feedback desde mjData (mismo dict `fb` que el backend ROS) ───────────
+    def _feedback(self) -> dict:
+        a, v = self._base_qadr, self._base_vadr
+        pos  = self.data.qpos[a:a + 3]
+        quat = self.data.qpos[a + 3:a + 7]
+
+        lin_world = self.data.qvel[v:v + 3].copy()
+        ang_body  = self.data.qvel[v + 3:v + 6].copy()
+        quat_inv  = np.zeros(4); mujoco.mju_negQuat(quat_inv, quat)
+        lin_body  = np.zeros(3); mujoco.mju_rotVecQuat(lin_body, lin_world, quat_inv)
+
+        flip_qpos = np.array([self.data.qpos[i] for i in self._flip_qadr], dtype=np.float32)
+        flip_qvel = np.array([self.data.qvel[i] for i in self._flip_vadr], dtype=np.float32)
+
+        return dict(
+            xy=pos[:2].copy().astype(np.float64), z=float(pos[2]),
+            yaw=quat_to_yaw(quat), upright=_quat_upright(quat),
+            twist=np.array([lin_body[0], lin_body[1], ang_body[2]], dtype=np.float32),
+            flip_qpos=flip_qpos, flip_qvel=flip_qvel,
+            floor_contact=self._count_floor_contacts(),
+        )
+
+    def _count_floor_contacts(self) -> int:
+        n = 0
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            g1, g2 = int(c.geom1), int(c.geom2)
+            if ((g1 in self._floor_gids and g2 in self._robot_gids) or
+                    (g2 in self._floor_gids and g1 in self._robot_gids)):
+                n += 1
+        return n
+
+    # ── Fijar objetivos de la accion (las rampas los persiguen en apply) ────
+    def _apply_action(self, action: np.ndarray):
+        a = np.clip(action, -1.0, 1.0)
+        self.ctrl.set_base_twist(float(a[0]) * W.V_MAX_MPS, float(a[1]) * W.W_MAX_RADPS)
+        # Recorta el recorrido de los flippers al limite asimetrico por software.
+        flip_rad = np.clip(a[2:6] * W.FLIPPER_MAX, W.FLIPPER_MIN_RAD, W.FLIPPER_MAX_RAD)
+        self.ctrl.set_flippers(flip_rad)
+
+    # ── Reset ────────────────────────────────────────────────────────────────
+    def reset(self) -> np.ndarray:
+        mujoco.mj_resetData(self.model, self.data)
+        a = self._base_qadr
+        self.data.qpos[a + 0] = W.START_XY[0]
+        self.data.qpos[a + 1] = W.START_XY[1]
+        self.data.qpos[a + 2] = W.SPAWN_Z
+        self.data.qpos[a + 3:a + 7] = [1.0, 0.0, 0.0, 0.0]
+        # Brazo en reposo (qpos + ctrl del actuador de posicion).
+        for name, qadr, act in zip(ARM_JOINTS, self._arm_qadr, self._a_arm):
+            self.data.qpos[qadr] = ARM_REST_POSE[name]
+            self.data.ctrl[act]  = ARM_REST_POSE[name]
+        mujoco.mj_forward(self.model, self.data)
+        self.ctrl.sync_from_data()          # rampas al estado nuevo (flippers en 0, vel 0)
+        self._grav_comp_arm()
+        for _ in range(SPAWN_SETTLE_STEPS):
+            self.ctrl.apply(self._dt)
+            mujoco.mj_step(self.model, self.data)
+
+        self._ep_steps = 0
+        fb = self._feedback()
+        self.nav.reset(fb["xy"])
+        guidance = self.nav.step(fb["xy"], fb["yaw"])
+        self._rs.reset(fb["xy"], float(np.linalg.norm(fb["xy"] - np.asarray(guidance["target"]))))
+        return W.build_obs(guidance, fb)
+
+    def _grav_comp_arm(self):
+        # Compensa gravedad en los DOFs del brazo (como el bridge) para que el
+        # brazo parado no cargue ni derive.
+        self.data.qfrc_applied[self._arm_vadr] = self.data.qfrc_bias[self._arm_vadr]
+
+    # ── Step ─────────────────────────────────────────────────────────────────
+    def step(self, action: np.ndarray):
+        self._apply_action(action)
+        # grav-comp del brazo una vez por control-step (qfrc_applied persiste).
+        self._grav_comp_arm()
+        # Rampas AVR446 por substep (igual que el bridge) + fisica.
+        for _ in range(self.decim):
+            self.ctrl.apply(self._dt)
+            mujoco.mj_step(self.model, self.data)
+
+        self._ep_steps += 1
+        fb = self._feedback()
+        guidance = self.nav.step(fb["xy"], fb["yaw"])
+        reward = W.compute_reward(fb, guidance, action, self._rs)
+        done, reached, reason = W.terminated(fb, self.goal_xy, self._ep_steps, self.max_steps)
+        obs = W.build_obs(guidance, fb)
+        info = {"wp": guidance["wp"], "reached": reached, "reason": reason,
+                "dist_goal": float(np.linalg.norm(fb["xy"] - self.goal_xy))}
+        return obs, reward, done, info
+
+
+# ──────────────────────────── Vec-env por threads ──────────────────────────
+class VecMujocoEnv:
+    """N BaseMujocoEnv en paralelo (threads; mj_step libera el GIL). Con
+    auto-reset: cuando un env termina, su siguiente obs es la del episodio nuevo
+    (convencion gym/SB3); el reward/done terminal se devuelven igual para el
+    buffer de PPO."""
+
+    def __init__(self, n_envs: int = 6, control_decimation: int = CONTROL_DECIMATION,
+                 max_steps: int = W.EPISODE_MAX_STEPS, verbose: bool = True):
+        self.n = n_envs
+        self.obs_dim = W.OBS_DIM
+        self.act_dim = W.ACT_DIM
+        self.verbose = verbose
+
+        # Planear la ruta A* UNA vez (mapa estatico) y compartir waypoints.
+        goal = W.GOAL_XY or tuple(json.load(open(W.NAV_JSON))["pallets"][-1]["center_xy"])
+        waypoints = plan_route(W.NAV_JSON, W.START_XY, goal)
+        if verbose:
+            print(f"[vec] Ruta: {W.START_XY} -> {tuple(goal)}  ({len(waypoints)} waypoints)  "
+                  f"| n_envs={n_envs}")
+
+        # Un MjModel compartido (read-only) entre envs; cada env su MjData.
+        shared_model = mujoco.MjModel.from_xml_path(XML_PATH)
+        self.envs = [BaseMujocoEnv(waypoints, model=shared_model,
+                                   goal_xy=goal, control_decimation=control_decimation,
+                                   max_steps=max_steps) for _ in range(n_envs)]
+        self._pool = ThreadPoolExecutor(max_workers=n_envs)
+        self._ep_return = np.zeros(n_envs, dtype=np.float64)
+        self._ep_history: List[float] = []
+        self._n_reached = 0
+
+    def reset(self) -> np.ndarray:
+        obs = list(self._pool.map(lambda e: e.reset(), self.envs))
+        self._ep_return[:] = 0.0
+        return np.stack(obs).astype(np.float32)
+
+    def step(self, actions: np.ndarray):
+        def _one(i):
+            return self.envs[i].step(actions[i])
+        results = list(self._pool.map(_one, range(self.n)))
+
+        obs   = np.zeros((self.n, self.obs_dim), dtype=np.float32)
+        rews  = np.zeros(self.n, dtype=np.float32)
+        dones = np.zeros(self.n, dtype=np.float32)
+        infos: List[dict] = []
+        for i, (o, r, d, inf) in enumerate(results):
+            self._ep_return[i] += r
+            if d:
+                self._ep_history.append(float(self._ep_return[i]))
+                if len(self._ep_history) > 100:
+                    self._ep_history.pop(0)
+                if inf.get("reached"):
+                    self._n_reached += 1
+                if self.verbose and inf.get("reason"):
+                    tag = "🏁" if inf.get("reached") else "🛑"
+                    print(f"[vec] env{i} {tag} {inf['reason']}  "
+                          f"ret={self._ep_return[i]:.1f}  wp={inf.get('wp')}")
+                self._ep_return[i] = 0.0
+                o = self.envs[i].reset()      # auto-reset
+            obs[i]  = o
+            rews[i] = r
+            dones[i] = float(d)
+            infos.append(inf)
+        return obs, rews, dones, infos
+
+    def avg_return(self) -> float:
+        return float(np.mean(self._ep_history)) if self._ep_history else float("nan")
+
+    @property
+    def n_reached(self) -> int:
+        return self._n_reached
+
+    def close(self):
+        self._pool.shutdown(wait=False)

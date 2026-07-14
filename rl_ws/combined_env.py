@@ -38,7 +38,7 @@ from typing import Optional, Dict, Tuple
 # Importar capas de los envs individuales
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
-from base_env import (
+from rl_ws.base_ros_env import (
     BaseMuJoCoEnv, TRACK_HALF_WIDTH, WHEEL_RADIUS,
     MAX_WHEEL_VEL, MAX_LINEAR_VEL, MAX_ANGULAR_VEL,
     DRIVE_LEFT, DRIVE_RIGHT, FLIPPERS, FLIP_WHEELS,

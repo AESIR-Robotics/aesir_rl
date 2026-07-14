@@ -37,10 +37,22 @@ _RL_WS_ROOT = os.path.dirname(_THIS_DIR)
 if _RL_WS_ROOT not in sys.path:
     sys.path.insert(0, _RL_WS_ROOT)
 
-from ppo_pallets_train import SPAWN_XYZ, GOAL_XY
 from global_navigator import (
     plan_route, box_corners_2d, GlobalNavigator, vortex_apf, REACH_DIST,
 )
+# Inicio/meta del pipeline ACTUAL (mismos valores que usan base_ros_env y
+# train_base) tomados de world_base, que es su fuente pura — sin arrastrar
+# ROS/mujoco/torch, asi este script sigue corriendo sin sourcear el workspace.
+from base_training.base_env import START_XY as _START_XY, GOAL_XY as _GOAL_XY, NAV_JSON as _WB_NAV
+
+def _resolve_goal():
+    if _GOAL_XY is not None:
+        return tuple(_GOAL_XY)
+    with open(_WB_NAV, "r") as _f:                 # None -> ultimo pallet del JSON
+        return tuple(json.load(_f)["pallets"][-1]["center_xy"])
+
+SPAWN_XYZ = (float(_START_XY[0]), float(_START_XY[1]), 0.25)   # compat: [:2] es el inicio
+GOAL_XY   = _resolve_goal()
 
 ROBOT_RADIUS = 0.1
 GAP_BRIDGE_DISTANCE = 0.15

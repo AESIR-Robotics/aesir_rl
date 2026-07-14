@@ -78,26 +78,20 @@ class AesirTeleop(Node):
 
     def publish_flippers(self):
         jc = JointControl()
-        
-        # Your custom group order (2 & 3 are front, 1 & 4 are rear)
-        jc.joint_names = ['flipper_2_joint', 'flipper_3_joint', 'flipper_1_joint', 'flipper_4_joint']
-        
-        # Calculate the hardware position (neutral is math.pi)
-        # We invert (-) the angle for one side to fix the mirroring issue!
-        front_left  = math.pi + self.front_angle
-        front_right = math.pi - self.front_angle 
-        
-        rear_left   = math.pi + self.rear_angle
-        rear_right  = math.pi - self.rear_angle
 
-        # Map them to the joint names list above
+        # Numeracion NUEVA del modelo: flipper_1,2 = FRENTE ; flipper_3,4 = ATRAS.
+        # Los dos flippers de cada par tienen el MISMO eje (delanteros (0,1,0),
+        # traseros (0,-1,0)), asi que con el MISMO valor ya se mueven juntos ->
+        # NO hay que invertir ningun lado (antes se invertia por el modelo viejo).
+        # Neutro = math.pi (convencion "hardware"); + front_angle mueve el par.
+        jc.joint_names = ['flipper_1_joint', 'flipper_2_joint',
+                          'flipper_3_joint', 'flipper_4_joint']
         jc.position = [
-            front_left,   # flipper_2_joint
-            front_right,  # flipper_3_joint
-            rear_left,    # flipper_1_joint
-            rear_right    # flipper_4_joint
+            math.pi + self.front_angle,   # flipper_1 (frente-izq)
+            math.pi + self.front_angle,   # flipper_2 (frente-der)
+            math.pi + self.rear_angle,    # flipper_3 (atras-izq)
+            math.pi + self.rear_angle,    # flipper_4 (atras-der)
         ]
-        
         self.joint_pub.publish(jc)
 
 def main():

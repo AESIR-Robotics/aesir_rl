@@ -47,7 +47,7 @@ from hardware.msg import JointControl
 from std_srvs.srv import Trigger
 from std_msgs.msg import Int32
 
-from global_navigator import plan_route, GlobalNavigator, quat_to_yaw
+from rl_ws.global_navigator import plan_route, GlobalNavigator, quat_to_yaw
 
 _HERE    = os.path.dirname(os.path.abspath(__file__))
 NAV_JSON = os.path.join(_HERE, "obstacles.json")
@@ -56,45 +56,64 @@ NAV_JSON = os.path.join(_HERE, "obstacles.json")
 V_MAX_MPS   = 0.6      # linear.x  a v_norm = 1
 W_MAX_RADPS = 1.5      # angular.z a w_norm = 1
 FLIPPER_MAX = 3.1416   # rad a flip = 1
-CONTROL_HZ  = 20.0     # frecuencia del lazo de control RL
+# Limite de recorrido de los flippers (por software), asimetrico.
+FLIPPER_MIN_RAD = -1.3
+FLIPPER_MAX_RAD = 3.14159
+CONTROL_HZ  = 20.0     # frecuencia del lazo de control RL (periodo de sim = 1/CONTROL_HZ)
+
+SIM_SPEEDUP = 2.5
 
 # ── Mision (frame de aesir_complete.xml == frame de obstacles.json) ──────────
 # Spawn = SPAWN_POSE del bridge; meta = ultimo pallet de obstacles.json.
-START_XY: Tuple[float, float] = (-2.1, 4.1)
+START_XY: Tuple[float, float] = (-1.5, 3.5)
 GOAL_XY:  Optional[Tuple[float, float]] = None   # None -> ultimo pallet del JSON
 FINISH_DIST = 0.60
-EPISODE_MAX_STEPS = 2500
+EPISODE_MAX_STEPS = 5000
 
 FLIPPER_JOINTS = ["flipper_1_joint", "flipper_2_joint", "flipper_3_joint", "flipper_4_joint"]
 
 # ── Pesos de reward ────────────────────────────────────────────────────────
 # objetivo que da la guia del vortex.
-W_DIRECTION    = 0.5     # encarar al objetivo (cos Δθ)
-W_VELOCITY     = 0.5     # igualar la velocidad forward objetivo
-
+W_DIRECTION    = 0.7     # encarar al objetivo (cos Δθ)
+W_VELOCITY     = 0.7     # igualar la velocidad forward objetivo
 WP_BONUS       = 200.0    # bonus al cruzar un waypoint
 TIME_PENALTY   = 0.1
 FALL_PENALTY   = 250.0
 STUCK_MAX      = 2.0
-ENERGY_W       = 1e-4    # costo de energia (antes: 1e-9 * ctrl^2, ahora accion^2)
+ENERGY_W       = 1e-8    # costo de energia 
 FLIPPER_JERK_W = 0.5
 TILT_W         = 5.0
 FLIPPER_COLLISION_W = 50.0   # castigo por auto-colision de flippers (x penetracion)
+# Castigo por aceleraciones FUERTES del chasis (cuidar la integridad del robot):
+# cambio del twist base entre pasos, normalizado; zona muerta deja pasar la
+# aceleracion normal (ir rapido) y solo castiga el exceso (jolts) al cuadrado.
+ACCEL_W        = 1.5
+ACCEL_DEADZONE = 0.3
+# Velocidad deseada = DISTANCIA al punto-guia del vortex (lejos -> rapido, cerca
+# -> lento). Se premia alcanzarla encarando la guia; retroceder se castiga.
+GUIDE_SPEED_SCALE = 1.0   # [m] distancia del guia que ya pide velocidad plena V_MAX
+BACKWARD_W        = 2.0   # castigo por retroceder (x fraccion de V_MAX en reversa)
 
 # ── Geometria de flippers (para detectar auto-colision desde los angulos) ────
 FLIPPER_MOUNTS = np.array([
-    [-0.24, -0.274, 0.06],   # flipper_1  (atras-izq)
-    [ 0.24, -0.274, 0.06],   # flipper_2  (atras-der)
-    [ 0.24,  0.274, 0.06],   # flipper_3  (frente-der)
-    [-0.24,  0.274, 0.06],   # flipper_4  (frente-izq)
+    [ 0.24,  0.274, 0.06],   # flipper_1  (frente-izq)
+    [ 0.24, -0.274, 0.06],   # flipper_2  (frente-der)
+    [-0.24,  0.274, 0.06],   # flipper_3  (atras-izq)
+    [-0.24, -0.274, 0.06],   # flipper_4  (atras-der)
 ], dtype=np.float64)
-FLIPPER_AXIS_SIGN      = np.array([-1.0, -1.0, 1.0, 1.0])  # eje (0,-1,0) vs (0,1,0)
+# flipper_1,2 (frente) eje (0,1,0) -> +1 ; flipper_3,4 (atras) eje (0,-1,0) -> -1
+FLIPPER_AXIS_SIGN      = np.array([1.0, 1.0, -1.0, -1.0])
 FLIPPER_L              = 0.35   # pivote -> punta (centro de la rueda del extremo)
 FLIPPER_COLLISION_DIST = 0.13   # 2*radio_rueda(0.055) + margen: mas cerca = colision
 
+# ── Lookahead de la trayectoria (puntos futuros del vortex que ve la politica)
+N_LOOKAHEAD    = 5      # nº de puntos futuros del rollout del vortex
+LOOKAHEAD_STEP = 0.30   # avance (m) del rollout por punto
+
 # ── Tamaños expuestos a la politica ──────────────────────────────────────────
-OBS_DIM = 15   # guia(3) + twist_base(3) + flipper_qpos(4) + flipper_qvel(4) + upright(1)
-ACT_DIM = 6    # v, ω, flipper×4
+# guia(3) + lookahead(3*N) + twist_base(3) + flipper_qpos(4) + flipper_qvel(4) + upright(1)
+OBS_DIM = 15 + 3 * N_LOOKAHEAD
+ACT_DIM = 6    # v, ω, flipper×4  (la politica controla base + flippers)
 
 
 # ── Convencion "hardware" (espejo de topic_bridge_hardware.cpp) ──────────────
@@ -189,7 +208,9 @@ class _BridgeInterface(Node):
         jc = JointControl()
         jc.header.stamp = self.get_clock().now().to_msg()
         jc.joint_names  = list(FLIPPER_JOINTS)
-        jc.position     = [ros_to_hw(float(np.clip(f, -1.0, 1.0)) * FLIPPER_MAX) for f in flippers]
+        jc.position     = [ros_to_hw(float(np.clip(np.clip(f, -1.0, 1.0) * FLIPPER_MAX,
+                                                    FLIPPER_MIN_RAD, FLIPPER_MAX_RAD)))
+                           for f in flippers]
         self.joint_pub.publish(jc)
 
     def stop_robot(self):
@@ -197,20 +218,40 @@ class _BridgeInterface(Node):
 
     # ── Reset de episodio (servicio del bridge) ─────────────────────────────
     def reset_sim(self, timeout: float = 5.0) -> bool:
-        if not self.reset_cli.wait_for_service(timeout_sec=timeout):
+        """Llama al servicio /mujoco_ros_bridge/reset_sim de forma THREAD-SAFE.
+
+        El executor spinea en un hilo aparte (_spin_forever); llamar desde el
+        hilo principal a wait_for_service() o hacer busy-poll de fut.done() toca
+        internals del executor desde otro hilo -> race que re-lanzaba en el hilo
+        de spin y lo mataba. En su lugar:
+          1) Disponibilidad: se consulta el grafo con service_is_ready() (query
+             puro, thread-safe), sin wait_for_service.
+          2) Respuesta: se espera un threading.Event que dispara el done_callback
+             del future — ese callback lo corre el executor (hilo de spin) cuando
+             llega la respuesta; el hilo principal solo hace Event.wait(), nunca
+             toca el executor. Sin race."""
+        t0 = time.time()
+        while not self.reset_cli.service_is_ready() and time.time() - t0 < timeout:
+            time.sleep(0.05)
+        if not self.reset_cli.service_is_ready():
             self.get_logger().warn("Servicio /mujoco_ros_bridge/reset_sim no disponible")
             return False
+
         fut = self.reset_cli.call_async(Trigger.Request())
-        t0 = time.time()
-        while not fut.done() and time.time() - t0 < timeout:
-            time.sleep(0.01)
-        return fut.done() and fut.result() is not None and fut.result().success
+        done = threading.Event()
+        fut.add_done_callback(lambda _f: done.set())
+        if not done.wait(timeout=timeout):
+            self.get_logger().warn("reset_sim: timeout esperando respuesta del bridge")
+            return False
+        resp = fut.result()
+        return resp is not None and resp.success
 
 
 # ──────────────────────────── Observacion y reward ─────────────────────────
 def _build_obs(guidance: dict, fb: dict) -> np.ndarray:
     return np.concatenate([
-        guidance["obs"],                                    # 3
+        guidance["obs"],                                    # 3   guia inmediata
+        guidance["lookahead"],                              # 3*N puntos futuros
         fb["twist"],                                        # 3  [v_fwd, v_lat, omega]
         fb["flip_qpos"],                                    # 4
         fb["flip_qvel"],                                    # 4
@@ -225,14 +266,18 @@ class _RewardState:
         self.last_dist_to_target = 0.0
         self.last_wp = 0
         self.last_flip = np.zeros(4, dtype=np.float32)
+        self.last_twist = np.zeros(3, dtype=np.float32)
         self.stuck = 0
+        self.last_terms = {}          # desglose firmado del ultimo reward
 
     def reset(self, xy: np.ndarray, dist_to_target: float):
         self.last_xy = xy.copy()
         self.last_dist_to_target = dist_to_target
         self.last_wp = 0
         self.last_flip = np.zeros(4, dtype=np.float32)
+        self.last_twist = np.zeros(3, dtype=np.float32)
         self.stuck = 0
+        self.last_terms = {}
 
 
 def _flipper_tips(flip_qpos: np.ndarray) -> np.ndarray:
@@ -275,8 +320,15 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     target_xy = np.asarray(guidance["target"], dtype=np.float64)
     v_fwd = float(fb["twist"][0])
 
+    # Desglose FIRMADO del reward (la suma de todos los terminos == reward total).
+    terms = {k: 0.0 for k in ("fall", "stuck", "energy", "flipper_jerk", "tilt",
+                              "flipper_collision", "accel", "wp_bonus", "progress",
+                              "direction", "velocity", "backward", "time")}
+
     # 1. Caida letal (chasis muy bajo) o tocar piso (salirse de los pallets):
     if fb["z"] < 0.10 or fb.get("floor_contact", 0) > 0:
+        terms["fall"] = -FALL_PENALTY
+        rs.last_terms = terms
         return -FALL_PENALTY
 
     # 2. Inactividad 
@@ -305,7 +357,24 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     #    evalua sobre los angulos REALES medidos (fb["flip_qpos"]).
     flipper_collision_pen = _flipper_collision_penalty(fb["flip_qpos"])
 
-    penalties = penalty_stuck + action_cost + flipper_pen + tilt_pen + flipper_collision_pen
+    # 7. Aceleraciones FUERTES del chasis (cuidar la integridad del robot):
+    #    cambio del twist base entre pasos, normalizado por [V_MAX, V_MAX, W_MAX].
+    #    Zona muerta -> deja pasar la aceleracion normal; solo se castiga el
+    #    exceso al cuadrado (jolts que dan;an el robot).
+    twist = np.asarray(fb["twist"], dtype=np.float32)
+    accel = (twist - rs.last_twist) / np.array([V_MAX_MPS, V_MAX_MPS, W_MAX_RADPS],
+                                                dtype=np.float32)
+    rs.last_twist = twist.copy()
+    accel_pen = ACCEL_W * max(0.0, float(np.linalg.norm(accel)) - ACCEL_DEADZONE) ** 2
+
+    penalties = (penalty_stuck + action_cost + flipper_pen + tilt_pen
+                 + flipper_collision_pen + accel_pen)
+    terms["stuck"]             = -penalty_stuck
+    terms["energy"]            = -action_cost
+    terms["flipper_jerk"]      = -flipper_pen
+    terms["tilt"]              = -tilt_pen
+    terms["flipper_collision"] = -flipper_collision_pen
+    terms["accel"]             = -accel_pen
 
     # 7. Waypoint cruzado — al cruzarlo
     #    se devuelve solo el bonus mas las penalizaciones (sin progreso ni
@@ -313,6 +382,8 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     if guidance["wp"] > rs.last_wp:
         rs.last_wp = guidance["wp"]
         rs.last_dist_to_target = float(np.linalg.norm(xy - target_xy))
+        terms["wp_bonus"] = WP_BONUS
+        rs.last_terms = terms
         return WP_BONUS - penalties
 
     # 8. Progreso hacia el waypoint actual (delta_dist * boost
@@ -323,18 +394,23 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     progress_reward = delta_dist * (50.0 + 100.0 * proximity_multiplier)
     rs.last_dist_to_target = dist_to_target
 
-    # 9. Direccion y velocidad objetivo (SOLO SI AVANZA)
-    # Solo damos esta recompensa si delta_dist es positivo (se acerco al objetivo)
-    if delta_dist > 0:
-        direction_reward = W_DIRECTION * float(cos_t)
-        v_des = V_MAX_MPS * float(dist_norm) * max(0.0, float(cos_t))
-        speed_match = 1.0 - min(1.0, abs(v_fwd - v_des) / V_MAX_MPS)
-        velocity_reward = W_VELOCITY * speed_match
-    else:
-        direction_reward = 0.0
-        velocity_reward = 0.0
+    # 9. Alcanzar la velocidad y orientacion que pide el vortex + castigo por
+    #    retroceder. La DISTANCIA al punto-guia es la velocidad deseada (lejos ->
+    #    rapido, cerca -> lento, p.ej. al llegar) y cos_t la orientacion. Se premia
+    #    acercarse a esa velocidad encarando la guia; retroceder (v_fwd<0) se
+    #    castiga -> evita la oscilacion.
+    d_guide = float(np.linalg.norm(np.asarray(guidance["vortex"], dtype=float) - xy))
+    v_des = V_MAX_MPS * min(d_guide / GUIDE_SPEED_SCALE, 1.0)
+    speed_reward = W_VELOCITY * (1.0 - abs(v_fwd - v_des) / V_MAX_MPS) * max(0.0, float(cos_t))
+    backward_pen = BACKWARD_W * max(0.0, -v_fwd) / V_MAX_MPS
 
-    return progress_reward + direction_reward + velocity_reward - penalties - TIME_PENALTY
+    terms["progress"]  = progress_reward
+    terms["velocity"]  = speed_reward
+    terms["backward"]  = -backward_pen
+    terms["time"]      = -TIME_PENALTY
+    rs.last_terms = terms
+
+    return progress_reward + speed_reward - backward_pen - penalties - TIME_PENALTY
 
 
 def _terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int, max_steps: int) -> Tuple[bool, bool]:
@@ -386,7 +462,9 @@ class BaseRosEnv:
             goal_xy = tuple(json.load(open(nav_json))["pallets"][-1]["center_xy"])
         self.goal_xy = np.array(goal_xy, dtype=np.float64)
         self.waypoints = plan_route(nav_json, tuple(self.start_xy), tuple(self.goal_xy))
-        self.nav = GlobalNavigator(nav_json, waypoints=self.waypoints)
+        self.nav = GlobalNavigator(nav_json, waypoints=self.waypoints,
+                                   n_lookahead=N_LOOKAHEAD,
+                                   lookahead_step=LOOKAHEAD_STEP)
         print(f"[base_env] Ruta: {tuple(self.start_xy)} -> {tuple(self.goal_xy)}  "
               f"({len(self.waypoints)} waypoints)")
 
@@ -396,7 +474,7 @@ class BaseRosEnv:
         self._node = _BridgeInterface()
         self._executor = rclpy.executors.SingleThreadedExecutor()
         self._executor.add_node(self._node)
-        self._spin_thread = threading.Thread(target=self._executor.spin, daemon=True)
+        self._spin_thread = threading.Thread(target=self._spin_forever, daemon=True)
         self._spin_thread.start()
 
         print("[base_env] Esperando feedback del bridge en hardware_node/pose ...")
@@ -407,6 +485,19 @@ class BaseRosEnv:
         self._rs = _RewardState()
         self._ep_steps = 0
         self._fb: Optional[dict] = None
+
+    # ── Spin resiliente del executor ─────────────────────────────────────────
+    def _spin_forever(self):
+        """Spinea el executor tolerando errores: si una callback de ROS lanza
+        (mensaje transitorio raro, etc.), el executor la re-lanza — con
+        executor.spin() eso MATA el hilo y deja de llegar feedback, colgando el
+        entrenamiento en silencio. Aqui la atrapamos, la logueamos y seguimos,
+        para que un run de horas no muera por un mensaje puntual."""
+        while rclpy.ok():
+            try:
+                self._executor.spin_once(timeout_sec=0.1)
+            except Exception as e:
+                print(f"[base_env] callback ROS fallo (continuo): {e!r}")
 
     # ── Reset ────────────────────────────────────────────────────────────────
     def reset(self) -> np.ndarray:
@@ -427,8 +518,9 @@ class BaseRosEnv:
 
     # ── Step ─────────────────────────────────────────────────────────────────
     def step(self, action: np.ndarray):
+        # accion = [v, ω, flipper×4]: la politica controla base + flippers.
         self._node.publish_action(action[0], action[1], action[2:6])
-        time.sleep(self.dt)                   # deja avanzar la fisica del bridge
+        time.sleep(self.dt / SIM_SPEEDUP)
 
         fb = self._node.feedback()
         guidance = self.nav.step(fb["xy"], fb["yaw"])
@@ -439,7 +531,13 @@ class BaseRosEnv:
 
         obs = _build_obs(guidance, fb)
         info = {"wp": guidance["wp"], "reached": reached,
-                "dist_goal": float(np.linalg.norm(fb["xy"] - self.goal_xy))}
+                "dist_goal": float(np.linalg.norm(fb["xy"] - self.goal_xy)),
+                "reward_terms": dict(self._rs.last_terms),
+                # para visualizar la trayectoria en test_base:
+                "xy": np.asarray(fb["xy"], dtype=float).copy(),        # pose real del robot
+                "guide": np.asarray(guidance["vortex"], dtype=float).copy(),   # punto-guia vortex
+                "target": np.asarray(guidance["target"], dtype=float).copy(),  # waypoint objetivo
+                "lookahead_xy": np.asarray(guidance["lookahead_xy"], dtype=float)}  # 5 puntos futuros
         self._fb = fb
         return obs, reward, done, info
 

@@ -11,10 +11,10 @@
     <mesh name="base_link" content_type="model/stl" file="meshes/robot/base_link.stl" scale="0.001 0.001 0.001"/>
     <mesh name="tracked_1" content_type="model/stl" file="meshes/robot/tracked_1.stl" scale="0.001 0.001 0.001"/>
     <mesh name="tracked_2" content_type="model/stl" file="meshes/robot/tracked_2.stl" scale="0.001 0.001 0.001"/>
-    <mesh name="flipper_1_1" content_type="model/stl" file="meshes/robot/flipper_1_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="flipper_4_1" content_type="model/stl" file="meshes/robot/flipper_1_1.stl" scale="0.001 0.001 0.001"/>
     <mesh name="flipper_2_1" content_type="model/stl" file="meshes/robot/flipper_2_1.stl" scale="0.001 0.001 0.001"/>
-    <mesh name="flipper_3_1" content_type="model/stl" file="meshes/robot/flipper_3_1.stl" scale="0.001 0.001 0.001"/>
-    <mesh name="flipper_4_1" content_type="model/stl" file="meshes/robot/flipper_4_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="flipper_1_1" content_type="model/stl" file="meshes/robot/flipper_3_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="flipper_3_1" content_type="model/stl" file="meshes/robot/flipper_4_1.stl" scale="0.001 0.001 0.001"/>
     <mesh name="lidar" content_type="model/stl" file="meshes/robot/lidar.stl" scale="0.001 0.001 0.001"/>
     <mesh name="logitech_c920" content_type="model/stl" file="meshes/robot/logitech_c920.stl" scale="0.001 0.001 0.001"/>
     <mesh name="oak_d" content_type="model/stl" file="meshes/robot/OAK-D-parts-14sep2020.stl" scale="0.001 0.001 0.001"/>
@@ -111,10 +111,10 @@
         <camera name="cam_back" pos="0.027 -0.027 0.2" euler="1.57079632679 1.57079632679 3.14159265359" fovy="78"/>
       </body>
 
-      <body name="flipper_1_link" pos="-0.24 -0.274 0.06">
+      <body name="flipper_1_link" pos="0.24 0.274 0.06">
         <inertial pos="0 0.00355409 0.15154" quat="0.707092 -0.00452931 0.00452931 0.707092" mass="2.4875" diaginertia="0.0729765 0.065573 0.00896149"/>
-        <joint name="flipper_1_joint" pos="0 0 0" axis="0 -1 0"  actuatorfrcrange="-200 200" damping="2.0" armature="0.05"/>
-        <geom pos="0.24 0.826 -0.06" quat="1 0 0 0" type="mesh" rgba="0.75 0.75 0.75 1" mesh="flipper_1_1" contype="0" conaffinity="0"/>
+        <joint name="flipper_1_joint" pos="0 0 0" axis="0 1 0"  actuatorfrcrange="-200 200" damping="2.0" armature="0.05"/>
+        <geom pos="0.24 0.274 -0.06" quat="1 0 0 0" type="mesh" rgba="0.75 0.75 0.75 1" mesh="flipper_1_1" contype="0" conaffinity="0"/>
         <body name="wheel_flipper1_1" pos="0 0 0.35">
           <joint name="drive_flipper1_1" type="hinge" axis="0 1 0" damping="0.1" armature="0.05"/>
           <geom type="cylinder" size="0.055 0.02" quat="0.707107 0.707107 0 0" rgba="1 0 0 0.5" friction="1.5 0.005 0.0001"/>
@@ -134,7 +134,7 @@
       </body>
       <body name="flipper_2_link" pos="0.24 -0.274 0.06">
         <inertial pos="0 -0.00355409 0.15154" quat="0.707092 0.00452931 -0.00452931 0.707092" mass="2.4875" diaginertia="0.0729765 0.065573 0.00896149"/>
-        <joint name="flipper_2_joint" pos="0 0 0" axis="0 -1 0" actuatorfrcrange="-200 200" damping="2.0" armature="0.05"/>
+        <joint name="flipper_2_joint" pos="0 0 0" axis="0 1 0" actuatorfrcrange="-200 200" damping="2.0" armature="0.05"/>
         <geom pos="-0.24 0.826 -0.06" quat="1 0 0 0" type="mesh" rgba="0.75 0.75 0.75 1" mesh="flipper_2_1" contype="0" conaffinity="0"/>
         <body name="wheel_flipper2_1" pos="0 0 0.35">
           <joint name="drive_flipper2_1" type="hinge" axis="0 1 0" damping="0.1" armature="0.05"/>
@@ -153,10 +153,10 @@
           <geom type="cylinder" size="0.035 0.02" quat="0.707107 0.707107 0 0" rgba="1 0 0 0.5" friction="1.5 0.005 0.0001"/>
         </body>
       </body>
-      <body name="flipper_3_link" pos="0.24 0.274 0.06">
+      <body name="flipper_3_link" pos="-0.24 0.274 0.06">
         <inertial pos="0 -0.00355409 0.15154" quat="0.707092 0.00452931 -0.00452931 0.707092" mass="2.4875" diaginertia="0.0729765 0.065573 0.00896149"/>
-        <joint name="flipper_3_joint" pos="0 0 0" axis="0 1 0" actuatorfrcrange="-200 200" damping="2.0" armature="0.05"/>
-        <geom pos="0.24 0.276 -0.06" quat="1 0 0 0" type="mesh" rgba="0.75 0.75 0.75 1" mesh="flipper_3_1" contype="0" conaffinity="0"/>
+        <joint name="flipper_3_joint" pos="0 0 0" axis="0 -1 0" actuatorfrcrange="-200 200" damping="2.0" armature="0.05"/>
+        <geom pos="-0.24 0.276 -0.06" quat="1 0 0 0" type="mesh" rgba="0.75 0.75 0.75 1" mesh="flipper_3_1" contype="0" conaffinity="0"/>
         <body name="wheel_flipper3_1" pos="0 0 0.35">
           <joint name="drive_flipper3_1" type="hinge" axis="0 1 0" damping="0.1" armature="0.05"/>
           <geom type="cylinder" size="0.055 0.02" quat="0.707107 0.707107 0 0" rgba="1 0 0 0.5" friction="1.5 0.005 0.0001"/>
@@ -174,10 +174,10 @@
           <geom type="cylinder" size="0.035 0.02" quat="0.707107 0.707107 0 0" rgba="1 0 0 0.5" friction="1.5 0.005 0.0001"/>
         </body>
       </body>
-      <body name="flipper_4_link" pos="-0.24 0.274 0.06">
+      <body name="flipper_4_link" pos="-0.24 -0.274 0.06">
         <inertial pos="0 -0.00355409 0.15154" quat="0.707092 0.00452931 -0.00452931 0.707092" mass="2.4875" diaginertia="0.0729765 0.065573 0.00896149"/>
-        <joint name="flipper_4_joint" pos="0 0 0" axis="0 1 0" actuatorfrcrange="-200 200" damping="2.0" armature="0.05"/>
-        <geom pos="-0.24 0.276 -0.06" quat="1 0 0 0" type="mesh" rgba="0.75 0.75 0.75 1" mesh="flipper_4_1" contype="0" conaffinity="0"/>
+        <joint name="flipper_4_joint" pos="0 0 0" axis="0 -1 0" actuatorfrcrange="-200 200" damping="2.0" armature="0.05"/>
+        <geom pos="0.24 0.826 -0.06" quat="1 0 0 0" type="mesh" rgba="0.75 0.75 0.75 1" mesh="flipper_4_1" contype="0" conaffinity="0"/>
         <body name="wheel_flipper4_1" pos="0 0 0.35">
           <joint name="drive_flipper4_1" type="hinge" axis="0 1 0" damping="0.1" armature="0.05"/>
           <geom type="cylinder" size="0.055 0.02" quat="0.707107 0.707107 0 0" rgba="1 0 0 0.5" friction="1.5 0.005 0.0001"/>

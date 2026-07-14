@@ -36,7 +36,13 @@ import torch.nn.functional as F
 from torch.distributions import Normal
 from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 
-from base_env import BaseRosEnv
+# Raiz del proyecto (aesir_rl) al path para resolver `rl_ws.*` corriendo directo.
+import sys
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
+from rl_ws.base_ros_env import BaseRosEnv
 
 try:
     import wandb
@@ -44,7 +50,7 @@ try:
 except ImportError:
     _HAS_WANDB = False
 
-CHECKPOINT_DIR = Path("./checkpoints_base")
+CHECKPOINT_DIR = Path(_ROOT) / "checkpoints_base"   # absoluto (no depende del CWD)
 CHECKPOINT_DIR.mkdir(exist_ok=True)
 
 
@@ -260,6 +266,6 @@ def train(num_iterations: int = 500,
 
 if __name__ == "__main__":
     train(
-        use_wandb=False,
+        use_wandb=True,   # logea metricas a Weights & Biases (requiere `wandb login`)
         resume_from="./checkpoints_base/base_best.pt",
     )

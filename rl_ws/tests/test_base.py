@@ -1,87 +1,277 @@
 """
-test_base.py — Visualiza el modelo entrenado del robot base.
+test_base.py — Corre/visualiza una politica base entrenada (.pt) sobre el MISMO
+pipeline ROS2 que el entrenamiento: BaseRosEnv <-> mujoco_ros_bridge.py. El
+viewer de MuJoCo lo abre el bridge, asi que ves el robot ejecutando la politica.
+
+REQUIERE, en OTRA terminal, el bridge corriendo:
+    cd rl_ws && MUJOCO_GL=glfw python3 mujoco_ros_bridge.py
+
+Uso:
+    cd rl_ws
+    python3 tests/test_base.py                                   # base_best.pt, deterministico
+    python3 tests/test_base.py --checkpoint checkpoints_base/base_iter00100.pt
+    python3 tests/test_base.py --episodes 5 --stochastic
 """
-import torch
-import time
+from __future__ import annotations
+
+import os
+import sys
+import json
+import argparse
+from collections import defaultdict
+
 import numpy as np
-from pathlib import Path
+import torch
 
-# Importamos tu entorno y la arquitectura de la red
-from base_env import BaseMuJoCoEnv
-from train_base import ConvActorCritic, obs_to_tensor, XML_PATH
+# Raiz del proyecto (aesir_rl) al path para resolver `rl_ws.*` (tests/ -> rl_ws -> aesir_rl)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_RLWS = os.path.dirname(_HERE)                       # rl_ws/
+_ROOT = os.path.dirname(_RLWS)                        # aesir_rl/
+for _p in (_ROOT, _HERE):                            # _HERE: para importar plot_path_vortex
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-# ── Configuración ───────────────────────────────────────────────────────
-CHECKPOINT_PATH = "./checkpoints_base/base_best.pt"  # El mejor modelo guardado
-DETERMINISTIC = True  # True = usa el promedio exacto, False = añade ruido/exploración
+from rl_ws.base_ros_env import BaseRosEnv, NAV_JSON   # noqa: E402
+from rl_ws.train_base import MLPActorCritic          # noqa: E402
 
-def test():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Usando dispositivo: {device}")
+DEFAULT_CKPT = os.path.join(_ROOT, "checkpoints_base", "fast_best.pt")
 
-    # 1. Iniciar el entorno CON renderizado
-    env = BaseMuJoCoEnv(XML_PATH, render=True)
-    
-    # 2. Reconstruir la red neuronal (con las mismas dimensiones)
-    policy = ConvActorCritic(
-        image_shape=env.image_shape,
-        lidar_dim=env.num_lidar,
-        joint_dim=env.joint_len,
-        act_dim=env.act_len,
-    ).to(device)
 
-    # 3. Cargar los pesos entrenados
-    if not Path(CHECKPOINT_PATH).exists():
-        print(f"❌ No se encontró el archivo: {CHECKPOINT_PATH}")
-        return
+def load_policy(path: str, obs_dim: int, act_dim: int, device) -> MLPActorCritic:
+    ckpt = torch.load(path, map_location=device)
+    saved = ckpt["policy"]
 
-    checkpoint = torch.load(CHECKPOINT_PATH, map_location=device)
-    policy.load_state_dict(checkpoint["policy"])
-    print(f"✅ Modelo cargado exitosamente desde el episodio (Iter: {checkpoint.get('iter', '?')}) con Recompensa Promedio: {checkpoint.get('avg_ep_r', '?'):.2f}")
+    # Chequeo de compatibilidad: el .pt debe tener el mismo act_dim que el env
+    # actual (p.ej. si entrenaste con flippers ACT_DIM=6 y ahora el env es 2, o
+    # al reves, el .pt no sirve para este env).
+    ckpt_act = int(saved["actor_mu.weight"].shape[0])
+    ckpt_obs = int(saved["trunk.0.weight"].shape[1])
+    if ckpt_act != act_dim or ckpt_obs != obs_dim:
+        raise SystemExit(
+            f"El checkpoint no coincide con el env: checkpoint(obs={ckpt_obs}, "
+            f"act={ckpt_act}) vs env(obs={obs_dim}, act={act_dim}). "
+            f"Usa un .pt entrenado con esta misma configuracion.")
 
-    # Poner la red en modo evaluación (desactiva dropout, etc.)
+    policy = MLPActorCritic(obs_dim, act_dim).to(device)
+    policy.load_state_dict(saved)
     policy.eval()
+    avg = ckpt.get("avg_ep_r", float("nan"))
+    print(f"Modelo cargado: {path}  (iter={ckpt.get('iter', '?')}, avg_ep_r={avg:.2f})")
+    return policy
 
-    obs = env.reset()
-    ep_reward = 0.0
 
-    print("🎮 Iniciando simulación... (Presiona Ctrl+C en la terminal para salir)")
+@torch.no_grad()
+def pick_action(policy: MLPActorCritic, obs: np.ndarray, device, stochastic: bool) -> np.ndarray:
+    if stochastic:
+        action, _logp, _val = policy.act(obs, device)   # muestrea de la distribucion
+        return action
+    obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+    mu, _std, _val = policy(obs_t)                       # media = accion deterministica
+    return mu.squeeze(0).cpu().numpy()
+
+
+# Orden y etiqueta legible de cada componente del reward (deben coincidir con
+# las claves de info["reward_terms"] que produce base_ros_env._compute_reward).
+_TERM_LABELS = [
+    ("progress",          "Progreso (acercarse al wp)"),
+    ("direction",         "Direccion (encarar guia)"),
+    ("velocity",          "Velocidad (igualar v objetivo)"),
+    ("wp_bonus",          "Bonus por waypoint"),
+    ("time",              "Castigo de tiempo"),
+    ("backward",          "Castigo por retroceder"),
+    ("stuck",             "Castigo por atascarse"),
+    ("energy",            "Castigo de energia"),
+    ("flipper_jerk",      "Castigo jerk de flippers"),
+    ("tilt",              "Castigo por inclinacion"),
+    ("flipper_collision", "Castigo auto-colision flippers"),
+    ("accel",             "Castigo aceleraciones fuertes"),
+    ("fall",              "Castigo por caida/piso (terminal)"),
+]
+
+
+def print_reward_breakdown(title: str, sums: dict, steps: int):
+    """Imprime cuanto aporto cada componente al reward: total, promedio/paso y
+    % del reward positivo/negativo. La suma de todos == reward total."""
+    total = sum(sums.values())
+    pos = sum(v for v in sums.values() if v > 0) or 1e-9
+    neg = sum(v for v in sums.values() if v < 0) or -1e-9
+    print(f"\n  ── {title} ({steps} pasos) ──")
+    print(f"    {'componente':<34}{'total':>11}{'/paso':>11}{'% +/-':>9}")
+    for key, label in _TERM_LABELS:
+        v = sums.get(key, 0.0)
+        if abs(v) < 1e-9:
+            continue
+        share = 100.0 * v / (pos if v > 0 else -neg)   # % del lado (recompensa/castigo)
+        per = v / steps if steps else 0.0
+        print(f"    {label:<34}{v:>11.2f}{per:>11.4f}{share:>8.0f}%")
+    print(f"    {'-'*34}{'-'*11}{'-'*11}{'-'*9}")
+    print(f"    {'REWARD TOTAL':<34}{total:>11.2f}{total/max(steps,1):>11.4f}")
+    print(f"    {'(suma positivos / negativos)':<34}{pos:>11.2f} / {neg:.2f}")
+
+
+class LiveTrajectoryPlot:
+    """Ventana matplotlib que se actualiza EN VIVO mientras corre el episodio.
+    Dibuja UNA vez el fondo (pista: pallets, sticks, obstaculos, zona segura via
+    plot_path_vortex.draw_map + la ruta A*) y va trazando a cada paso el camino
+    REAL del robot y el punto-guia del vortex que persigue. Guarda un PNG al
+    terminar cada episodio. `every` = cada cuantos pasos refresca el lienzo."""
+
+    def __init__(self, data, waypoints, goal_xy, every: int = 2):
+        import matplotlib
+        import matplotlib.pyplot as plt
+        from plot_path_vortex import draw_map            # reusa el dibujo de la pista
+
+        self.plt = plt
+        self.every = max(1, int(every))
+        self._n = 0
+        self.live = not matplotlib.get_backend().lower().endswith("agg")
+        if not self.live:
+            print("[test_base] matplotlib sin backend interactivo (headless): "
+                  "no habra ventana en vivo, solo se guardaran los PNG.")
+
+        plt.ion()
+        self.fig, ax = plt.subplots(figsize=(13, 9))
+        self.ax = ax
+        self.fig.patch.set_facecolor("#1e222b")
+        ax.set_facecolor("#1e222b"); ax.set_aspect("equal")
+        ax.grid(True, linestyle=":", alpha=0.2, color="#ffffff", zorder=0)
+        ax.tick_params(colors="#ffffff")
+        ax.set_xlabel("X [m]", color="#ffffff"); ax.set_ylabel("Y [m]", color="#ffffff")
+
+        draw_map(ax, data)                               # pista (fondo, una vez)
+        wp = np.asarray(waypoints, dtype=float)
+        ax.plot(wp[:, 0], wp[:, 1], "--", color="#ffffff", lw=1.3, alpha=0.45,
+                zorder=4, label="Ruta A*")
+        ax.plot(wp[:, 0], wp[:, 1], "o", color="#ff9f43", ms=5, ls="None", zorder=6)
+        ax.plot(goal_xy[0], goal_xy[1], "*", color="#ff4757", ms=20, zorder=8, label="Meta")
+
+        # objetos dinamicos (se actualizan por paso)
+        (self.path_line,) = ax.plot([], [], "-", color="#00e5ff", lw=2.2, alpha=0.95,
+                                    zorder=5, label="Robot (real)")
+        (self.robot_dot,) = ax.plot([], [], "o", color="#00e5ff", ms=10, mec="#ffffff", zorder=9)
+        (self.guide_dot,) = ax.plot([], [], "o", color="#ffeaa7", ms=8, mec="#d63031",
+                                    zorder=9, label="Guia inmediata (vortex)")
+        # lookahead: los N puntos futuros que VE la politica (estela verde adelante)
+        (self.look_line,) = ax.plot([], [], "-", color="#55efc4", lw=1.2, alpha=0.7, zorder=7)
+        (self.look_dots,) = ax.plot([], [], "o", color="#55efc4", ms=5, mec="#00b894",
+                                    zorder=8, label="Lookahead (futuro)")
+        ax.legend(loc="upper right", fontsize=8, framealpha=0.9, facecolor="#1e222b",
+                  edgecolor="#a4b0be", labelcolor="#ffffff")
+        self._rx, self._ry = [], []
+        self.fig.canvas.draw(); plt.pause(0.001)
+
+    def start_episode(self, ep: int):
+        self._rx, self._ry = [], []
+        self.path_line.set_data([], [])
+        self.robot_dot.set_data([], []); self.guide_dot.set_data([], [])
+        self.look_line.set_data([], []); self.look_dots.set_data([], [])
+        self.ax.set_title(f"Ep {ep}: siguiendo la trayectoria (EN VIVO)",
+                          color="#ffffff", fontweight="bold")
+        self.fig.canvas.draw_idle(); self.plt.pause(0.001)
+
+    def update(self, robot_xy, guide_xy, lookahead_xy=None):
+        self._rx.append(float(robot_xy[0])); self._ry.append(float(robot_xy[1]))
+        self._n += 1
+        self.path_line.set_data(self._rx, self._ry)
+        self.robot_dot.set_data([robot_xy[0]], [robot_xy[1]])
+        self.guide_dot.set_data([guide_xy[0]], [guide_xy[1]])
+        if lookahead_xy is not None and len(lookahead_xy):
+            la = np.asarray(lookahead_xy, dtype=float)
+            self.look_dots.set_data(la[:, 0], la[:, 1])
+            # linea robot -> puntos futuros, para ver la "estela" que anticipa
+            self.look_line.set_data(np.r_[robot_xy[0], la[:, 0]], np.r_[robot_xy[1], la[:, 1]])
+        if self._n % self.every == 0:
+            self.fig.canvas.draw_idle(); self.fig.canvas.flush_events()
+
+    def end_episode(self, ep: int, reached: bool, out_path=None):
+        tag = "META ALCANZADA" if reached else "fin"
+        self.ax.set_title(f"Ep {ep}: {tag}  ({len(self._rx)} pasos)",
+                          color="#ffffff", fontweight="bold")
+        self.fig.canvas.draw_idle(); self.plt.pause(0.001)
+        if out_path:
+            self.fig.savefig(out_path, dpi=140, facecolor=self.fig.get_facecolor())
+            print(f"    trayectoria guardada -> {out_path}")
+
+    def close(self):
+        self.plt.ioff(); self.plt.close(self.fig)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Test de una politica base entrenada (.pt)")
+    ap.add_argument("--checkpoint", default=DEFAULT_CKPT)
+    ap.add_argument("--episodes", type=int, default=3)
+    ap.add_argument("--stochastic", action="store_true",
+                    help="muestrea de la distribucion (default: deterministico = media)")
+    ap.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True,
+                    help="grafica la trayectoria de cada episodio (--no-plot para desactivar)")
+    ap.add_argument("--plot-dir", default=os.path.join(_HERE, "trajectories"),
+                    help="carpeta donde guardar los PNG de trayectoria")
+    args = ap.parse_args()
+
+    # Resuelve el checkpoint sin importar el CWD: prueba tal cual, luego relativo
+    # a la raiz del proyecto y a checkpoints_base/ (asi vale pasar la ruta corta).
+    ckpt = args.checkpoint
+    if not os.path.isfile(ckpt):
+        for cand in (os.path.join(_ROOT, ckpt),
+                     os.path.join(_ROOT, "checkpoints_base", os.path.basename(ckpt))):
+            if os.path.isfile(cand):
+                ckpt = cand
+                break
+    if not os.path.isfile(ckpt):
+        raise SystemExit(
+            f"No existe el checkpoint: {args.checkpoint}\n"
+            f"  (buscado tambien en {_ROOT}/ y {_ROOT}/checkpoints_base/)")
+    args.checkpoint = ckpt
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Dispositivo: {device}")
+
+    env = BaseRosEnv()   # se conecta al bridge (espera su feedback); el bridge abre el viewer
+    policy = load_policy(args.checkpoint, env.obs_dim, env.act_len, device)
+
+    live = None
+    if args.plot:
+        os.makedirs(args.plot_dir, exist_ok=True)
+        with open(NAV_JSON, "r") as f:
+            _map_data = json.load(f)
+        live = LiveTrajectoryPlot(_map_data, env.waypoints, env.goal_xy)
+
+    global_terms = defaultdict(float)   # acumulado de todos los episodios
+    global_steps = 0
     try:
-        while True:
-            # Convertir observaciones a tensores de PyTorch
-            obs_t = obs_to_tensor(obs)
-            
-            with torch.no_grad():
-                images = obs_t["images"].unsqueeze(0).to(device)
-                lidar  = obs_t["lidar"].unsqueeze(0).to(device)
-                joints = obs_t["joint_states"].unsqueeze(0).to(device)
-                
-                # Obtener la acción de la red
-                mu, std, _ = policy(images, lidar, joints)
-                
-                if DETERMINISTIC:
-                    # Toma la decisión más segura (sin ruido)
-                    action = mu.squeeze(0).cpu().numpy()
-                else:
-                    # Muestrea de la distribución (igual que en entrenamiento)
-                    dist = torch.distributions.Normal(mu, std)
-                    action = dist.sample().squeeze(0).cpu().numpy()
-
-            # Ejecutar la acción en MuJoCo
-            obs, rew, done, _ = env.step(action)
-            ep_reward += rew
-
-            # Pausa pequeña para que tus ojos puedan seguir el movimiento a tiempo real
-            time.sleep(0.02) 
-
-            if done:
-                print(f"🏁 Episodio terminado. Recompensa total: {ep_reward:.2f}")
-                obs = env.reset()
-                ep_reward = 0.0
-
+        for ep in range(args.episodes):
+            obs = env.reset()
+            ep_reward, steps, done, info = 0.0, 0, False, {}
+            ep_terms = defaultdict(float)
+            if live:
+                live.start_episode(ep + 1)
+            while not done:
+                action = pick_action(policy, obs, device, args.stochastic)
+                obs, rew, done, info = env.step(action)
+                ep_reward += rew
+                steps += 1
+                for k, v in info.get("reward_terms", {}).items():
+                    ep_terms[k] += v
+                    global_terms[k] += v
+                if live and "xy" in info:
+                    live.update(info["xy"], info["guide"], info.get("lookahead_xy"))
+            global_steps += steps
+            tag = "🏁 META" if info.get("reached") else "fin"
+            print(f"[Ep {ep + 1}/{args.episodes}] {tag}  reward={ep_reward:8.2f}  "
+                  f"steps={steps}  wp={info.get('wp')}  dist_goal={info.get('dist_goal', 0.0):.2f}")
+            print_reward_breakdown(f"Ep {ep + 1}", ep_terms, steps)
+            if live:
+                out = os.path.join(args.plot_dir, f"traj_ep{ep + 1:02d}.png")
+                live.end_episode(ep + 1, info.get("reached", False), out)
     except KeyboardInterrupt:
-        print("\n🛑 Simulación detenida por el usuario.")
+        print("\nDetenido por el usuario.")
     finally:
+        if global_steps:
+            print_reward_breakdown("TOTAL (todos los episodios)", global_terms, global_steps)
+        if live:
+            live.close()
         env.close()
 
+
 if __name__ == "__main__":
-    test()
+    main()
