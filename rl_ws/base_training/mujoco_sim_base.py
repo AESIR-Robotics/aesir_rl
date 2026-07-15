@@ -21,16 +21,27 @@ Uso tipico (desde train_fast.py):
 from __future__ import annotations
 
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import mujoco
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+try:
+    import cv2
+except Exception:  # pragma: no cover - fallback en entornos sin OpenCV
+    cv2 = None
 
 import rl_ws.base_training.config as C
 import rl_ws.base_training.base_env as W
 from rl_ws.base_training.robot_control import RampController
+from rl_ws.base_training.map_context import MapContext
 from rl_ws.global_navigator import plan_route, GlobalNavigator, quat_to_yaw
+
+CHECKOUT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 def _quat_upright(q) -> float:
@@ -43,7 +54,8 @@ class BaseMujocoEnv:
 
     def __init__(self, waypoints, model: mujoco.MjModel = None,
                  goal_xy=None, control_decimation: int = C.CONTROL_DECIMATION,
-                 max_steps: int = C.EPISODE_MAX_STEPS):
+                 max_steps: int = C.EPISODE_MAX_STEPS,
+                 map_ctx: Optional[MapContext] = None):
         # Un modelo por env (mismo XML). Se puede compartir el MjModel (read-only)
         # entre envs; cada uno tiene su MjData.
         self.model = model if model is not None else mujoco.MjModel.from_xml_path(C.XML_PATH)
@@ -51,6 +63,11 @@ class BaseMujocoEnv:
         self.decim = control_decimation
         self.max_steps = max_steps
         self._dt = float(self.model.opt.timestep)
+
+        # Contexto de mapa (octomap -> heatmap egocentrico), COMPARTIDO y
+        # de solo lectura entre todos los envs -- igual que `model` arriba.
+        # Si es None, build_obs regresa el vector plano de siempre (sin CNN).
+        self.map_ctx = map_ctx
 
         m = self.model
         aid = lambda n: mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, n)
@@ -89,6 +106,12 @@ class BaseMujocoEnv:
 
         self._rs = W.RewardState()
         self._ep_steps = 0
+        self._heatmap_out_dir = os.path.join(CHECKOUT_ROOT, "heatmap_debug")
+        self._heatmap_counter = 0
+        self._heatmap_video_path = os.path.join(self._heatmap_out_dir, "heatmap_live.mp4")
+        self._heatmap_video_writer = None
+        self._heatmap_video_fps = 6
+        os.makedirs(self._heatmap_out_dir, exist_ok=True)
 
     # ── Feedback desde mjData (mismo dict `fb` que el backend ROS) ───────────
     def _feedback(self) -> dict:
@@ -154,12 +177,70 @@ class BaseMujocoEnv:
         self.nav.reset(fb["xy"])
         guidance = self.nav.step(fb["xy"], fb["yaw"])
         self._rs.reset(fb["xy"], float(np.linalg.norm(fb["xy"] - np.asarray(guidance["target"]))))
-        return W.build_obs(guidance, fb)
+        heatmap = self._get_heatmap(fb)
+        return W.build_obs(guidance, fb, heatmap)
 
     def _grav_comp_arm(self):
         # Compensa gravedad en los DOFs del brazo (como el bridge) para que el
         # brazo parado no cargue ni derive.
         self.data.qfrc_applied[self._arm_vadr] = self.data.qfrc_bias[self._arm_vadr]
+
+    def _get_heatmap(self, fb: dict):
+        """Minimapa por altura real, recalculado con la posicion ACTUAL del
+        robot (fb["xy"], fb["z"], fb["yaw"]) -- None si no hay map_ctx."""
+        if self.map_ctx is None:
+            return None
+        return self.map_ctx.get_heatmap(robot_xy=fb["xy"], robot_z=fb["z"], robot_yaw=fb["yaw"])
+
+    def _close_heatmap_video(self):
+        """Finaliza el writer de video si está abierto."""
+        if self._heatmap_video_writer is not None:
+            try:
+                self._heatmap_video_writer.release()
+            except Exception:
+                pass
+            self._heatmap_video_writer = None
+
+    def _append_heatmap_to_video(self, heatmap: np.ndarray):
+        """Agrega el heatmap actual a un MP4 en tiempo real si es posible."""
+        if heatmap is None or cv2 is None:
+            return
+        try:
+            frame = np.asarray(heatmap, dtype=np.float32)
+            frame = np.clip(frame, 0.0, 1.0)
+            gray = np.uint8(frame * 255.0)
+            frame_bgr = cv2.merge([gray, gray, gray])
+            if self._heatmap_video_writer is None:
+                h, w = frame_bgr.shape[:2]
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                self._heatmap_video_writer = cv2.VideoWriter(self._heatmap_video_path, fourcc,
+                                                             self._heatmap_video_fps, (w, h))
+                if not self._heatmap_video_writer.isOpened():
+                    self._heatmap_video_writer = None
+                    return
+            self._heatmap_video_writer.write(frame_bgr)
+        except Exception:
+            # No interrumpir el entrenamiento si el backend de video no está disponible.
+            self._close_heatmap_video()
+
+    def _save_heatmap_debug(self, heatmap: np.ndarray, fb: dict):
+        """Guarda una imagen del heatmap actual en disco para inspeccionarlo."""
+        if heatmap is None:
+            return
+        out_dir = self._heatmap_out_dir
+        os.makedirs(out_dir, exist_ok=True)
+        self._heatmap_counter += 1
+        out_path = os.path.join(out_dir, f"heatmap_step_{self._heatmap_counter:05d}.png")
+        dpi = 240
+        fig = plt.figure(figsize=(6, 6), dpi=dpi)
+        ax = fig.add_axes([0, 0, 1, 1])
+        ax.imshow(heatmap, cmap="gray", vmin=0.0, vmax=1.0, interpolation="nearest")
+        ax.set_title(f"step={self._heatmap_counter}  xy=({fb['xy'][0]:.2f},{fb['xy'][1]:.2f})",
+                     fontsize=10, pad=4)
+        ax.axis("off")
+        fig.savefig(out_path, dpi=dpi, format="png")
+        plt.close(fig)
+        self._append_heatmap_to_video(heatmap)
 
     # ── Step ─────────────────────────────────────────────────────────────────
     def step(self, action: np.ndarray):
@@ -176,7 +257,9 @@ class BaseMujocoEnv:
         guidance = self.nav.step(fb["xy"], fb["yaw"])
         reward = W.compute_reward(fb, guidance, action, self._rs)
         done, reached, reason = W.terminated(fb, self.goal_xy, self._ep_steps, self.max_steps)
-        obs = W.build_obs(guidance, fb)
+        heatmap = self._get_heatmap(fb)
+        self._save_heatmap_debug(heatmap, fb)
+        obs = W.build_obs(guidance, fb, heatmap)
         info = {"wp": guidance["wp"], "reached": reached, "reason": reason,
                 "dist_goal": float(np.linalg.norm(fb["xy"] - self.goal_xy))}
         return obs, reward, done, info
@@ -203,11 +286,27 @@ class VecMujocoEnv:
             print(f"[vec] Ruta: {C.START_XY} -> {tuple(goal)}  ({len(waypoints)} waypoints)  "
                   f"| n_envs={n_envs}")
 
+        # Contexto de mapa (heatmap por altura real) -- UNA sola vez, compartido
+        # y de solo lectura entre todos los envs (igual patron que shared_model
+        # abajo). Se activa si config.py tiene USE_HEATMAP=True. build_obs ya
+        # se encarga de aplanarlo dentro del mismo vector de obs -- por eso
+        # este vec-env NO necesita saber nada especial sobre el heatmap, sigue
+        # tratando obs como un array (N, obs_dim) normal.
+        self.map_ctx = None
+        if getattr(C, "USE_HEATMAP", False):
+            self.map_ctx = MapContext(
+                bt_path=C.OCTOMAP_BT_PATH,
+                resolution=C.OCTOMAP_RESOLUTION,
+                radius_m=C.HEATMAP_RADIUS_M,
+                patch_pixels=C.HEATMAP_PIXELS,
+            )
+
         # Un MjModel compartido (read-only) entre envs; cada env su MjData.
         shared_model = mujoco.MjModel.from_xml_path(C.XML_PATH)
         self.envs = [BaseMujocoEnv(waypoints, model=shared_model,
                                    goal_xy=goal, control_decimation=control_decimation,
-                                   max_steps=max_steps) for _ in range(n_envs)]
+                                   max_steps=max_steps, map_ctx=self.map_ctx)
+                    for _ in range(n_envs)]
         self._pool = ThreadPoolExecutor(max_workers=n_envs)
         self._ep_return = np.zeros(n_envs, dtype=np.float64)
         self._ep_history: List[float] = []
@@ -255,4 +354,6 @@ class VecMujocoEnv:
         return self._n_reached
 
     def close(self):
+        for env in self.envs:
+            env._close_heatmap_video()
         self._pool.shutdown(wait=False)

@@ -43,8 +43,26 @@ from .config import (
 
 
 # ── Observacion ──────────────────────────────────────────────────────────────
-def build_obs(guidance: dict, fb: dict) -> np.ndarray:
-    return np.concatenate([
+def build_obs(guidance: dict, fb: dict, heatmap: Optional[np.ndarray] = None) -> np.ndarray:
+    """
+    Sin heatmap: vector plano de siempre, shape (OBS_DIM,) -- 100% igual
+    que antes, cero cambios de comportamiento.
+
+    Con heatmap (minimapa por altura real, ver map_context.py): el heatmap
+    se APLANA (flatten) y se concatena al final del vector de siempre.
+
+    OJO: esto es a proposito, NO es un dict. train_fast.py (b_obs, GAE,
+    ppo_update) asume en todos lados que obs es un vector plano de tamano
+    fijo OBS_DIM -- si regresaramos un dict aqui, habria que reescribir
+    ppo_update/compute_gae tambien (viven en ppo.py, que no tenemos a la
+    vista). Aplanando, OBS_DIM simplemente crece de
+    `15 + 3*N_LOOKAHEAD`  a  `15 + 3*N_LOOKAHEAD + H*W`
+    y CERO codigo de train_fast.py necesita cambiar -- solo el valor de
+    OBS_DIM en config.py, y la red (ver ppo_cnn_extractor.py) que
+    "desdobla" la cola del vector de vuelta a imagen (H,W) adentro de
+    su forward().
+    """
+    state = np.concatenate([
         guidance["obs"],                                    # 3   guia inmediata
         guidance["lookahead"],                              # 3*N puntos futuros
         fb["twist"],                                        # 3  [v_fwd, v_lat, omega]
@@ -52,6 +70,11 @@ def build_obs(guidance: dict, fb: dict) -> np.ndarray:
         fb["flip_qvel"],                                    # 4
         [fb["upright"]],                                    # 1
     ]).astype(np.float32)
+
+    if heatmap is None:
+        return state
+
+    return np.concatenate([state, heatmap.astype(np.float32).ravel()])
 
 
 # ── Estado entre pasos para el reward ────────────────────────────────────────

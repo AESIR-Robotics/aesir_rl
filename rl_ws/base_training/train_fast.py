@@ -45,6 +45,9 @@ except ImportError:
 
 C.CHECKPOINT_DIR.mkdir(exist_ok=True)
 
+from rl_ws.base_training.ppo import ppo_update, compute_gae   # sin MLPActorCritic
+from rl_ws.base_training.ppo_cnn_extractor import CNNActorCritic
+
 
 def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
           ppo_epochs=C.PPO_EPOCHS, batch_size=C.BATCH_SIZE,
@@ -60,7 +63,7 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
     venv = VecMujocoEnv(n_envs=n_envs)
     obs_dim, act_dim = venv.obs_dim, venv.act_dim
 
-    policy = MLPActorCritic(obs_dim, act_dim).to(device)
+    policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS).to(device)
     opt = torch.optim.Adam(policy.parameters(), lr=lr)
     start_iter, best_avg = 0, -1e9
     if resume_from and Path(resume_from).is_file():

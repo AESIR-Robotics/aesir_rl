@@ -32,12 +32,21 @@ import numpy as np
 # ── Rutas (absolutas, no dependen del CWD) ───────────────────────────────────
 _HERE    = os.path.dirname(os.path.abspath(__file__))            # .../rl_ws/base_training
 ROOT     = os.path.dirname(os.path.dirname(_HERE))               # .../aesir_rl
-NAV_JSON = os.path.join(_HERE, "..", "obstacles.json")
+RL_WS    = os.path.abspath(os.path.join(_HERE, ".."))            # .../rl_ws
+NAV_JSON = os.path.join(RL_WS, "obstacles.json")
 _MODELS  = os.path.join(ROOT, "models")
 _FULL    = os.path.join(_MODELS, "aesir_complete.xml")
 _ROBOT   = os.path.join(_MODELS, "aesir_mujoco_robot.xml")
 XML_PATH = _FULL if os.path.exists(_FULL) else _ROBOT
 CHECKPOINT_DIR = Path(ROOT) / "checkpoints_base"
+
+# ── Parametros Heat_Map ──────────────────────────────────────
+
+USE_HEATMAP = True
+OCTOMAP_BT_PATH = os.path.join(RL_WS, "inflated_map.bt")
+OCTOMAP_RESOLUTION = 0.05
+HEATMAP_RADIUS_M = 1.0
+HEATMAP_PIXELS = 64
 
 # ── Escalas de comando (accion normalizada [-1,1] -> unidades fisicas) ───────
 V_MAX_MPS   = 0.8      # linear.x  a v_norm = 1
@@ -92,7 +101,7 @@ LOOKAHEAD_STEP = 0.20   # avance (m) del muestreo de la ruta por punto
 
 # ── Tamaños expuestos a la politica ──────────────────────────────────────────
 # guia(3) + lookahead(3*N) + twist_base(3) + flipper_qpos(4) + flipper_qvel(4) + upright(1)
-OBS_DIM = 15 + 3 * N_LOOKAHEAD
+OBS_DIM = 15 + 3*N_LOOKAHEAD + HEATMAP_PIXELS**2
 ACT_DIM = 6    # v, ω, flipper×4
 
 # ── Navegacion global: planeacion A* sobre la zona segura de pallets ─────────
@@ -188,3 +197,5 @@ ROS_ITERS          = 500
 ROS_BATCH_SIZE     = 256
 ROS_SAVE_EVERY     = 25
 WANDB_PROJECT_ROS  = "AIDL-PPO-AESIR-BASE"
+
+
