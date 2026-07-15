@@ -100,9 +100,9 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
         for it in range(start_iter, start_iter + iters):
             t0 = time.time()
             for t in range(T):
-                act, logp, val = policy.act_batch(obs, device)
-                nobs, rew, done, _info = venv.step(act)
-                b_obs[t], b_act[t], b_logp[t] = obs, act, logp
+                action, raw, logp, val = policy.act_batch(obs, device)
+                nobs, rew, done, _info = venv.step(action)
+                b_obs[t], b_act[t], b_logp[t] = obs, raw, logp
                 b_rew[t], b_val[t], b_done[t] = rew, val, done
                 obs = nobs
 

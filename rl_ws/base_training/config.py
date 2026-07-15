@@ -112,7 +112,7 @@ CORNER_DOT_THRESHOLD = 0.99   # giro se conserva como esquina si dot(v1,v2) < es
 MAX_WAYPOINT_DIST    = 0.50   # espaciado maximo (m) entre waypoints en rectas
 
 # ── Navegacion global: seguimiento (vortex APF + guia) ───────────────────────
-REACH_DIST     = 0.05   # distancia a la que un waypoint cuenta como alcanzado
+REACH_DIST     = 0.10   # distancia a la que un waypoint cuenta como alcanzado
 MAX_GUIDE_DIST = 5.0    # normalizacion de la distancia en la obs (dist_norm)
 ATT_GAIN     = 1.0      # grado de atraccion (magnitud maxima del pull al waypoint)
 ATT_RANGE    = 0.1      # distancia sobre la que la atraccion crece de 0 a ATT_GAIN

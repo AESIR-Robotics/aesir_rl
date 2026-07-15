@@ -116,7 +116,7 @@ class CNNActorCritic(nn.Module):
         feat = torch.cat([self.map_encoder(map_img), self.state_encoder(state)], dim=1)
         z = self.shared(feat)
 
-        mu = torch.tanh(self.actor_mu(z))                     # igual que MLP: media acotada [-1,1]
+        mu = self.actor_mu(z)                                 # SIN tanh -- ver ppo.py.forward
         value = self.critic(z)                                # (batch,1), SIN squeeze -- igual que MLP
         log_std = torch.clamp(self.log_std, _LOG_STD_MIN, _LOG_STD_MAX)
         return mu, log_std.exp().expand_as(mu), value
@@ -129,7 +129,8 @@ class CNNActorCritic(nn.Module):
         dist = Normal(mu, std)
         raw = dist.sample()
         logp = dist.log_prob(raw).sum(-1)
-        return (raw.cpu().numpy(), logp.cpu().numpy(),
+        action = raw.clamp(-1.0, 1.0)
+        return (action.cpu().numpy(), raw.cpu().numpy(), logp.cpu().numpy(),
                 value.squeeze(-1).cpu().numpy())
 
     @torch.no_grad()
@@ -141,7 +142,9 @@ class CNNActorCritic(nn.Module):
         dist = Normal(mu, std)
         raw = dist.sample()
         logp = dist.log_prob(raw).sum(dim=-1)
-        return raw.squeeze(0).cpu().numpy(), float(logp.item()), float(value.item())
+        action = raw.clamp(-1.0, 1.0)
+        return (action.squeeze(0).cpu().numpy(), raw.squeeze(0).cpu().numpy(),
+                float(logp.item()), float(value.item()))
 
     def evaluate(self, obs, actions):
         """(logp, value, entropy) -- MISMO nombre y MISMAS formas que

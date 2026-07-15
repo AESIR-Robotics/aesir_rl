@@ -35,7 +35,7 @@ class MLPActorCritic(nn.Module):
 
     def forward(self, obs):
         z = self.trunk(obs)
-        mu = torch.tanh(self.actor_mu(z))
+        mu = self.actor_mu(z)          
         value = self.critic(z)
         log_std = torch.clamp(self.log_std, C.LOG_STD_MIN, C.LOG_STD_MAX)
         return mu, log_std.exp().expand_as(mu), value
@@ -47,7 +47,8 @@ class MLPActorCritic(nn.Module):
         dist = Normal(mu, std)
         raw  = dist.sample()
         logp = dist.log_prob(raw).sum(-1)
-        return (raw.cpu().numpy(), logp.cpu().numpy(),
+        action = raw.clamp(-1.0, 1.0)
+        return (action.cpu().numpy(), raw.cpu().numpy(), logp.cpu().numpy(),
                 value.squeeze(-1).cpu().numpy())
 
     @torch.no_grad()
@@ -58,7 +59,9 @@ class MLPActorCritic(nn.Module):
         dist = Normal(mu, std)
         raw  = dist.sample()
         logp = dist.log_prob(raw).sum(dim=-1)
-        return raw.squeeze(0).cpu().numpy(), float(logp.item()), float(value.item())
+        action = raw.clamp(-1.0, 1.0)
+        return (action.squeeze(0).cpu().numpy(), raw.squeeze(0).cpu().numpy(),
+                float(logp.item()), float(value.item()))
 
     def evaluate(self, obs, actions):
         mu, std, value = self(obs)
@@ -79,6 +82,7 @@ def ppo_update(policy, opt, obs, actions, old_logp, adv, ret,
     n = obs.shape[0]
 
     m = {"pi": 0.0, "v": 0.0, "ent": 0.0}
+    n_updates = 0
     for _ in range(epochs):
         for idx in BatchSampler(SubsetRandomSampler(range(n)), batch, False):
             lp, val, ent = policy.evaluate(obs[idx], actions[idx])
@@ -90,7 +94,10 @@ def ppo_update(policy, opt, obs, actions, old_logp, adv, ret,
             opt.zero_grad(); loss.backward()
             nn.utils.clip_grad_norm_(policy.parameters(), C.MAX_GRAD_NORM)
             opt.step()
-            m["pi"] = pl.item(); m["v"] = vl.item(); m["ent"] = ent.item()
+            m["pi"] += pl.item(); m["v"] += vl.item(); m["ent"] += ent.item()
+            n_updates += 1
+    for k in m:
+        m[k] /= max(n_updates, 1)
     return m
 
 

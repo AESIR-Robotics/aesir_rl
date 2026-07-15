@@ -159,9 +159,9 @@ def train(num_iterations: int = C.ROS_ITERS,
         for it in range(start_iter, start_iter + num_iterations):
             t0 = time.time()
             for _ in range(steps_per_iter):
-                action, logp, val = policy.act(obs, device)
+                action, raw, logp, val = policy.act(obs, device)
                 nobs, rew, done, _info = env.step(action)
-                buf.store(obs, action, logp, rew, val, done)
+                buf.store(obs, raw, logp, rew, val, done)
                 obs = nobs
                 ep_reward += rew
                 if done:

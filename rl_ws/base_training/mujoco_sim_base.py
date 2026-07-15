@@ -147,18 +147,19 @@ class BaseMujocoEnv:
 
     # ── Fijar objetivos de la accion (las rampas los persiguen en apply) ────
     def _apply_action(self, action: np.ndarray):
-        a = np.clip(action, -1.0, 1.0)
-        self.ctrl.set_base_twist(float(a[0]) * C.V_MAX_MPS, float(a[1]) * C.W_MAX_RADPS)
+        self.ctrl.set_base_twist(float(action[0]) * C.V_MAX_MPS, float(action[1]) * C.W_MAX_RADPS)
         # Recorta el recorrido de los flippers al limite asimetrico por software.
-        flip_rad = np.clip(a[2:6] * C.FLIPPER_MAX, C.FLIPPER_MIN_RAD, C.FLIPPER_MAX_RAD)
+        flip_rad = np.clip(action[2:6] * C.FLIPPER_MAX, C.FLIPPER_MIN_RAD, C.FLIPPER_MAX_RAD)
         self.ctrl.set_flippers(flip_rad)
 
     # ── Reset ────────────────────────────────────────────────────────────────
     def reset(self) -> np.ndarray:
         mujoco.mj_resetData(self.model, self.data)
         a = self._base_qadr
-        self.data.qpos[a + 0] = C.START_XY[0]
-        self.data.qpos[a + 1] = C.START_XY[1]
+        # Random spawn 
+        spawn_xy = np.random.uniform(-8.0, 8.0, 2)
+        self.data.qpos[a + 0] = spawn_xy[0]
+        self.data.qpos[a + 1] = spawn_xy[1]
         self.data.qpos[a + 2] = C.SPAWN_Z
         self.data.qpos[a + 3:a + 7] = [1.0, 0.0, 0.0, 0.0]
         # Brazo en reposo (qpos + ctrl del actuador de posicion).
@@ -244,7 +245,8 @@ class BaseMujocoEnv:
 
     # ── Step ─────────────────────────────────────────────────────────────────
     def step(self, action: np.ndarray):
-        self._apply_action(action)
+        a_exec = np.clip(action, -1.0, 1.0)
+        self._apply_action(a_exec)
         # grav-comp del brazo una vez por control-step (qfrc_applied persiste).
         self._grav_comp_arm()
         # Rampas AVR446 por substep (igual que el bridge) + fisica.
@@ -255,7 +257,7 @@ class BaseMujocoEnv:
         self._ep_steps += 1
         fb = self._feedback()
         guidance = self.nav.step(fb["xy"], fb["yaw"])
-        reward = W.compute_reward(fb, guidance, action, self._rs)
+        reward = W.compute_reward(fb, guidance, a_exec, self._rs)
         done, reached, reason = W.terminated(fb, self.goal_xy, self._ep_steps, self.max_steps)
         heatmap = self._get_heatmap(fb)
         self._save_heatmap_debug(heatmap, fb)
