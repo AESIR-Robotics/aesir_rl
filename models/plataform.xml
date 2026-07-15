@@ -1,0 +1,22 @@
+<mujoco model="plataforma_gigante_aesir">
+    <asset>
+        <texture type="skybox" builtin="gradient" rgb1="0.4 0.6 0.8" rgb2="0 0 0" width="512" height="512"/>
+
+        <texture name="tex_piso" type="2d" builtin="checker" rgb1="0.15 0.1 0.1" rgb2="0.08 0.05 0.05" width="512" height="512"/>
+        <material name="mat_piso" texture="tex_piso" texrepeat="20 20" texuniform="true" reflectance="0.1"/>
+
+        <texture name="tex_plataforma" type="2d" builtin="flat" rgb1="0.8 0.4 0.1" rgb2="0.1 0.15 0.2" width="512" height="512"/>
+        <material name="mat_plataforma" texture="tex_plataforma" texrepeat="40 40" texuniform="true" reflectance="0.1"/>
+    </asset>
+
+    <worldbody>
+        <light directional="true" pos="0 0 10" dir="0 0 -1"/>
+
+        <!-- Suelo LETAL: en el pipeline todo geom tipo 'plane' cuenta como piso
+             (floor_contact -> castigo y fin de episodio). Queda debajo como
+             fondo; solo se toca si el robot se cae del borde de la plataforma. -->
+        <geom name="suelo" type="plane" size="40 40 0.1" material="mat_piso" condim="3" friction="1 0.005 0.0001"/>
+        <geom name="plataforma_gigante" type="box" size="10 10 0.06" pos="0 0 0.06"
+              material="mat_plataforma" condim="3" friction="1 0.005 0.0001"/>
+    </worldbody>
+</mujoco>

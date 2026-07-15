@@ -47,7 +47,11 @@ from hardware.msg import JointControl
 from std_srvs.srv import Trigger
 from std_msgs.msg import Int32
 
-from rl_ws.global_navigator import plan_route, GlobalNavigator, quat_to_yaw, quat_upright
+from rl_ws.global_navigator import (
+    plan_route, GlobalNavigator, quat_to_yaw, quat_upright,
+    build_platform_zone, plan_platform_route, plan_platform_route_with_obstacle,
+)
+from rl_ws.base_training.map_context import MapContext
 
 # TODOS los parametros (escalas de comando, mision, pesos de reward, geometria
 # de flippers, lookahead, OBS/ACT y la seccion ROS2) viven en base_training/
@@ -63,6 +67,8 @@ from rl_ws.base_training.config import (
     FLIPPER_MOUNTS, FLIPPER_AXIS_SIGN, FLIPPER_L, FLIPPER_COLLISION_DIST,
     N_LOOKAHEAD, LOOKAHEAD_STEP, OBS_DIM, ACT_DIM,
     FLIPPER_JOINTS, CONTROL_HZ, SIM_SPEEDUP,
+    USE_HEATMAP, OCTOMAP_BT_PATH, OCTOMAP_RESOLUTION, HEATMAP_RADIUS_M, HEATMAP_PIXELS,
+    USE_VIRTUAL_OBSTACLE, GOAL_XY_RANGE,
 )
 
 
@@ -193,8 +199,8 @@ class _BridgeInterface(Node):
 
 
 # ──────────────────────────── Observacion y reward ─────────────────────────
-def _build_obs(guidance: dict, fb: dict) -> np.ndarray:
-    return np.concatenate([
+def _build_obs(guidance: dict, fb: dict, heatmap: Optional[np.ndarray] = None) -> np.ndarray:
+    state = np.concatenate([
         guidance["obs"],                                    # 3   guia inmediata
         guidance["lookahead"],                              # 3*N puntos futuros
         fb["twist"],                                        # 3  [v_fwd, v_lat, omega]
@@ -202,6 +208,12 @@ def _build_obs(guidance: dict, fb: dict) -> np.ndarray:
         fb["flip_qvel"],                                    # 4
         [fb["upright"]],                                    # 1
     ]).astype(np.float32)
+    if heatmap is None:
+        return state
+    # MISMO orden que base_env.build_obs (usado por BaseMujocoEnv/train_fast):
+    # estado plano + heatmap aplanado al final -- asi el checkpoint CNN entrenado
+    # en un backend sirve tal cual en el otro.
+    return np.concatenate([state, heatmap.astype(np.float32).ravel()])
 
 
 class _RewardState:
@@ -394,24 +406,64 @@ class BaseRosEnv:
                  start_xy: Tuple[float, float] = START_XY,
                  goal_xy: Optional[Tuple[float, float]] = GOAL_XY,
                  control_hz: float = CONTROL_HZ,
-                 max_steps: int = EPISODE_MAX_STEPS):
+                 max_steps: int = EPISODE_MAX_STEPS,
+                 use_platform: bool = True):
+        # use_platform=True  -> mundo NUEVO: plataforma plana (plataform.xml),
+        #   ruta directa + obstaculo virtual + zona segura, IGUAL que el
+        #   entrenamiento (BaseMujocoEnv). Es lo que ve la politica CNN actual.
+        # use_platform=False -> mundo VIEJO: A* sobre los pallets/sticks de
+        #   obstacles.json (mapa que ya no existe fisicamente). Se conserva para
+        #   correr checkpoints entrenados con ese mapa.
 
         self.obs_dim = OBS_DIM
         self.act_len = ACT_DIM
         self.dt = 1.0 / control_hz
         self.max_steps = max_steps
-
-        # ── Ruta global (A*) una sola vez — geometria estatica del mapa ──────
+        self.use_platform = use_platform
+        self.nav_json = nav_json
         self.start_xy = np.array(start_xy, dtype=np.float64)
-        if goal_xy is None:
-            goal_xy = tuple(json.load(open(nav_json))["pallets"][-1]["center_xy"])
-        self.goal_xy = np.array(goal_xy, dtype=np.float64)
-        self.waypoints = plan_route(nav_json, tuple(self.start_xy), tuple(self.goal_xy))
-        self.nav = GlobalNavigator(nav_json, waypoints=self.waypoints,
-                                   n_lookahead=N_LOOKAHEAD,
-                                   lookahead_step=LOOKAHEAD_STEP)
-        print(f"[base_env] Ruta: {tuple(self.start_xy)} -> {tuple(self.goal_xy)}  "
-              f"({len(self.waypoints)} waypoints)")
+
+        if use_platform:
+            # goal fijo si viene por config/arg; None -> random por episodio
+            # (mismo rango que el entrenamiento, ±GOAL_XY_RANGE).
+            self._fixed_goal = None if goal_xy is None else np.array(goal_xy, dtype=np.float64)
+            self.platform_zone = build_platform_zone()   # zona segura (estatica), para el plot
+        else:
+            # Mundo viejo: goal None -> ultimo pallet del JSON; ruta A* fija.
+            if goal_xy is None:
+                goal_xy = tuple(json.load(open(nav_json))["pallets"][-1]["center_xy"])
+            self._fixed_goal = np.array(goal_xy, dtype=np.float64)
+            self.platform_zone = None
+
+        # Ruta inicial (se replanifica en reset() desde el spawn real del bridge
+        # cuando use_platform=True). virtual_obstacle=None en modo pallets.
+        self.goal_xy = self._sample_goal()
+        self.waypoints, self.virtual_obstacle = self._plan_route(self.start_xy, self.goal_xy)
+        if use_platform:
+            self.nav = GlobalNavigator(
+                None, waypoints=self.waypoints,
+                n_lookahead=N_LOOKAHEAD, lookahead_step=LOOKAHEAD_STEP,
+                obstacles=[self.virtual_obstacle] if self.virtual_obstacle is not None else [],
+                edges_zone=self.platform_zone)
+        else:
+            self.nav = GlobalNavigator(nav_json, waypoints=self.waypoints,
+                                       n_lookahead=N_LOOKAHEAD, lookahead_step=LOOKAHEAD_STEP)
+        print(f"[base_env] {'Plataforma' if use_platform else 'Pallets (A*)'}: "
+              f"{tuple(self.start_xy)} -> {tuple(self.goal_xy)}  "
+              f"({len(self.waypoints)} waypoints, "
+              f"obstaculo={'si' if self.virtual_obstacle is not None else 'no'})")
+
+        # Contexto de mapa (octomap -> heatmap egocentrico), MISMO patron que
+        # BaseMujocoEnv (mujoco_sim_base.py) -- si USE_HEATMAP=True en config.py,
+        # OBS_DIM ya incluye HEATMAP_PIXELS**2 y la politica es CNNActorCritic.
+        self.map_ctx = None
+        if USE_HEATMAP:
+            self.map_ctx = MapContext(
+                bt_path=OCTOMAP_BT_PATH,
+                resolution=OCTOMAP_RESOLUTION,
+                radius_m=HEATMAP_RADIUS_M,
+                patch_pixels=HEATMAP_PIXELS,
+            )
 
         # ── ROS2 ───────────────────────────────────────────────────────────
         if not rclpy.ok():
@@ -430,6 +482,28 @@ class BaseRosEnv:
         self._rs = _RewardState()
         self._ep_steps = 0
         self._fb: Optional[dict] = None
+
+    # ── Heatmap egocentrico (None si USE_HEATMAP=False) ─────────────────────
+    def _get_heatmap(self, fb: dict):
+        if self.map_ctx is None:
+            return None
+        return self.map_ctx.get_heatmap(robot_xy=fb["xy"], robot_z=fb["z"], robot_yaw=fb["yaw"])
+
+    # ── Mision (goal + ruta) segun el mundo activo ──────────────────────────
+    def _sample_goal(self) -> np.ndarray:
+        """goal fijo si se configuro uno; si no (solo modo plataforma), random
+        en ±GOAL_XY_RANGE cada episodio, como el entrenamiento."""
+        if self._fixed_goal is not None:
+            return self._fixed_goal.copy()
+        return np.random.uniform(-GOAL_XY_RANGE, GOAL_XY_RANGE, 2)
+
+    def _plan_route(self, spawn_xy, goal_xy):
+        """Devuelve (waypoints, virtual_obstacle_or_None) para el mundo activo."""
+        if not self.use_platform:
+            return plan_route(self.nav_json, tuple(spawn_xy), tuple(goal_xy)), None
+        if USE_VIRTUAL_OBSTACLE:
+            return plan_platform_route_with_obstacle(tuple(spawn_xy), tuple(goal_xy))
+        return plan_platform_route(tuple(spawn_xy), tuple(goal_xy)), None
 
     # ── Spin resiliente del executor ─────────────────────────────────────────
     def _spin_forever(self):
@@ -454,12 +528,22 @@ class BaseRosEnv:
             time.sleep(0.02)
             fb = self._node.feedback()
 
+        # Modo plataforma: nueva mision cada episodio (goal random + ruta directa
+        # con obstaculo virtual) desde el spawn REAL que reporto el bridge, igual
+        # que BaseMujocoEnv.reset(). Modo pallets: ruta fija de __init__.
+        if self.use_platform:
+            self.goal_xy = self._sample_goal()
+            self.waypoints, self.virtual_obstacle = self._plan_route(fb["xy"], self.goal_xy)
+            self.nav.replan(
+                self.waypoints,
+                obstacles=[self.virtual_obstacle] if self.virtual_obstacle is not None else [])
+
         self.nav.reset(fb["xy"])
         guidance = self.nav.step(fb["xy"], fb["yaw"])
         self._rs.reset(fb["xy"], float(np.linalg.norm(fb["xy"] - np.asarray(guidance["target"]))))
         self._ep_steps = 0
         self._fb = fb
-        return _build_obs(guidance, fb)
+        return _build_obs(guidance, fb, self._get_heatmap(fb))
 
     # ── Step ─────────────────────────────────────────────────────────────────
     def step(self, action: np.ndarray):
@@ -474,7 +558,7 @@ class BaseRosEnv:
         self._ep_steps += 1
         done, reached = _terminated(fb, self.goal_xy, self._ep_steps, self.max_steps)
 
-        obs = _build_obs(guidance, fb)
+        obs = _build_obs(guidance, fb, self._get_heatmap(fb))
         info = {"wp": guidance["wp"], "reached": reached,
                 "dist_goal": float(np.linalg.norm(fb["xy"] - self.goal_xy)),
                 "reward_terms": dict(self._rs.last_terms),

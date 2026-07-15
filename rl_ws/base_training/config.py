@@ -43,10 +43,11 @@ CHECKPOINT_DIR = Path(ROOT) / "checkpoints_base"
 # ── Parametros Heat_Map ──────────────────────────────────────
 
 USE_HEATMAP = True
-OCTOMAP_BT_PATH = os.path.join(RL_WS, "inflated_map.bt")
+OCTOMAP_BT_PATH = os.path.join(RL_WS, "occupied_map.bt")
 OCTOMAP_RESOLUTION = 0.05
 HEATMAP_RADIUS_M = 1.0
 HEATMAP_PIXELS = 64
+SAVE_HEATMAP_DEBUG = False
 
 # ── Escalas de comando (accion normalizada [-1,1] -> unidades fisicas) ───────
 V_MAX_MPS   = 0.8      # linear.x  a v_norm = 1
@@ -62,6 +63,25 @@ GOAL_XY:  Optional[Tuple[float, float]] = None   # None -> ultimo pallet del JSO
 SPAWN_Z   = 0.20
 FINISH_DIST       = 0.10
 EPISODE_MAX_STEPS = 15000
+SPAWN_XY_RANGE = 8.0
+GOAL_XY_RANGE  = 9.0
+
+PLATFORM_HALF_EXTENT = 10.0
+USE_VIRTUAL_OBSTACLE = True
+# plan_platform_route_with_obstacle elige PRIMERO donde va el obstaculo y
+# arma la ruta alrededor (nunca al reves) -- el tamano sale de la distancia
+# real entre los dos waypoints que terminan bordeando el hueco abierto.
+VIRTUAL_OBSTACLE_HALF_SIZE     = 0.3    # media-arista MAXIMA (m); se achica si el hueco es mas chico
+VIRTUAL_OBSTACLE_MIN_HALF_SIZE = 0.10   # media-arista MINIMA; por debajo de esto se descarta el obstaculo
+# Margen (m) obligatorio entre la caja y cada waypoint vecino. Con REP_RANGE=0.1
+# (corto) y el limite de giro del robot, 0.15 dejaba muy poco margen de
+# reaccion y el vortex podia rozar una esquina en aproximaciones casi
+# tangenciales a un lado plano (ver tests/plot_path_platform.py). Con 0.30 +
+# el fix de direccion de repulsion (borde real del box, no su centro) da
+# 0/596 rozamientos en bateria de prueba.
+VIRTUAL_OBSTACLE_CLEARANCE     = 0.30
+VIRTUAL_OBSTACLE_MAX_SKIP      = 3      # cuantos waypoints vecinos se pueden saltar agrandando el hueco
+VIRTUAL_OBSTACLE_OFFSET_FRAC   = (0.2, 0.6)   # offset lateral, como fraccion del half_size del obstaculo
 
 # ── Pesos de reward ──────────────────────────────────────────────────────────
 W_DIRECTION    = 0.6     # encarar al objetivo (cos Δθ)

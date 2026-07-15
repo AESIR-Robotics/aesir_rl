@@ -32,27 +32,32 @@ for _p in (_ROOT, _HERE):                            # _HERE: para importar plot
         sys.path.insert(0, _p)
 
 from rl_ws.base_training.base_ros_env import BaseRosEnv, NAV_JSON      # noqa: E402
-from rl_ws.base_training.ppo import MLPActorCritic       # noqa: E402  (misma red que train_fast/train_base)
+# CNNActorCritic reemplazo directo de MLPActorCritic (misma interfaz publica,
+# ver ppo_cnn_extractor.py) -- es la red que entrena train_fast.py (heatmap +
+# CNN) y la que produce checkpoints_base/fast_best.pt, el default de abajo.
+import rl_ws.base_training.config as C                                 # noqa: E402
+from rl_ws.base_training.ppo_cnn_extractor import CNNActorCritic       # noqa: E402
 
 DEFAULT_CKPT = os.path.join(_ROOT, "checkpoints_base", "fast_best.pt")
 
 
-def load_policy(path: str, obs_dim: int, act_dim: int, device) -> MLPActorCritic:
+def load_policy(path: str, obs_dim: int, act_dim: int, device) -> CNNActorCritic:
     ckpt = torch.load(path, map_location=device)
     saved = ckpt["policy"]
 
-    # Chequeo de compatibilidad: el .pt debe tener el mismo act_dim que el env
-    # actual (p.ej. si entrenaste con flippers ACT_DIM=6 y ahora el env es 2, o
-    # al reves, el .pt no sirve para este env).
+    # Chequeo de compatibilidad: el .pt debe tener el mismo act_dim/state_dim
+    # que el env actual (p.ej. si entrenaste con flippers ACT_DIM=6 y ahora el
+    # env es otro, o cambio N_LOOKAHEAD, el .pt no sirve para este env).
     ckpt_act = int(saved["actor_mu.weight"].shape[0])
-    ckpt_obs = int(saved["trunk.0.weight"].shape[1])
-    if ckpt_act != act_dim or ckpt_obs != obs_dim:
+    ckpt_state_dim = int(saved["state_encoder.0.weight"].shape[1])
+    state_dim = obs_dim - C.HEATMAP_PIXELS ** 2
+    if ckpt_act != act_dim or ckpt_state_dim != state_dim:
         raise SystemExit(
-            f"El checkpoint no coincide con el env: checkpoint(obs={ckpt_obs}, "
-            f"act={ckpt_act}) vs env(obs={obs_dim}, act={act_dim}). "
+            f"El checkpoint no coincide con el env: checkpoint(state={ckpt_state_dim}, "
+            f"act={ckpt_act}) vs env(state={state_dim}, act={act_dim}). "
             f"Usa un .pt entrenado con esta misma configuracion.")
 
-    policy = MLPActorCritic(obs_dim, act_dim).to(device)
+    policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS).to(device)
     policy.load_state_dict(saved)
     policy.eval()
     avg = ckpt.get("avg_ep_r", float("nan"))
@@ -61,9 +66,9 @@ def load_policy(path: str, obs_dim: int, act_dim: int, device) -> MLPActorCritic
 
 
 @torch.no_grad()
-def pick_action(policy: MLPActorCritic, obs: np.ndarray, device, stochastic: bool) -> np.ndarray:
+def pick_action(policy: CNNActorCritic, obs: np.ndarray, device, stochastic: bool) -> np.ndarray:
     if stochastic:
-        action, _logp, _val = policy.act(obs, device)   # muestrea de la distribucion
+        action, _raw, _logp, _val = policy.act(obs, device)   # muestrea de la distribucion
         return action
     obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
     mu, _std, _val = policy(obs_t)                       # media = accion deterministica
@@ -111,17 +116,27 @@ def print_reward_breakdown(title: str, sums: dict, steps: int):
 
 class LiveTrajectoryPlot:
     """Ventana matplotlib que se actualiza EN VIVO mientras corre el episodio.
-    Dibuja UNA vez el fondo (pista: pallets, sticks, obstaculos, zona segura via
-    plot_path_vortex.draw_map + la ruta A*) y va trazando a cada paso el camino
-    REAL del robot y el punto-guia del vortex que persigue. Guarda un PNG al
-    terminar cada episodio. `every` = cada cuantos pasos refresca el lienzo."""
+    Dibuja el fondo del MUNDO ACTIVO una sola vez y, por episodio, la escena
+    (ruta + meta + obstaculo virtual) que puede cambiar cada reset:
 
-    def __init__(self, data, waypoints, goal_xy, every: int = 2):
+      - Plataforma (env.use_platform=True, mapa NUEVO plataform.xml): borde de
+        la plataforma + zona segura erosionada (env.platform_zone) + ruta directa
+        + obstaculo virtual. Igual look que tests/plot_path_platform.py.
+      - Pallets (env.use_platform=False, mapa VIEJO): pista via
+        plot_path_vortex.draw_map(obstacles.json) + ruta A*.
+
+    A cada paso traza el camino REAL del robot y el punto-guia del vortex.
+    Guarda un PNG al terminar cada episodio. `every` = cada cuantos pasos
+    refresca el lienzo."""
+
+    def __init__(self, env, map_data=None, every: int = 2):
         import matplotlib
         import matplotlib.pyplot as plt
-        from plot_path_vortex import draw_map            # reusa el dibujo de la pista
+        from matplotlib.patches import Polygon as MPolygon, Rectangle
 
         self.plt = plt
+        self.Rectangle = Rectangle
+        self.use_platform = bool(getattr(env, "use_platform", False))
         self.every = max(1, int(every))
         self._n = 0
         self.live = not matplotlib.get_backend().lower().endswith("agg")
@@ -138,14 +153,31 @@ class LiveTrajectoryPlot:
         ax.tick_params(colors="#ffffff")
         ax.set_xlabel("X [m]", color="#ffffff"); ax.set_ylabel("Y [m]", color="#ffffff")
 
-        draw_map(ax, data)                               # pista (fondo, una vez)
-        wp = np.asarray(waypoints, dtype=float)
-        ax.plot(wp[:, 0], wp[:, 1], "--", color="#ffffff", lw=1.3, alpha=0.45,
-                zorder=4, label="Ruta A*")
-        ax.plot(wp[:, 0], wp[:, 1], "o", color="#ff9f43", ms=5, ls="None", zorder=6)
-        ax.plot(goal_xy[0], goal_xy[1], "*", color="#ff4757", ms=20, zorder=8, label="Meta")
+        # ── Fondo estatico del mundo activo ─────────────────────────────────
+        if self.use_platform:
+            he = float(C.PLATFORM_HALF_EXTENT)
+            ax.add_patch(Rectangle((-he, -he), 2 * he, 2 * he, fill=False,
+                                   ec="#ffa502", lw=2.0, zorder=1))
+            zone = getattr(env, "platform_zone", None)
+            if zone is not None:                          # zona segura erosionada
+                zx, zy = zone.exterior.xy
+                ax.add_patch(MPolygon(np.column_stack((zx, zy)), closed=True,
+                                      fc="#00b894", ec="#00cec9", alpha=0.12,
+                                      lw=0.8, zorder=1, label="Safe zone"))
+            ax.set_xlim(-he - 1, he + 1); ax.set_ylim(-he - 1, he + 1)
+        else:
+            from plot_path_vortex import draw_map          # pista de pallets (fondo)
+            draw_map(ax, map_data)
 
-        # objetos dinamicos (se actualizan por paso)
+        # ── Escena por episodio (se rellena en set_scene, cambia cada reset) ─
+        (self.route_line,) = ax.plot([], [], "--", color="#ffffff", lw=1.3, alpha=0.45,
+                                     zorder=4, label="Ruta")
+        (self.wp_dots,) = ax.plot([], [], "o", color="#ff9f43", ms=5, ls="None", zorder=6)
+        (self.goal_dot,) = ax.plot([], [], "*", color="#ff4757", ms=20, ls="None",
+                                   zorder=8, label="Meta")
+        self._obs_patch = None                            # caja del obstaculo virtual
+
+        # ── Objetos dinamicos (se actualizan por paso) ──────────────────────
         (self.path_line,) = ax.plot([], [], "-", color="#00e5ff", lw=2.2, alpha=0.95,
                                     zorder=5, label="Robot (real)")
         (self.robot_dot,) = ax.plot([], [], "o", color="#00e5ff", ms=10, mec="#ffffff", zorder=9)
@@ -159,6 +191,25 @@ class LiveTrajectoryPlot:
                   edgecolor="#a4b0be", labelcolor="#ffffff")
         self._rx, self._ry = [], []
         self.fig.canvas.draw(); plt.pause(0.001)
+
+    def set_scene(self, waypoints, goal_xy, virtual_obstacle=None):
+        """(Re)dibuja la ruta, la meta y el obstaculo virtual del episodio
+        actual — cambian en cada reset() cuando el goal es random."""
+        wp = np.asarray(waypoints, dtype=float)
+        self.route_line.set_data(wp[:, 0], wp[:, 1])
+        self.wp_dots.set_data(wp[:, 0], wp[:, 1])
+        self.goal_dot.set_data([goal_xy[0]], [goal_xy[1]])
+        if self._obs_patch is not None:
+            self._obs_patch.remove(); self._obs_patch = None
+        if virtual_obstacle is not None:
+            o = virtual_obstacle
+            self._obs_patch = self.ax.add_patch(self.Rectangle(
+                (o.x - o.hx, o.y - o.hy), 2 * o.hx, 2 * o.hy,
+                fc="#e17055", ec="#d63031", alpha=0.95, lw=1.4, zorder=3))
+        if not self.use_platform:                         # pallets: encuadrar a la ruta
+            pad = 1.0
+            self.ax.set_xlim(wp[:, 0].min() - pad, wp[:, 0].max() + pad)
+            self.ax.set_ylim(wp[:, 1].min() - pad, wp[:, 1].max() + pad)
 
     def start_episode(self, ep: int):
         self._rx, self._ry = [], []
@@ -232,9 +283,12 @@ def main():
     live = None
     if args.plot:
         os.makedirs(args.plot_dir, exist_ok=True)
-        with open(NAV_JSON, "r") as f:
-            _map_data = json.load(f)
-        live = LiveTrajectoryPlot(_map_data, env.waypoints, env.goal_xy)
+        # Fondo del mapa viejo (pallets) solo si el env NO usa la plataforma nueva.
+        map_data = None
+        if not env.use_platform:
+            with open(NAV_JSON, "r") as f:
+                map_data = json.load(f)
+        live = LiveTrajectoryPlot(env, map_data=map_data)
 
     global_terms = defaultdict(float)   # acumulado de todos los episodios
     global_steps = 0
@@ -244,6 +298,9 @@ def main():
             ep_reward, steps, done, info = 0.0, 0, False, {}
             ep_terms = defaultdict(float)
             if live:
+                # La ruta/meta/obstaculo cambian cada reset (goal random en modo
+                # plataforma) -> redibujar la escena antes de trazar el episodio.
+                live.set_scene(env.waypoints, env.goal_xy, env.virtual_obstacle)
                 live.start_episode(ep + 1)
             while not done:
                 action = pick_action(policy, obs, device, args.stochastic)

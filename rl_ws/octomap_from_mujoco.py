@@ -42,7 +42,7 @@ from scipy.ndimage import binary_dilation
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_HERE, ".."))
-_DEFAULT_XML = os.path.join(_PROJECT_ROOT, "models", "aesir_complete.xml")
+_DEFAULT_XML = os.path.join(_PROJECT_ROOT, "models", "plataform.xml")
 _DEFAULT_RAW_OUT = os.path.join(_HERE, "occupied_map.bt")
 _DEFAULT_INFLATED_OUT = os.path.join(_HERE, "inflated_map.bt")
 

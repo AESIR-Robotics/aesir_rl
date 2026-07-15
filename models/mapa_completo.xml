@@ -2,7 +2,8 @@
 
   <compiler angle="radian" autolimits="true" meshdir=""/>
 
-  <include file="aesir_pallets.xml"/>
-  <include file="aesir_puerta.xml"/>
+  <!--include file="aesir_pallets.xml"/-->
+  <!--include file="aesir_puerta.xml"/-->
+  <include file="plataform.xml"/>
 
 </mujoco>

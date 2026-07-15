@@ -23,6 +23,9 @@ try:
         CORNER_DOT_THRESHOLD, MAX_WAYPOINT_DIST,
         REACH_DIST, MAX_GUIDE_DIST, N_LOOKAHEAD, LOOKAHEAD_STEP,
         ATT_GAIN, ATT_RANGE, REP_GAIN, REP_RANGE, ROBOT_HALF, SWIRL, MIN_PROGRESS,
+        PLATFORM_HALF_EXTENT, VIRTUAL_OBSTACLE_HALF_SIZE,
+        VIRTUAL_OBSTACLE_MIN_HALF_SIZE, VIRTUAL_OBSTACLE_CLEARANCE,
+        VIRTUAL_OBSTACLE_MAX_SKIP, VIRTUAL_OBSTACLE_OFFSET_FRAC,
     )
 except ImportError:
     from base_training.config import (
@@ -30,6 +33,9 @@ except ImportError:
         CORNER_DOT_THRESHOLD, MAX_WAYPOINT_DIST,
         REACH_DIST, MAX_GUIDE_DIST, N_LOOKAHEAD, LOOKAHEAD_STEP,
         ATT_GAIN, ATT_RANGE, REP_GAIN, REP_RANGE, ROBOT_HALF, SWIRL, MIN_PROGRESS,
+        PLATFORM_HALF_EXTENT, VIRTUAL_OBSTACLE_HALF_SIZE,
+        VIRTUAL_OBSTACLE_MIN_HALF_SIZE, VIRTUAL_OBSTACLE_CLEARANCE,
+        VIRTUAL_OBSTACLE_MAX_SKIP, VIRTUAL_OBSTACLE_OFFSET_FRAC,
     )
 
 def box_corners_2d(center_xy: np.ndarray, half_sizes: np.ndarray, rot_mat: np.ndarray) -> np.ndarray:
@@ -66,6 +72,15 @@ def _aabb_dist(b1: tuple, b2: tuple) -> float:
     dx = max(0., max(b1[0], b2[0]) - min(b1[2], b2[2]))
     dy = max(0., max(b1[1], b2[1]) - min(b1[3], b2[3]))
     return np.sqrt(dx*dx + dy*dy)
+
+def _nearest_point_on_box(p: np.ndarray, bounds: tuple) -> np.ndarray:
+    """Punto mas cercano del AABB `bounds` a `p` (clamp por eje). Si p esta
+    AFUERA es el punto real de la superficie -- funciona bien tambien en las
+    esquinas, a diferencia de usar el centro de la caja como origen de la
+    repulsion (ver _repulsion_vec). Si p esta ADENTRO coincide con p mismo
+    (caso degenerado, lo resuelve el fallback en vortex_apf)."""
+    x0, y0, x1, y1 = bounds
+    return np.array([min(max(p[0], x0), x1), min(max(p[1], y0), y1)])
 
 def _repulsion_vec(robot: np.ndarray, source_xy: np.ndarray, gap: float,
                    rep_gain: float, rep_range: float, swirl: float) -> np.ndarray:
@@ -141,13 +156,23 @@ def vortex_apf(robot_xy: np.ndarray, target_xy: np.ndarray, obstacles: list[Obst
     att = (to_t / dt) * att_gain * min(dt / att_range, 1.0) if dt > 1e-9 else np.zeros(2)
 
     # ── Repulsion de obstaculos-caja (sticks + puerta): gap = hueco entre la
-    #    caja del robot (media anchura rh) y la caja del obstaculo.
+    #    caja del robot (media anchura rh) y la caja del obstaculo. La
+    #    DIRECCION se toma desde el punto mas cercano del BORDE del obstaculo
+    #    (no desde su centro): usar el centro sesga la direccion hacia el
+    #    centro de la caja cuando el robot se acerca a un lado plano lejos de
+    #    una esquina (empuja tambien "hacia el costado equivocado" ademas de
+    #    alejar), lo que puede desviarlo justo hacia una esquina en vez de
+    #    alejarlo limpiamente del lado que esta cruzando.
     rep = np.zeros(2)
     rb = (rx - rh, ry - rh, rx + rh, ry + rh)
     for o in obstacles:
-        gap = _aabb_dist(rb, o.bounds())
-        rep += _repulsion_vec(robot, np.array([o.x, o.y]), gap,
-                              rep_gain, rep_range, swirl)
+        bounds = o.bounds()
+        gap = _aabb_dist(rb, bounds)
+        nearest = _nearest_point_on_box(robot, bounds)
+        # robot con el centro DENTRO de la caja (nearest == robot, direccion
+        # degenerada) -- fallback al centro de la caja para tener con que salir.
+        source = nearest if np.hypot(*(robot - nearest)) > 1e-9 else np.array([o.x, o.y])
+        rep += _repulsion_vec(robot, source, gap, rep_gain, rep_range, swirl)
 
     # ── Repulsion de los bordes de los pallets (mantener dentro).
     if edges is not None:
@@ -174,15 +199,116 @@ def _rel_obs(rel_xy: np.ndarray, robot_yaw: float) -> np.ndarray:
     return np.array([min(d / MAX_GUIDE_DIST, 1.), np.sin(ang), np.cos(ang)], dtype=np.float32)
 
 
-def _plan_segment(json_path: str, start_xy: tuple, goal_xy: tuple) -> list[tuple]:
+def build_platform_zone(half_extent: float = PLATFORM_HALF_EXTENT,
+                        robot_radius: float = ROBOT_RADIUS) -> ShapelyPolygon:
+    he = float(half_extent)
+    square = ShapelyPolygon([(-he, -he), (he, -he), (he, he), (-he, he)])
+    return square.buffer(-robot_radius)
+
+
+def plan_platform_route(start_xy: tuple, goal_xy: tuple,
+                        max_wp_dist: float = MAX_WAYPOINT_DIST) -> list[tuple]:
+    p_start = np.array(start_xy, dtype=float)
+    p_end = np.array(goal_xy, dtype=float)
+    segment_vector = p_end - p_start
+    segment_dist = float(np.linalg.norm(segment_vector))
+
+    waypoints = [tuple(p_start)]
+    if segment_dist > max_wp_dist:
+        num_segments = int(np.ceil(segment_dist / max_wp_dist))
+        for j in range(1, num_segments):
+            alpha = j / num_segments
+            waypoints.append(tuple(p_start + alpha * segment_vector))
+    waypoints.append(tuple(p_end))
+    return waypoints
+
+
+def plan_platform_route_with_obstacle(
+        start_xy: tuple, goal_xy: tuple,
+        max_wp_dist: float = MAX_WAYPOINT_DIST,
+        max_half_size: float = VIRTUAL_OBSTACLE_HALF_SIZE,
+        min_half_size: float = VIRTUAL_OBSTACLE_MIN_HALF_SIZE,
+        clearance: float = VIRTUAL_OBSTACLE_CLEARANCE,
+        max_skip: int = VIRTUAL_OBSTACLE_MAX_SKIP,
+        offset_frac_range: tuple = VIRTUAL_OBSTACLE_OFFSET_FRAC):
+    """Genera la ruta directa Y el obstaculo virtual EN UN SOLO PASO -- al
+    reves del enfoque anterior (ruta fija a max_wp_dist + obstaculo insertado
+    a presion con rejection-sampling), que podia fallar o quedar mal si el
+    obstaculo no cabia limpio entre dos waypoints ya fijados.
+
+    Aqui se elige PRIMERO donde va el obstaculo (un waypoint interior random
+    de la grilla base) y se agranda el hueco a su alrededor saltando 1..N
+    vecinos hasta que sobre suficiente espacio -- despues el TAMANIO del
+    obstaculo se deriva de esa distancia real entre los dos waypoints que
+    terminan bordeando el hueco (mas separados -> puede ser mas grande, hasta
+    max_half_size; nunca mas chico que min_half_size con clearance a los
+    waypoints, o se descarta). Por construccion ningun waypoint puede caer
+    encerrado en la caja -- ver el bug de orbita infinita del vortex descrito
+    antes, que este diseño evita de raiz en vez de rechazar a posteriori.
+
+    Devuelve (waypoints, obstacle_or_None) -- None si la ruta es demasiado
+    corta para abrir un hueco con margen seguro en ningun intento."""
+    start = np.array(start_xy, dtype=float)
+    goal = np.array(goal_xy, dtype=float)
+    delta = goal - start
+    total = float(np.hypot(*delta))
+    if total < 1e-6:
+        return [tuple(start), tuple(goal)], None
+    direction = delta / total
+
+    n = max(1, int(np.ceil(total / max_wp_dist)))
+    base_s = [k * total / n for k in range(n + 1)]   # incluye 0 y total
+    base_waypoints = [tuple(start + direction * s) for s in base_s]
+
+    if len(base_s) < 4:
+        # ruta corta, sin waypoints intermedios de sobra para abrir un hueco
+        # sin comerse el spawn o la meta.
+        return base_waypoints, None
+
+    # Candidatos: indice interior i (nunca el primero/ultimo) en orden random;
+    # por cada uno se prueba con el menor "skip" primero (hueco mas chico) y
+    # solo se agranda si no alcanza el margen -- ajusta el tamano al hueco
+    # natural en vez de forzar uno fijo.
+    order = list(range(1, len(base_s) - 1))
+    np.random.shuffle(order)
+
+    for i in order:
+        for skip in range(1, max_skip + 1):
+            lo, hi = i - skip, i + skip
+            if lo < 0 or hi >= len(base_s):
+                continue
+            s_before, s_after = base_s[lo], base_s[hi]
+            seg_len = s_after - s_before
+            max_half = (seg_len - 2 * clearance) / 2.0
+            if max_half < min_half_size:
+                continue   # hueco muy chico incluso agrandado -- prueba otro punto
+            half_size = float(min(max_half, max_half_size))
+
+            waypoints = [tuple(start + direction * s) for s in base_s[:lo + 1] + base_s[hi:]]
+
+            p_before = start + direction * s_before
+            p_after = start + direction * s_after
+            center_line = (p_before + p_after) / 2.0
+            perp = np.array([-direction[1], direction[0]])
+            side = 1.0 if np.random.rand() < 0.5 else -1.0
+            offset = side * half_size * float(np.random.uniform(*offset_frac_range))
+            center = center_line + perp * offset
+
+            obstacle = Obstacle2D("virtual_obstacle", float(center[0]), float(center[1]),
+                                  half_size, half_size)
+            return waypoints, obstacle
+
+    return base_waypoints, None
+
+
+def build_safe_zone(json_path: str):
     with open(json_path, "r") as f:
         data = json.load(f)
-        
     pallets_poly = []
     for p in data["pallets"]:
         corners = box_corners_2d(np.array(p["center_xy"]), np.array(p["size"]), np.array(p["rot_mat"]))
         pallets_poly.append(ShapelyPolygon(corners))
-        
+
     merged_pallets = unary_union(pallets_poly)
     dilated = merged_pallets.buffer(GAP_BRIDGE_DISTANCE)
     closed = dilated.buffer(-GAP_BRIDGE_DISTANCE)
@@ -201,6 +327,9 @@ def _plan_segment(json_path: str, start_xy: tuple, goal_xy: tuple) -> list[tuple
         blockers_inflated = unary_union(blocker_polys).buffer(ROBOT_RADIUS)
         safe_zone_union = safe_zone_union.difference(blockers_inflated)
 
+    return safe_zone_union, data
+
+def _astar_route(safe_zone_union, data: dict, start_xy: tuple, goal_xy: tuple) -> list[tuple]:
     all_pts = [np.array(p["center_xy"]) for p in data["pallets"]] + [np.array(start_xy), np.array(goal_xy)]
     xs = [pt[0] for pt in all_pts]
     ys = [pt[1] for pt in all_pts]
@@ -288,33 +417,45 @@ def _plan_segment(json_path: str, start_xy: tuple, goal_xy: tuple) -> list[tuple
                 
     return [start_xy, goal_xy]
 
-def plan_route(json_path: str, start_xy: tuple, goal_xy: tuple) -> list[tuple]:
-    return _plan_segment(json_path, start_xy, goal_xy)
+def plan_route(json_path: str, start_xy: tuple, goal_xy: tuple, safe_zone=None) -> list[tuple]:
+    if safe_zone is None:
+        safe_zone = build_safe_zone(json_path)
+    safe_zone_union, data = safe_zone
+    return _astar_route(safe_zone_union, data, start_xy, goal_xy)
 
 class GlobalNavigator:
-    def __init__(self, json_path: str, waypoints: list,
+    def __init__(self, json_path, waypoints: list,
                  att_gain: float = ATT_GAIN, att_range: float = ATT_RANGE,
                  rep_gain: float = REP_GAIN, rep_range: float = REP_RANGE,
                  rh: float = ROBOT_HALF, swirl: float = SWIRL,
                  min_progress: float = MIN_PROGRESS,
                  pallet_edges: bool = True,
                  n_lookahead: int = N_LOOKAHEAD,
-                 lookahead_step: float = LOOKAHEAD_STEP):
-        with open(json_path, "r") as f:
-            data = json.load(f)
+                 lookahead_step: float = LOOKAHEAD_STEP,
+                 obstacles: list = None,
+                 edges_zone=None):
+        """json_path=None -> modo plataforma plana (sin pallets/sticks fisicos)"""
         self._wps = [np.array(w) for w in waypoints]
 
-        self._vo = [Obstacle2D.from_entry(o) for o in data["obstacles"] if o["name"] != "col_manija"]
-        self._vo += [Obstacle2D.from_entry(s) for s in data["sticks"]]
+        if json_path is None:
+            self._vo = list(obstacles) if obstacles is not None else []
+            self._edges = edges_zone
+        else:
+            with open(json_path, "r") as f:
+                data = json.load(f)
+            self._vo = [Obstacle2D.from_entry(o) for o in data["obstacles"] if o["name"] != "col_manija"]
+            self._vo += [Obstacle2D.from_entry(s) for s in data["sticks"]]
+            if obstacles is not None:
+                self._vo += list(obstacles)
 
-        self._edges = None
-        if pallet_edges:
-            polys = [ShapelyPolygon(box_corners_2d(np.array(p["center_xy"]),
-                                                   np.array(p["size"]),
-                                                   np.array(p["rot_mat"])))
-                     for p in data["pallets"]]
-            merged = unary_union(polys)
-            self._edges = merged.buffer(GAP_BRIDGE_DISTANCE).buffer(-GAP_BRIDGE_DISTANCE)
+            self._edges = edges_zone
+            if pallet_edges and self._edges is None:
+                polys = [ShapelyPolygon(box_corners_2d(np.array(p["center_xy"]),
+                                                       np.array(p["size"]),
+                                                       np.array(p["rot_mat"])))
+                         for p in data["pallets"]]
+                merged = unary_union(polys)
+                self._edges = merged.buffer(GAP_BRIDGE_DISTANCE).buffer(-GAP_BRIDGE_DISTANCE)
 
         self._att_gain, self._att_range = att_gain, att_range
         self._rep_gain, self._rep_range = rep_gain, rep_range
@@ -327,6 +468,12 @@ class GlobalNavigator:
     def reset(self, robot_xy: np.ndarray):
         self._wi = 0
 
+    def replan(self, waypoints: list, obstacles: list = None):
+        self._wps = [np.array(w) for w in waypoints]
+        self._wi = 0
+        if obstacles is not None:
+            self._vo = list(obstacles)
+
     def _vortex_at(self, pos: np.ndarray, target: np.ndarray) -> np.ndarray:
         return vortex_apf(pos, target, self._vo, edges=self._edges,
                           att_gain=self._att_gain, att_range=self._att_range,
@@ -335,13 +482,6 @@ class GlobalNavigator:
                           min_progress=self._min_progress)
 
     def _lookahead(self, robot_xy: np.ndarray, robot_yaw: float) -> np.ndarray:
-        """Previsualizacion de la trayectoria: muestrea la ruta A* que viene
-        (robot -> waypoints restantes) a espaciado fijo de arco (lookahead_step),
-        n_lookahead puntos. La ruta ya rodea sticks y se queda en los pallets, y
-        el vortex solo la rastrea localmente; asi la politica ve la FORMA del
-        camino (curvas, giros) para anticiparse. Monotona hacia adelante y barata
-        (sin evaluar el vortex). Devuelve 3*n_lookahead: (dist_norm, sin, cos)
-        de cada punto relativo al robot. Si la ruta se acaba, satura en la meta."""
         if self._n_look <= 0:
             return np.zeros(0, dtype=np.float32), np.zeros((0, 2), dtype=float)
         origin = np.array([float(robot_xy[0]), float(robot_xy[1])])
