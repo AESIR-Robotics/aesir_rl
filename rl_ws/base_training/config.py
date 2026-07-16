@@ -195,9 +195,9 @@ LOG_STD_MAX   = 1.0
 MAX_GRAD_NORM = 0.5      # clip de norma de gradiente en el update
 
 # ── Hiperparametros PPO / entrenamiento ──────────────────────────────────────
-N_ENVS        = 6        # envs MuJoCo en paralelo (threads)
+N_ENVS        = 14       # envs MuJoCo en paralelo (threads)
 STEPS_PER_ENV = 512      # pasos por env por rollout -> batch de T*N
-ITERS         = 5000     # iteraciones de entrenamiento
+ITERS         = 10000     # iteraciones de entrenamiento
 PPO_EPOCHS    = 10       # pasadas sobre el batch por update
 BATCH_SIZE    = 1024     # tamaño de minibatch
 GAMMA         = 0.99     # descuento

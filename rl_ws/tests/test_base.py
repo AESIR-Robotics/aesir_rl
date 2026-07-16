@@ -304,6 +304,9 @@ def main():
                 live.start_episode(ep + 1)
             while not done:
                 action = pick_action(policy, obs, device, args.stochastic)
+
+                if len(action) > 2:
+                    action[2:] = 0.0
                 obs, rew, done, info = env.step(action)
                 ep_reward += rew
                 steps += 1

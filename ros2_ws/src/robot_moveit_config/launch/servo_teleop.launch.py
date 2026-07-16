@@ -17,7 +17,7 @@ def generate_launch_description():
     
     servo_node = Node(
         package="moveit_servo",
-        executable="servo_node_main",
+        executable="servo_node",
         name="servo_node",
         output="screen",
         parameters=[
