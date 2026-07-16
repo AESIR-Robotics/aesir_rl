@@ -20,6 +20,7 @@ Uso tipico (desde train_fast.py):
 """
 from __future__ import annotations
 
+import copy
 import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional, Tuple
@@ -59,8 +60,11 @@ class BaseMujocoEnv:
                  max_steps: int = C.EPISODE_MAX_STEPS,
                  map_ctx: Optional[MapContext] = None,
                  platform_zone=None):
-        # Un modelo por env (mismo XML). Se puede compartir el MjModel (read-only)
-        # entre envs; cada uno tiene su MjData.
+        # Un modelo por env (mismo XML). VecMujocoEnv le pasa una COPIA propia
+        # de MjModel a cada uno (ver VecMujocoEnv.__init__) porque el
+        # obstaculo virtual fisico reescribe geom_pos/geom_size por env en
+        # cada reset() -- si el MjModel viniera compartido por referencia,
+        # los envs se pisarian el mismo geom entre threads.
         self.model = model if model is not None else mujoco.MjModel.from_xml_path(C.XML_PATH)
         self.data  = mujoco.MjData(self.model)
         self.decim = control_decimation
@@ -101,6 +105,10 @@ class BaseMujocoEnv:
         root = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "footprint_link")
         self._robot_gids = {g for g in range(m.ngeom)
                             if int(m.body_rootid[m.geom_bodyid[g]]) == root}
+
+        # Geom del obstaculo virtual FISICO (plataform.xml) 
+        self._obstacle_gid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "virtual_obstacle")
+        self._obstacle_gids = {self._obstacle_gid} if self._obstacle_gid >= 0 else set()
 
         # Mision (goal_xy inicial solo para la primera construccion -- el
         # primer reset() ya sortea uno random y replanifica).
@@ -144,6 +152,7 @@ class BaseMujocoEnv:
             twist=np.array([lin_body[0], lin_body[1], ang_body[2]], dtype=np.float32),
             flip_qpos=flip_qpos, flip_qvel=flip_qvel,
             floor_contact=self._count_floor_contacts(),
+            obstacle_contact=self._count_obstacle_contacts(),
         )
 
     def _count_floor_contacts(self) -> int:
@@ -153,6 +162,21 @@ class BaseMujocoEnv:
             g1, g2 = int(c.geom1), int(c.geom2)
             if ((g1 in self._floor_gids and g2 in self._robot_gids) or
                     (g2 in self._floor_gids and g1 in self._robot_gids)):
+                n += 1
+        return n
+
+    def _count_obstacle_contacts(self) -> int:
+        """Contactos robot<->caja fisica del obstaculo virtual (no letal, a
+        diferencia de _count_floor_contacts: solo alimenta la penalizacion de
+        colision en compute_reward, no termina el episodio)."""
+        if not self._obstacle_gids:
+            return 0
+        n = 0
+        for i in range(self.data.ncon):
+            c = self.data.contact[i]
+            g1, g2 = int(c.geom1), int(c.geom2)
+            if ((g1 in self._obstacle_gids and g2 in self._robot_gids) or
+                    (g2 in self._obstacle_gids and g1 in self._robot_gids)):
                 n += 1
         return n
 
@@ -195,6 +219,16 @@ class BaseMujocoEnv:
         else:
             waypoints, vobs = plan_platform_route(tuple(fb["xy"]), tuple(goal_xy)), None
         self.nav.replan(waypoints, obstacles=[vobs] if vobs is not None else [])
+
+        if self._obstacle_gid >= 0:
+            if vobs is not None:
+                self.model.geom_pos[self._obstacle_gid] = [
+                    vobs.x, vobs.y, C.PLATFORM_SURFACE_Z + C.VIRTUAL_OBSTACLE_HEIGHT_HALF]
+                self.model.geom_size[self._obstacle_gid] = [
+                    vobs.hx, vobs.hy, C.VIRTUAL_OBSTACLE_HEIGHT_HALF]
+            else:
+                self.model.geom_pos[self._obstacle_gid, 2] = -5.0   # fuera de juego
+            mujoco.mj_forward(self.model, self.data)
 
         self.nav.reset(fb["xy"])
         guidance = self.nav.step(fb["xy"], fb["yaw"])
@@ -315,8 +349,10 @@ class VecMujocoEnv:
                   f"±{C.SPAWN_XY_RANGE:.0f}m / ±{C.GOAL_XY_RANGE:.0f}m")
 
         # Contexto de mapa (heatmap por altura real) -- UNA sola vez, compartido
-        # y de solo lectura entre todos los envs (igual patron que shared_model
-        # abajo). Se activa si config.py tiene USE_HEATMAP=True. build_obs ya
+        # y de solo lectura entre todos los envs (a diferencia del MjModel de
+        # abajo, este SI sigue siendo un unico objeto compartido: el heatmap
+        # estatico no se reescribe por env). Se activa si config.py tiene
+        # USE_HEATMAP=True. build_obs ya
         # se encarga de aplanarlo dentro del mismo vector de obs -- por eso
         # este vec-env NO necesita saber nada especial sobre el heatmap, sigue
         # tratando obs como un array (N, obs_dim) normal.
@@ -329,13 +365,13 @@ class VecMujocoEnv:
                 patch_pixels=C.HEATMAP_PIXELS,
             )
 
-        # Un MjModel compartido (read-only) entre envs; cada env su MjData.
-        shared_model = mujoco.MjModel.from_xml_path(C.XML_PATH)
-        self.envs = [BaseMujocoEnv(waypoints, model=shared_model,
+        base_model = mujoco.MjModel.from_xml_path(C.XML_PATH)
+        models = [base_model] + [copy.deepcopy(base_model) for _ in range(n_envs - 1)]
+        self.envs = [BaseMujocoEnv(waypoints, model=models[i],
                                    goal_xy=goal, control_decimation=control_decimation,
                                    max_steps=max_steps, map_ctx=self.map_ctx,
                                    platform_zone=platform_zone)
-                    for _ in range(n_envs)]
+                    for i in range(n_envs)]
         self._pool = ThreadPoolExecutor(max_workers=n_envs)
         self._ep_return = np.zeros(n_envs, dtype=np.float64)
         self._ep_history: List[float] = []

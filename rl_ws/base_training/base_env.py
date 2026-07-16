@@ -21,6 +21,9 @@ El dict `fb` que ambos backends deben producir:
     flip_qpos     np.array(4)             angulos de flipper (rad, ROS)
     flip_qvel     np.array(4)             velocidades de flipper
     floor_contact int                     nº de contactos robot<->piso
+    obstacle_contact int (opcional)       nº de contactos robot<->obstaculo virtual
+                                          fisico (solo mujoco_sim_base.py; se lee con
+                                          fb.get(..., 0), base_ros_env.py no lo produce)
 """
 from __future__ import annotations
 
@@ -38,7 +41,7 @@ from .config import (
     STUCK_MAX, ENERGY_W, FLIPPER_JERK_W, TILT_W, FLIPPER_COLLISION_W,
     ACCEL_W, ACCEL_DEADZONE, GUIDE_SPEED_SCALE, BACKWARD_W,
     FLIPPER_MOUNTS, FLIPPER_AXIS_SIGN, FLIPPER_L, FLIPPER_COLLISION_DIST,
-    N_LOOKAHEAD, OBS_DIM, ACT_DIM,
+    N_LOOKAHEAD, OBS_DIM, ACT_DIM, OBSTACLE_PENALTY,
 )
 
 
@@ -122,7 +125,8 @@ def flipper_collision_penalty(flip_qpos: np.ndarray) -> float:
 
 # ── Reward ───────────────────────────────────────────────────────────────────
 def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState) -> float:
-    """Caida/piso letal -> castigos (stuck, energia, jerk flippers, inclinacion,
+    """Caida/piso letal o choque con el obstaculo (retorno temprano, termina el
+    episodio) -> castigos (stuck, energia, jerk flippers, inclinacion,
     auto-colision flippers) -> bonus al cruzar waypoint (retorno temprano) ->
     progreso (delta_dist * boost exponencial de proximidad) + seguir
     velocidad/direccion de la guia del vortex (solo si avanza)."""
@@ -134,6 +138,9 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     # 1. Caida letal (chasis muy bajo) o tocar piso (salirse de los pallets)
     if fb["z"] < 0.10 or fb.get("floor_contact", 0) > 0:
         return -FALL_PENALTY
+
+    if fb.get("obstacle_contact", 0) > 0:
+        return -OBSTACLE_PENALTY
 
     # 2. Inactividad
     move_dist = float(np.linalg.norm(xy - rs.last_xy))
@@ -212,6 +219,8 @@ def terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int,
         return True, False, "caida (demasiado bajo)"
     if fb.get("floor_contact", 0) > 0:
         return True, False, "toco el piso"
+    if fb.get("obstacle_contact", 0) > 0:
+        return True, False, "choco con el obstaculo"
     if float(np.linalg.norm(fb["xy"] - goal_xy)) < FINISH_DIST:
         return True, True, "META alcanzada"
     return False, False, None

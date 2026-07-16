@@ -69,3 +69,4 @@ checkpoints/
 *.db3
 *.mcap
 core
+MUJOCO_LOG.TXT

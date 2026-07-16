@@ -83,12 +83,16 @@ VIRTUAL_OBSTACLE_CLEARANCE     = 0.30
 VIRTUAL_OBSTACLE_MAX_SKIP      = 3      # cuantos waypoints vecinos se pueden saltar agrandando el hueco
 VIRTUAL_OBSTACLE_OFFSET_FRAC   = (0.2, 0.6)   # offset lateral, como fraccion del half_size del obstaculo
 
+VIRTUAL_OBSTACLE_HEIGHT_HALF = 0.3     
+PLATFORM_SURFACE_Z            = 0.12    
+
 # ── Pesos de reward ──────────────────────────────────────────────────────────
 W_DIRECTION    = 0.6     # encarar al objetivo (cos Δθ)
 W_VELOCITY     = 0.6     # igualar la velocidad forward objetivo
 WP_BONUS       = 200.0   # bonus al cruzar un waypoint
 TIME_PENALTY   = 0.1
 FALL_PENALTY   = 250.0
+OBSTACLE_PENALTY = 50.0
 STUCK_MAX      = 1.0
 ENERGY_W       = 1e-8
 FLIPPER_JERK_W = 1.0
