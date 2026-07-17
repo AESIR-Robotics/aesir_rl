@@ -91,6 +91,7 @@ _TERM_LABELS = [
     ("flipper_collision", "Castigo auto-colision flippers"),
     ("accel",             "Castigo aceleraciones fuertes"),
     ("fall",              "Castigo por caida/piso (terminal)"),
+    ("obstacle",          "Castigo por choque obstaculo (terminal)"),
 ]
 
 
@@ -234,14 +235,11 @@ class LiveTrajectoryPlot:
         if self._n % self.every == 0:
             self.fig.canvas.draw_idle(); self.fig.canvas.flush_events()
 
-    def end_episode(self, ep: int, reached: bool, out_path=None):
+    def end_episode(self, ep: int, reached: bool):
         tag = "META ALCANZADA" if reached else "fin"
         self.ax.set_title(f"Ep {ep}: {tag}  ({len(self._rx)} pasos)",
                           color="#ffffff", fontweight="bold")
         self.fig.canvas.draw_idle(); self.plt.pause(0.001)
-        if out_path:
-            self.fig.savefig(out_path, dpi=140, facecolor=self.fig.get_facecolor())
-            print(f"    trayectoria guardada -> {out_path}")
 
     def close(self):
         self.plt.ioff(); self.plt.close(self.fig)
@@ -254,9 +252,7 @@ def main():
     ap.add_argument("--stochastic", action="store_true",
                     help="muestrea de la distribucion (default: deterministico = media)")
     ap.add_argument("--plot", action=argparse.BooleanOptionalAction, default=True,
-                    help="grafica la trayectoria de cada episodio (--no-plot para desactivar)")
-    ap.add_argument("--plot-dir", default=os.path.join(_HERE, "trajectories"),
-                    help="carpeta donde guardar los PNG de trayectoria")
+                    help="grafica la trayectoria de cada episodio EN VIVO (--no-plot para desactivar)")
     args = ap.parse_args()
 
     # Resuelve el checkpoint sin importar el CWD: prueba tal cual, luego relativo
@@ -282,7 +278,6 @@ def main():
 
     live = None
     if args.plot:
-        os.makedirs(args.plot_dir, exist_ok=True)
         # Fondo del mapa viejo (pallets) solo si el env NO usa la plataforma nueva.
         map_data = None
         if not env.use_platform:
@@ -321,8 +316,7 @@ def main():
                   f"steps={steps}  wp={info.get('wp')}  dist_goal={info.get('dist_goal', 0.0):.2f}")
             print_reward_breakdown(f"Ep {ep + 1}", ep_terms, steps)
             if live:
-                out = os.path.join(args.plot_dir, f"traj_ep{ep + 1:02d}.png")
-                live.end_episode(ep + 1, info.get("reached", False), out)
+                live.end_episode(ep + 1, info.get("reached", False))
     except KeyboardInterrupt:
         print("\nDetenido por el usuario.")
     finally:

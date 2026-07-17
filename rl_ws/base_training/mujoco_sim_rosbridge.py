@@ -42,7 +42,7 @@ from sensor_msgs.msg import JointState
 from geometry_msgs.msg import Twist, PoseStamped
 from hardware.msg import JointControl
 from std_srvs.srv import Trigger
-from std_msgs.msg import Int32
+from std_msgs.msg import Int32, Float32MultiArray
 
 # Raiz del proyecto (aesir_rl) al path para resolver `rl_ws.*` corriendo directo.
 # (base_training/ -> rl_ws/ -> aesir_rl/)
@@ -154,14 +154,30 @@ class MujocoHardwareBridge(Node):
             if int(self.model.body_rootid[self.model.geom_bodyid[gid]]) == robot_root
         }
 
+        # Geom del obstaculo virtual FISICO (plataform.xml), lo teletransporta y
+        # redimensiona _obstacle_cb en cada episodio -- MISMO geom que reposiciona
+        # BaseMujocoEnv.reset() en el entrenamiento rapido.
+        self._obstacle_gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "virtual_obstacle")
+        self._obstacle_gids = {self._obstacle_gid} if self._obstacle_gid >= 0 else set()
+
         self.feedback_pub = self.create_publisher(
             JointState, "/hardware_node/joint_states", 10
         )
         self.floor_contact_pub = self.create_publisher(
             Int32, "/hardware_node/floor_contact", 10
         )
+        # Contactos robot<->obstaculo (no letal aparte; el env lo usa para el
+        # castigo/terminacion de colision, igual que en el entrenamiento).
+        self.obstacle_contact_pub = self.create_publisher(
+            Int32, "/hardware_node/obstacle_contact", 10
+        )
         self.command_sub = self.create_subscription(
             JointControl, "/commands_hardware", self._command_cb, 10
+        )
+        # Obstaculo virtual del episodio (lo manda base_ros_env.reset()):
+        # data = [active, cx, cy, hx, hy]. active<=0 -> lo esconde bajo el piso.
+        self.obstacle_sub = self.create_subscription(
+            Float32MultiArray, "/virtual_obstacle", self._obstacle_cb, 10
         )
 
         self.vel_state_pub = self.create_publisher(
@@ -191,6 +207,25 @@ class MujocoHardwareBridge(Node):
         self.get_logger().info(
             f"MuJoCo hardware bridge activo. XML={XML_PATH}  substeps={self._substeps}"
         )
+
+    def _obstacle_cb(self, msg: Float32MultiArray) -> None:
+        """Coloca el obstaculo virtual FISICO donde lo planeo el env este episodio.
+        Espejo de BaseMujocoEnv.reset(): reescribe model.geom_pos/geom_size del
+        geom 'virtual_obstacle'. active<=0 -> lo baja fuera de juego (z=-5)."""
+        if self._obstacle_gid < 0:
+            return
+        d = list(msg.data)
+        if len(d) < 5:
+            return
+        active, cx, cy, hx, hy = d[0], d[1], d[2], d[3], d[4]
+        with self._lock:
+            if active > 0.5:
+                self.model.geom_pos[self._obstacle_gid] = [
+                    cx, cy, C.PLATFORM_SURFACE_Z + C.VIRTUAL_OBSTACLE_HEIGHT_HALF]
+                self.model.geom_size[self._obstacle_gid] = [
+                    hx, hy, C.VIRTUAL_OBSTACLE_HEIGHT_HALF]
+            else:
+                self.model.geom_pos[self._obstacle_gid, 2] = -5.0   # fuera de juego
 
     def _reset_arm_cb(self, request, response) -> Trigger.Response:
         with self._lock:
@@ -340,13 +375,18 @@ class MujocoHardwareBridge(Node):
             self.pose_pub.publish(pose_msg)
 
             n_floor = 0
+            n_obstacle = 0
             for i in range(self.data.ncon):
                 c = self.data.contact[i]
                 g1, g2 = int(c.geom1), int(c.geom2)
                 if ((g1 in self._floor_gids and g2 in self._robot_gids) or
                         (g2 in self._floor_gids and g1 in self._robot_gids)):
                     n_floor += 1
+                elif ((g1 in self._obstacle_gids and g2 in self._robot_gids) or
+                        (g2 in self._obstacle_gids and g1 in self._robot_gids)):
+                    n_obstacle += 1
             self.floor_contact_pub.publish(Int32(data=n_floor))
+            self.obstacle_contact_pub.publish(Int32(data=n_obstacle))
 
         if self.viewer.is_running():
             self.viewer.sync()

@@ -1,0 +1,39 @@
+{
+  "_comment": "Mapa de navegacion de la PLATAFORMA GIGANTE (models/map_plaform.xml, incluido por mapa_completo.xml). Un solo 'pallet' de 40x40 m = toda la zona transitable, sin obstaculos ni sticks: el mapa fisico tampoco los tiene (aesir_pallets/aesir_puerta estan comentados en mapa_completo.xml). Para volver a la pista de pallets: config.NAV_JSON -> obstacles.json.",
+  "obstacles": [],
+  "sticks": [],
+  "pallets": [
+    {
+      "name": "plataforma_gigante",
+      "gtype": "box",
+      "center_xy": [
+        0.0,
+        0.0
+      ],
+      "center_z": 0.06,
+      "size": [
+        20.0,
+        20.0,
+        0.06
+      ],
+      "rot_mat": [
+        [
+          1.0,
+          0.0,
+          0.0
+        ],
+        [
+          0.0,
+          1.0,
+          0.0
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    }
+  ],
+  "waypoints": []
+}

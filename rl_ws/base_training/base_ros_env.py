@@ -45,7 +45,7 @@ from geometry_msgs.msg import Twist, PoseStamped
 from sensor_msgs.msg import JointState
 from hardware.msg import JointControl
 from std_srvs.srv import Trigger
-from std_msgs.msg import Int32
+from std_msgs.msg import Int32, Float32MultiArray
 
 from rl_ws.global_navigator import (
     plan_route, GlobalNavigator, quat_to_yaw, quat_upright,
@@ -68,7 +68,7 @@ from rl_ws.base_training.config import (
     N_LOOKAHEAD, LOOKAHEAD_STEP, OBS_DIM, ACT_DIM,
     FLIPPER_JOINTS, CONTROL_HZ, SIM_SPEEDUP,
     USE_HEATMAP, OCTOMAP_BT_PATH, OCTOMAP_RESOLUTION, HEATMAP_RADIUS_M, HEATMAP_PIXELS,
-    USE_VIRTUAL_OBSTACLE, GOAL_XY_RANGE,
+    USE_VIRTUAL_OBSTACLE, GOAL_XY_RANGE, OBSTACLE_PENALTY,
 )
 
 
@@ -96,13 +96,17 @@ class _BridgeInterface(Node):
         self._flip_qpos = np.zeros(4, dtype=np.float32)
         self._flip_qvel = np.zeros(4, dtype=np.float32)
         self._floor_contact = 0                          # nº de contactos robot<->piso
+        self._obstacle_contact = 0                       # nº de contactos robot<->obstaculo
 
         self.cmd_vel_pub = self.create_publisher(Twist, "hardware_node/cmd_vel", 10)
         self.joint_pub   = self.create_publisher(JointControl, "/commands_hardware", 10)
+        # Manda el obstaculo virtual del episodio al bridge (lo hace fisico/visible).
+        self.obstacle_pub = self.create_publisher(Float32MultiArray, "/virtual_obstacle", 10)
         self.create_subscription(PoseStamped, "hardware_node/pose", self._pose_cb, 10)
         self.create_subscription(Twist, "hardware_node/state_vel", self._vel_cb, 10)
         self.create_subscription(JointState, "/hardware_node/joint_states", self._js_cb, 10)
         self.create_subscription(Int32, "/hardware_node/floor_contact", self._floor_cb, 10)
+        self.create_subscription(Int32, "/hardware_node/obstacle_contact", self._obstacle_cb, 10)
 
         self.reset_cli = self.create_client(Trigger, "/mujoco_ros_bridge/reset_sim")
 
@@ -137,6 +141,10 @@ class _BridgeInterface(Node):
         with self._lock:
             self._floor_contact = int(msg.data)
 
+    def _obstacle_cb(self, msg: Int32):
+        with self._lock:
+            self._obstacle_contact = int(msg.data)
+
     # ── Snapshot de feedback ─────────────────────────────────────────────────
     def feedback(self) -> Optional[dict]:
         with self._lock:
@@ -147,7 +155,19 @@ class _BridgeInterface(Node):
                 upright=self._upright, twist=self._twist.copy(),
                 flip_qpos=self._flip_qpos.copy(), flip_qvel=self._flip_qvel.copy(),
                 floor_contact=self._floor_contact,
+                obstacle_contact=self._obstacle_contact,
             )
+
+    # ── Publicar el obstaculo virtual del episodio al bridge ────────────────
+    def publish_obstacle(self, vobs):
+        """vobs = Obstacle2D o None. El bridge coloca/redimensiona el geom fisico
+        (o lo esconde si None). data = [active, cx, cy, hx, hy]."""
+        m = Float32MultiArray()
+        if vobs is not None:
+            m.data = [1.0, float(vobs.x), float(vobs.y), float(vobs.hx), float(vobs.hy)]
+        else:
+            m.data = [0.0, 0.0, 0.0, 0.0, 0.0]
+        self.obstacle_pub.publish(m)
 
     # ── Publicar accion ──────────────────────────────────────────────────────
     def publish_action(self, v_norm: float, w_norm: float, flippers: np.ndarray):
@@ -278,8 +298,8 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     v_fwd = float(fb["twist"][0])
 
     # Desglose FIRMADO del reward (la suma de todos los terminos == reward total).
-    terms = {k: 0.0 for k in ("fall", "stuck", "energy", "flipper_jerk", "tilt",
-                              "flipper_collision", "accel", "wp_bonus", "progress",
+    terms = {k: 0.0 for k in ("fall", "obstacle", "stuck", "energy", "flipper_jerk",
+                              "tilt", "flipper_collision", "accel", "wp_bonus", "progress",
                               "direction", "velocity", "backward", "time")}
 
     # 1. Caida letal (chasis muy bajo) o tocar piso (salirse de los pallets):
@@ -287,6 +307,12 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
         terms["fall"] = -FALL_PENALTY
         rs.last_terms = terms
         return -FALL_PENALTY
+
+    # 1b. Choque con el obstaculo virtual fisico (mismo castigo que train_fast).
+    if fb.get("obstacle_contact", 0) > 0:
+        terms["obstacle"] = -OBSTACLE_PENALTY
+        rs.last_terms = terms
+        return -OBSTACLE_PENALTY
 
     # 2. Inactividad 
     move_dist = float(np.linalg.norm(xy - rs.last_xy))
@@ -383,6 +409,9 @@ def _terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int, max_steps: int) ->
         return True, False
     if fb.get("floor_contact", 0) > 0:
         print("[base_env] 🛑 Episodio terminado: una parte del robot toco el piso")
+        return True, False
+    if fb.get("obstacle_contact", 0) > 0:
+        print("[base_env] 🛑 Episodio terminado: choco con el obstaculo")
         return True, False
     if float(np.linalg.norm(fb["xy"] - goal_xy)) < FINISH_DIST:
         print("[base_env] 🏆 ¡Meta alcanzada!")
@@ -537,6 +566,10 @@ class BaseRosEnv:
             self.nav.replan(
                 self.waypoints,
                 obstacles=[self.virtual_obstacle] if self.virtual_obstacle is not None else [])
+
+        # Manda el obstaculo del episodio al bridge -> aparece FISICO en MuJoCo,
+        # igual que en train_fast (None en modo pallets -> el bridge lo esconde).
+        self._node.publish_obstacle(self.virtual_obstacle)
 
         self.nav.reset(fb["xy"])
         guidance = self.nav.step(fb["xy"], fb["yaw"])
