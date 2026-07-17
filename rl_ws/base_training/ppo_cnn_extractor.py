@@ -34,10 +34,6 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 
-# config.py vive en el mismo paquete que ppo.py (rl_ws.base_training). Este
-# import relativo funciona cuando el archivo esta DENTRO de ese paquete;
-# si corres este archivo suelto (como script, ej. el test de mas abajo),
-# no hay paquete que valga para "." -> caemos a defaults razonables.
 try:
     from . import config as _C
     _HIDDEN = _C.HIDDEN

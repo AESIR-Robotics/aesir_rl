@@ -40,8 +40,6 @@ if _ROOT not in sys.path:
 
 from rl_ws.base_training.base_ros_env import BaseRosEnv
 import rl_ws.base_training.config as C
-# La MISMA red y update de PPO que el pipeline rapido (base_training/ppo.py):
-# los checkpoints son 100% intercambiables entre train_base y train_fast.
 from rl_ws.base_training.ppo import MLPActorCritic, ppo_update
 
 try:

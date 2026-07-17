@@ -32,9 +32,6 @@ for _p in (_ROOT, _HERE):                            # _HERE: para importar plot
         sys.path.insert(0, _p)
 
 from rl_ws.base_training.base_ros_env import BaseRosEnv, NAV_JSON      # noqa: E402
-# CNNActorCritic reemplazo directo de MLPActorCritic (misma interfaz publica,
-# ver ppo_cnn_extractor.py) -- es la red que entrena train_fast.py (heatmap +
-# CNN) y la que produce checkpoints_base/fast_best.pt, el default de abajo.
 import rl_ws.base_training.config as C                                 # noqa: E402
 from rl_ws.base_training.ppo_cnn_extractor import CNNActorCritic       # noqa: E402
 
@@ -74,9 +71,6 @@ def pick_action(policy: CNNActorCritic, obs: np.ndarray, device, stochastic: boo
     mu, _std, _val = policy(obs_t)                       # media = accion deterministica
     return mu.squeeze(0).cpu().numpy()
 
-
-# Orden y etiqueta legible de cada componente del reward (deben coincidir con
-# las claves de info["reward_terms"] que produce base_ros_env._compute_reward).
 _TERM_LABELS = [
     ("progress",          "Progreso (acercarse al wp)"),
     ("direction",         "Direccion (encarar guia)"),

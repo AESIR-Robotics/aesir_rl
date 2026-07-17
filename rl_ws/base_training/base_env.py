@@ -200,9 +200,14 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     d_guide = float(np.linalg.norm(np.asarray(guidance["vortex"], dtype=float) - xy))
     v_des = V_MAX_MPS * min(d_guide / GUIDE_SPEED_SCALE, 1.0)
     speed_reward = W_VELOCITY * (1.0 - abs(v_fwd - v_des) / V_MAX_MPS) * max(0.0, float(cos_t))
+    # Encarar la guia: cos_t>0 premia ir de frente, cos_t<0 (de espaldas) castiga
+    # -> rompe la simetria adelante/reversa del chasis y evita que aprenda a ir
+    # en reversa hacia la meta cobrando el progreso (que es ciego a la orientacion).
+    direction_reward = W_DIRECTION * float(cos_t)
     backward_pen = BACKWARD_W * max(0.0, -v_fwd) / V_MAX_MPS
 
-    return progress_reward + speed_reward - backward_pen - penalties - TIME_PENALTY
+    return (progress_reward + direction_reward + speed_reward
+            - backward_pen - penalties - TIME_PENALTY)
 
 
 # ── Terminacion ──────────────────────────────────────────────────────────────
