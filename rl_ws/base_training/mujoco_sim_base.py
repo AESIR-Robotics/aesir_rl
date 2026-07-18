@@ -41,7 +41,7 @@ from rl_ws.base_training.robot_control import RampController
 from rl_ws.base_training.map_context import MapContext
 from rl_ws.global_navigator import (
     build_platform_zone, plan_platform_route, plan_platform_route_with_obstacle,
-    GlobalNavigator, quat_to_yaw,
+    GlobalNavigator, quat_to_yaw, quat_to_grav_body,
 )
 
 CHECKOUT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -149,6 +149,7 @@ class BaseMujocoEnv:
         return dict(
             xy=pos[:2].copy().astype(np.float64), z=float(pos[2]),
             yaw=quat_to_yaw(quat), upright=_quat_upright(quat),
+            grav_body=quat_to_grav_body(quat),
             twist=np.array([lin_body[0], lin_body[1], ang_body[2]], dtype=np.float32),
             flip_qpos=flip_qpos, flip_qvel=flip_qvel,
             floor_contact=self._count_floor_contacts(),

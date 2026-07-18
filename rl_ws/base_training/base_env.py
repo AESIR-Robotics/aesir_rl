@@ -18,6 +18,8 @@ El dict `fb` que ambos backends deben producir:
     yaw           float                   heading
     upright       float                   R[2,2] del chasis (1=vertical)
     twist         np.array([v_fwd, v_lat, omega_z])   velocidad en frame local
+    grav_body     np.array(3)             gravedad unitaria en frame del cuerpo
+                                          (pitch/roll/vert; para pendientes)
     flip_qpos     np.array(4)             angulos de flipper (rad, ROS)
     flip_qvel     np.array(4)             velocidades de flipper
     floor_contact int                     nº de contactos robot<->piso
@@ -65,13 +67,15 @@ def build_obs(guidance: dict, fb: dict, heatmap: Optional[np.ndarray] = None) ->
     "desdobla" la cola del vector de vuelta a imagen (H,W) adentro de
     su forward().
     """
+    twist = np.asarray(fb["twist"], dtype=np.float32)
     state = np.concatenate([
-        guidance["obs"],                                    # 3   guia inmediata
-        guidance["lookahead"],                              # 3*N puntos futuros
-        fb["twist"],                                        # 3  [v_fwd, v_lat, omega]
+        guidance["obs"],                                    # 3   guia inmediata (vortex)
+        guidance["lookahead"],                              # 3*N puntos futuros de la ruta
+        guidance["target_obs"],                             # 3   waypoint-objetivo crudo (relativo)
+        [twist[0], twist[2]],                               # 2   [v_fwd, omega_z] (sin v_lat)
         fb["flip_qpos"],                                    # 4
         fb["flip_qvel"],                                    # 4
-        [fb["upright"]],                                    # 1
+        fb["grav_body"],                                    # 3   gravedad en cuerpo (pitch/roll/vert)
     ]).astype(np.float32)
 
     if heatmap is None:
@@ -224,8 +228,8 @@ def terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int,
         return True, False, "caida (demasiado bajo)"
     if fb.get("floor_contact", 0) > 0:
         return True, False, "toco el piso"
-    if fb.get("obstacle_contact", 0) > 0:
-        return True, False, "choco con el obstaculo"
+    #if fb.get("obstacle_contact", 0) > 0:
+    #    return True, False, "choco con el obstaculo"
     if float(np.linalg.norm(fb["xy"] - goal_xy)) < FINISH_DIST:
         return True, True, "META alcanzada"
     return False, False, None

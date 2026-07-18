@@ -223,82 +223,125 @@ def plan_platform_route(start_xy: tuple, goal_xy: tuple,
     return waypoints
 
 
+def _seg_hits_box(a, b, lo, hi) -> bool:
+    """True si el segmento a->b cruza la caja AABB [lo,hi] (Liang-Barsky)."""
+    a = np.asarray(a, float); b = np.asarray(b, float)
+    d = b - a
+    t0, t1 = 0.0, 1.0
+    for k in range(2):
+        if abs(d[k]) < 1e-12:
+            if a[k] < lo[k] or a[k] > hi[k]:
+                return False
+        else:
+            inv = 1.0 / d[k]
+            ta, tb = (lo[k] - a[k]) * inv, (hi[k] - a[k]) * inv
+            if ta > tb:
+                ta, tb = tb, ta
+            t0, t1 = max(t0, ta), min(t1, tb)
+            if t0 > t1:
+                return False
+    return True
+
+
+def _resample_polyline(points, max_wp_dist: float) -> list[tuple]:
+    """Densifica una polilinea insertando puntos para que ningun tramo supere
+    max_wp_dist (conserva los vertices originales)."""
+    pts = [np.asarray(p, float) for p in points]
+    out = [tuple(pts[0])]
+    for i in range(len(pts) - 1):
+        seg = pts[i + 1] - pts[i]
+        d = float(np.hypot(*seg))
+        if d > max_wp_dist:
+            nseg = int(np.ceil(d / max_wp_dist))
+            for j in range(1, nseg):
+                out.append(tuple(pts[i] + seg * (j / nseg)))
+        out.append(tuple(pts[i + 1]))
+    return out
+
+
 def plan_platform_route_with_obstacle(
         start_xy: tuple, goal_xy: tuple,
         max_wp_dist: float = MAX_WAYPOINT_DIST,
         max_half_size: float = VIRTUAL_OBSTACLE_HALF_SIZE,
         min_half_size: float = VIRTUAL_OBSTACLE_MIN_HALF_SIZE,
-        clearance: float = VIRTUAL_OBSTACLE_CLEARANCE,
-        max_skip: int = VIRTUAL_OBSTACLE_MAX_SKIP,
         offset_frac_range: tuple = VIRTUAL_OBSTACLE_OFFSET_FRAC):
-    """Genera la ruta directa Y el obstaculo virtual EN UN SOLO PASO -- al
-    reves del enfoque anterior (ruta fija a max_wp_dist + obstaculo insertado
-    a presion con rejection-sampling), que podia fallar o quedar mal si el
-    obstaculo no cabia limpio entre dos waypoints ya fijados.
+    """Coloca PRIMERO el obstaculo (random, sobre el paso directo) y luego PLANEA
+    la ruta TENIENDO EN CUENTA la caja: si el paso directo la cruza, la rodea por
+    las esquinas (infladas por el cuerpo del robot) del lado mas corto y dentro
+    de la plataforma. Es un shortest-path exacto de un solo obstaculo via grafo
+    de visibilidad de pocos nodos (spawn, meta, 4 esquinas). El vortex hace la
+    evasion FINA; estos waypoints ya doblan alrededor, asi el lookahead que ve la
+    politica es coherente con el rodeo (no recto por encima de la caja).
 
-    Aqui se elige PRIMERO donde va el obstaculo (un waypoint interior random
-    de la grilla base) y se agranda el hueco a su alrededor saltando 1..N
-    vecinos hasta que sobre suficiente espacio -- despues el TAMANIO del
-    obstaculo se deriva de esa distancia real entre los dos waypoints que
-    terminan bordeando el hueco (mas separados -> puede ser mas grande, hasta
-    max_half_size; nunca mas chico que min_half_size con clearance a los
-    waypoints, o se descarta). Por construccion ningun waypoint puede caer
-    encerrado en la caja -- ver el bug de orbita infinita del vortex descrito
-    antes, que este diseño evita de raiz en vez de rechazar a posteriori.
+    SOLO para la plataforma plana. La pista de pallets usa plan_route/_plan_segment
+    (A* sobre el JSON), que esta funcion NO toca.
 
-    Devuelve (waypoints, obstacle_or_None) -- None si la ruta es demasiado
-    corta para abrir un hueco con margen seguro en ningun intento."""
+    Devuelve (waypoints, obstacle_or_None) -- None si la ruta es muy corta para
+    meter un obstaculo con margen."""
     start = np.array(start_xy, dtype=float)
     goal = np.array(goal_xy, dtype=float)
     delta = goal - start
     total = float(np.hypot(*delta))
-    if total < 1e-6:
-        return [tuple(start), tuple(goal)], None
+    if total < 4.0 * max_half_size + 2.0 * ROBOT_RADIUS:
+        return _resample_polyline([start, goal], max_wp_dist), None
     direction = delta / total
+    perp = np.array([-direction[1], direction[0]])
 
-    n = max(1, int(np.ceil(total / max_wp_dist)))
-    base_s = [k * total / n for k in range(n + 1)]   # incluye 0 y total
-    base_waypoints = [tuple(start + direction * s) for s in base_s]
+    # 1) Obstaculo PRIMERO: proyeccion random sobre la linea + offset lateral
+    #    (< half) para que la caja inflada intersecte el paso directo -> rodeo.
+    half = float(np.random.uniform(min_half_size, max_half_size))
+    u = float(np.random.uniform(0.35, 0.65))
+    base = start + direction * (u * total)
+    side = 1.0 if np.random.rand() < 0.5 else -1.0
+    lateral = side * float(np.random.uniform(*offset_frac_range)) * half
+    center = base + perp * lateral
+    obstacle = Obstacle2D("virtual_obstacle", float(center[0]), float(center[1]), half, half)
 
-    if len(base_s) < 4:
-        # ruta corta, sin waypoints intermedios de sobra para abrir un hueco
-        # sin comerse el spawn o la meta.
-        return base_waypoints, None
+    # 2) Planear CON el obstaculo. Caja inflada por el cuerpo del robot + holgura.
+    margin = ROBOT_RADIUS + 0.10
+    hi_half = half + margin
+    box_lo, box_hi = center - hi_half, center + hi_half
+    if not _seg_hits_box(start, goal, box_lo, box_hi):
+        return _resample_polyline([start, goal], max_wp_dist), obstacle   # no estorba
 
-    # Candidatos: indice interior i (nunca el primero/ultimo) en orden random;
-    # por cada uno se prueba con el menor "skip" primero (hueco mas chico) y
-    # solo se agranda si no alcanza el margen -- ajusta el tamano al hueco
-    # natural en vez de forzar uno fijo.
-    order = list(range(1, len(base_s) - 1))
-    np.random.shuffle(order)
+    # Nodos de visibilidad: esquinas empujadas un pelin afuera (para que los
+    # segmentos hacia ellas no rocen el interior); descarta las que caen fuera
+    # de la plataforma transitable.
+    eps = 0.05
+    plat = PLATFORM_HALF_EXTENT - ROBOT_RADIUS
+    corners = [center + np.array([sx, sy]) * (hi_half + eps)
+               for sx in (-1.0, 1.0) for sy in (-1.0, 1.0)]
+    corners = [c for c in corners if abs(c[0]) <= plat and abs(c[1]) <= plat]
+    nodes = [start, goal] + corners
+    blo, bhi = center - (hi_half - eps), center + (hi_half - eps)   # caja de bloqueo
 
-    for i in order:
-        for skip in range(1, max_skip + 1):
-            lo, hi = i - skip, i + skip
-            if lo < 0 or hi >= len(base_s):
+    # Dijkstra sobre el grafo (aristas cuyo segmento no cruza la caja de bloqueo).
+    n = len(nodes)
+    INF = float("inf")
+    dist = [INF] * n; dist[0] = 0.0
+    prev = [-1] * n; done = [False] * n
+    for _ in range(n):
+        u2, best = -1, INF
+        for i in range(n):
+            if not done[i] and dist[i] < best:
+                best, u2 = dist[i], i
+        if u2 == -1:
+            break
+        done[u2] = True
+        for v in range(n):
+            if done[v] or _seg_hits_box(nodes[u2], nodes[v], blo, bhi):
                 continue
-            s_before, s_after = base_s[lo], base_s[hi]
-            seg_len = s_after - s_before
-            max_half = (seg_len - 2 * clearance) / 2.0
-            if max_half < min_half_size:
-                continue   # hueco muy chico incluso agrandado -- prueba otro punto
-            half_size = float(min(max_half, max_half_size))
+            w = dist[u2] + float(np.hypot(*(nodes[v] - nodes[u2])))
+            if w < dist[v]:
+                dist[v], prev[v] = w, u2
 
-            waypoints = [tuple(start + direction * s) for s in base_s[:lo + 1] + base_s[hi:]]
-
-            p_before = start + direction * s_before
-            p_after = start + direction * s_after
-            center_line = (p_before + p_after) / 2.0
-            perp = np.array([-direction[1], direction[0]])
-            side = 1.0 if np.random.rand() < 0.5 else -1.0
-            offset = side * half_size * float(np.random.uniform(*offset_frac_range))
-            center = center_line + perp * offset
-
-            obstacle = Obstacle2D("virtual_obstacle", float(center[0]), float(center[1]),
-                                  half_size, half_size)
-            return waypoints, obstacle
-
-    return base_waypoints, None
+    if dist[1] == INF:                        # sin rodeo valido (raro) -> el vortex esquiva
+        return _resample_polyline([start, goal], max_wp_dist), obstacle
+    path, k = [], 1
+    while k != -1:
+        path.append(nodes[k]); k = prev[k]
+    path.reverse()
+    return _resample_polyline(path, max_wp_dist), obstacle
 
 
 def build_safe_zone(json_path: str):
@@ -482,8 +525,26 @@ class GlobalNavigator:
                           min_progress=self._min_progress)
 
     def _lookahead(self, robot_xy: np.ndarray, robot_yaw: float) -> np.ndarray:
+        """Previsualiza la ruta que viene: n_look puntos muestreados a arco fijo
+        (lookahead_step). Cada punto = 3 numeros en el FRAME DEL CUERPO:
+            [dx, dy, theta_tan]
+          - (dx, dy)   : posicion del punto relativa al robot (cartesiana, rotada
+                         por -yaw). Cartesiana en vez de polar -> captura posicion
+                         + curvatura directo, sin el canal de distancia casi
+                         constante de antes.
+          - theta_tan  : angulo (rad) de la direccion HACIA DONDE VA la ruta en ese
+                         punto, relativo al heading del robot -> la politica
+                         anticipa curvas, no solo posiciones. Un solo escalar (sin
+                         ambiguedad); va ~0 en ruta recta de frente.
+        Devuelve (feats 3*n_look, samples Nx2 en mundo para dibujar)."""
         if self._n_look <= 0:
             return np.zeros(0, dtype=np.float32), np.zeros((0, 2), dtype=float)
+        c, s_yaw = np.cos(robot_yaw), np.sin(robot_yaw)
+
+        def to_body(vec):   # R(-yaw) @ vec_world
+            x, y = float(vec[0]), float(vec[1])
+            return c * x + s_yaw * y, -s_yaw * x + c * y
+
         origin = np.array([float(robot_xy[0]), float(robot_xy[1])])
         pts = [origin] + [self._wps[i] for i in range(self._wi, len(self._wps))]
         cum = np.concatenate([[0.0], np.cumsum(
@@ -496,11 +557,23 @@ class GlobalNavigator:
             j = max(j, 0)
             if len(pts) < 2:
                 sample = pts[0]
+                seg = np.zeros(2)
             else:
                 seglen = float(cum[j + 1] - cum[j])
                 t = 0.0 if seglen < 1e-9 else (s - float(cum[j])) / seglen
                 sample = pts[j] + t * (pts[j + 1] - pts[j])
-            feats.append(_rel_obs(sample - origin, robot_yaw))
+                seg = pts[j + 1] - pts[j]
+            seg_n = float(np.hypot(*seg))
+            if seg_n > 1e-9:
+                dir_world = seg / seg_n
+            else:                                    # segmento degenerado: fallbacks
+                to = sample - origin
+                to_n = float(np.hypot(*to))
+                dir_world = to / to_n if to_n > 1e-9 else np.array([c, s_yaw])
+            dx, dy = to_body(sample - origin)        # posicion relativa (cartesiana)
+            tx, ty = to_body(dir_world)              # tangente en frame del cuerpo
+            theta_tan = float(np.arctan2(ty, tx))    # heading de la ruta, relativo
+            feats.append(np.array([dx, dy, theta_tan], dtype=np.float32))
             samples.append(sample)
         # feats: lo que ve la politica (relativo); samples: mundo (para dibujar)
         return np.concatenate(feats).astype(np.float32), np.asarray(samples, dtype=float)
@@ -514,9 +587,14 @@ class GlobalNavigator:
         target = self._wps[min(self._wi, len(self._wps) - 1)]
         vortex_pt = self._vortex_at(robot_xy, target)
         obs = _rel_obs(vortex_pt - np.asarray(robot_xy, dtype=float), robot_yaw)
+        # Waypoint-objetivo CRUDO relativo al robot (el subobjetivo "limpio",
+        # aparte del punto del vortex que ya mezcla atraccion+repulsion).
+        target_obs = _rel_obs(np.asarray(target, dtype=float) - np.asarray(robot_xy, dtype=float),
+                              robot_yaw)
         lookahead, lookahead_xy = self._lookahead(robot_xy, robot_yaw)
 
-        return {"obs": obs, "target": target, "vortex": vortex_pt, "wp": self._wi,
+        return {"obs": obs, "target": target, "target_obs": target_obs,
+                "vortex": vortex_pt, "wp": self._wi,
                 "lookahead": lookahead, "lookahead_xy": lookahead_xy,
                 "goal": self._wps[-1]}     # meta final (ultimo waypoint), para modular velocidad
 
@@ -528,3 +606,16 @@ def quat_upright(xquat) -> float:
     """Componente z del eje z del chasis (R[2,2]): 1 = vertical, 0 = tumbado."""
     w, x, y, z = xquat
     return 1.0 - 2.0 * (x * x + y * y)
+
+def quat_to_grav_body(xquat) -> np.ndarray:
+    """Vector de GRAVEDAD (unitario, apunta hacia abajo) expresado en el frame
+    del cuerpo: g_body = R^T · [0,0,-1]. En plano da [0,0,-1]; al subir/bajar una
+    pendiente gx captura el PITCH y gy el ROLL, asi la politica distingue
+    'inclinado hacia adelante subiendo' de 'ladeado a punto de volcar' — cosa que
+    el escalar upright (solo magnitud) no puede. gz == -upright."""
+    w, x, y, z = [float(v) for v in xquat]
+    return np.array([
+        2.0 * (w * y - x * z),          # gx  (pitch)
+        -2.0 * (y * z + w * x),         # gy  (roll)
+        2.0 * (x * x + y * y) - 1.0,    # gz  (= -upright)
+    ], dtype=np.float32)

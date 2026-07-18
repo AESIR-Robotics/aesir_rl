@@ -48,7 +48,7 @@ from std_srvs.srv import Trigger
 from std_msgs.msg import Int32, Float32MultiArray
 
 from rl_ws.global_navigator import (
-    plan_route, GlobalNavigator, quat_to_yaw, quat_upright,
+    plan_route, GlobalNavigator, quat_to_yaw, quat_upright, quat_to_grav_body,
     build_platform_zone, plan_platform_route, plan_platform_route_with_obstacle,
 )
 from rl_ws.base_training.map_context import MapContext
@@ -93,6 +93,7 @@ class _BridgeInterface(Node):
         self._yaw       = 0.0
         self._upright   = 1.0
         self._twist     = np.zeros(3, dtype=np.float32)  # [v_fwd, v_lat, omega_z]
+        self._grav_body = np.array([0., 0., -1.], dtype=np.float32)  # gravedad en cuerpo
         self._flip_qpos = np.zeros(4, dtype=np.float32)
         self._flip_qvel = np.zeros(4, dtype=np.float32)
         self._floor_contact = 0                          # nº de contactos robot<->piso
@@ -119,6 +120,7 @@ class _BridgeInterface(Node):
             self._pose_z  = float(msg.pose.position.z)
             self._yaw     = quat_to_yaw(quat)
             self._upright = quat_upright(quat)
+            self._grav_body = quat_to_grav_body(quat)
 
     def _vel_cb(self, msg: Twist):
         with self._lock:
@@ -152,7 +154,8 @@ class _BridgeInterface(Node):
                 return None
             return dict(
                 xy=self._pose_xy.copy(), z=self._pose_z, yaw=self._yaw,
-                upright=self._upright, twist=self._twist.copy(),
+                upright=self._upright, grav_body=self._grav_body.copy(),
+                twist=self._twist.copy(),
                 flip_qpos=self._flip_qpos.copy(), flip_qvel=self._flip_qvel.copy(),
                 floor_contact=self._floor_contact,
                 obstacle_contact=self._obstacle_contact,
@@ -220,13 +223,17 @@ class _BridgeInterface(Node):
 
 # ──────────────────────────── Observacion y reward ─────────────────────────
 def _build_obs(guidance: dict, fb: dict, heatmap: Optional[np.ndarray] = None) -> np.ndarray:
+    # MISMO orden y contenido que base_env.build_obs (BaseMujocoEnv/train_fast)
+    # para que un checkpoint sirva tal cual en ambos backends.
+    twist = np.asarray(fb["twist"], dtype=np.float32)
     state = np.concatenate([
-        guidance["obs"],                                    # 3   guia inmediata
-        guidance["lookahead"],                              # 3*N puntos futuros
-        fb["twist"],                                        # 3  [v_fwd, v_lat, omega]
+        guidance["obs"],                                    # 3   guia inmediata (vortex)
+        guidance["lookahead"],                              # 3*N puntos futuros de la ruta
+        guidance["target_obs"],                             # 3   waypoint-objetivo crudo (relativo)
+        [twist[0], twist[2]],                               # 2   [v_fwd, omega_z] (sin v_lat)
         fb["flip_qpos"],                                    # 4
         fb["flip_qvel"],                                    # 4
-        [fb["upright"]],                                    # 1
+        fb["grav_body"],                                    # 3   gravedad en cuerpo (pitch/roll/vert)
     ]).astype(np.float32)
     if heatmap is None:
         return state
@@ -413,9 +420,9 @@ def _terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int, max_steps: int) ->
     if fb["z"] < 0.10:
         print("[base_env] 🛑 Episodio terminado por caida (base demasiado bajo)")
         return True, False
-    if fb.get("floor_contact", 0) > 0:
-        print("[base_env] 🛑 Episodio terminado: una parte del robot toco el piso")
-        return True, False
+    #if fb.get("floor_contact", 0) > 0:
+    #    print("[base_env] 🛑 Episodio terminado: una parte del robot toco el piso")
+    #    return True, False
     if fb.get("obstacle_contact", 0) > 0:
         print("[base_env] 🛑 Episodio terminado: choco con el obstaculo")
         return True, False

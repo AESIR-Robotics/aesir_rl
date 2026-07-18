@@ -50,7 +50,7 @@ from global_navigator import (
 )
 from base_training.config import (
     SPAWN_XY_RANGE, GOAL_XY_RANGE, PLATFORM_HALF_EXTENT,
-    USE_VIRTUAL_OBSTACLE,
+    USE_VIRTUAL_OBSTACLE, ROBOT_RADIUS,
 )
 # Reusa la simulacion vortex + el dibujado del campo vectorial global tal cual
 # -- son genericos (solo dependen de nav._vo / nav._edges), no de pallets.
@@ -202,35 +202,26 @@ def run_trials(n, verbose=True):
         if vobs is not None:
             p = np.array([vobs.x, vobs.y])
             wps_arr = np.array(waypoints)
-            # OJO: toda la ruta es colineal (recta start->goal resampleada),
-            # asi que la distancia a la RECTA de cualquier tramo da lo mismo
-            # -- para identificar el tramo HOST real (el que se agrando para
-            # dejarle hueco al obstaculo) hace falta la distancia al SEGMENTO
-            # (recortada a sus extremos), no a la recta infinita.
-            best = _point_segment_dist(p, wps_arr[0], wps_arr[1])
-            host = _nearest_segment_idx(p, wps_arr)
-            # Se desplaza lateral (perpendicular) del tramo elegido, proporcional
-            # a su propio half_size -- ver offset_frac_range de
-            # plan_platform_route_with_obstacle en global_navigator.py.
-            if not (0.10 * vobs.hx <= best <= 0.70 * vobs.hx):
-                ok = False; reasons.append(f"offset del obstaculo fuera de lo esperado (dist={best:.4f}, half_size={vobs.hx:.3f})")
 
-            # Invariante de SEGURIDAD real: ningun waypoint debe caer DENTRO
-            # de la caja del obstaculo -- eso es lo que causaba la orbita
-            # infinita del vortex (atractor encerrado por la repulsion).
+            # Invariante de SEGURIDAD: ningun waypoint debe caer DENTRO de la
+            # caja del obstaculo -- eso causaba la orbita infinita del vortex
+            # (atractor encerrado por la repulsion).
             dx = np.abs(wps_arr[:, 0] - vobs.x)
             dy = np.abs(wps_arr[:, 1] - vobs.y)
             if not np.all((dx > vobs.hx) | (dy > vobs.hy)):
                 ok = False; reasons.append("obstaculo virtual ENCIERRA un waypoint real (riesgo de orbita)")
 
-            # Invariante de TAMANIO: el obstaculo nunca deberia ocupar mas de
-            # la mitad del tramo que lo bordea (host segment) menos el
-            # clearance minimo esperado a cada lado -- confirma que el tamano
-            # sale de la distancia real entre esos dos waypoints, no al reves.
-            host_len = float(np.linalg.norm(wps_arr[host + 1] - wps_arr[host]))
-            if 2 * vobs.hx > host_len + 1e-6:
+            # Invariante de RODEO: la ruta ya se planea RODEANDO el obstaculo
+            # (plan_platform_route_with_obstacle via esquinas), asi que la
+            # distancia minima del centro del obstaculo a cualquier tramo de la
+            # ruta debe dejar pasar el cuerpo del robot (>= half + ROBOT_RADIUS,
+            # con tolerancia). Reemplaza a los checks viejos de offset/hueco.
+            min_seg = min(_point_segment_dist(p, wps_arr[k], wps_arr[k + 1])
+                          for k in range(len(wps_arr) - 1))
+            if min_seg < vobs.hx + ROBOT_RADIUS - 0.15:
                 ok = False; reasons.append(
-                    f"obstaculo mas grande que su propio tramo (2*hx={2*vobs.hx:.3f} > host_len={host_len:.3f})")
+                    f"la ruta no rodea con holgura (dist_min={min_seg:.3f} < "
+                    f"half+r={vobs.hx + ROBOT_RADIUS:.3f})")
 
         nav = GlobalNavigator(None, waypoints=waypoints,
                               obstacles=[vobs] if vobs is not None else [],

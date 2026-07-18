@@ -62,7 +62,7 @@ START_XY: Tuple[float, float] = (-1.5, 3.5)
 GOAL_XY:  Optional[Tuple[float, float]] = None   # None -> ultimo pallet del JSON
 SPAWN_Z   = 0.20
 FINISH_DIST       = 0.10
-EPISODE_MAX_STEPS = 15000
+EPISODE_MAX_STEPS = 10000
 SPAWN_XY_RANGE = 8.0
 GOAL_XY_RANGE  = 9.0
 
@@ -87,12 +87,12 @@ VIRTUAL_OBSTACLE_HEIGHT_HALF = 0.3
 PLATFORM_SURFACE_Z            = 0.12    
 
 # ── Pesos de reward ──────────────────────────────────────────────────────────
-W_DIRECTION    = 0.6     # encarar al objetivo (cos Δθ)
-W_VELOCITY     = 0.6     # igualar la velocidad forward objetivo
+W_DIRECTION    = 0.5     # encarar al objetivo (cos Δθ)
+W_VELOCITY     = 0.5     # igualar la velocidad forward objetivo
 WP_BONUS       = 200.0   # bonus al cruzar un waypoint
 TIME_PENALTY   = 0.1
 FALL_PENALTY   = 250.0
-OBSTACLE_PENALTY = 50.0
+OBSTACLE_PENALTY = 1.0
 STUCK_MAX      = 1.0
 ENERGY_W       = 1e-8
 FLIPPER_JERK_W = 1.0
@@ -105,7 +105,7 @@ ACCEL_DEADZONE = 0.3
 # Velocidad deseada = DISTANCIA al punto-guia del vortex (lejos -> rapido, cerca
 # -> lento). Se premia alcanzarla encarando la guia; retroceder se castiga.
 GUIDE_SPEED_SCALE = 1.0   # [m] distancia del guia que ya pide velocidad plena V_MAX
-BACKWARD_W        = 2.0   # castigo por retroceder (x fraccion de V_MAX en reversa)
+BACKWARD_W        = 4.0   # castigo por retroceder (x fraccion de V_MAX en reversa)
 
 # ── Geometria de flippers (para detectar auto-colision desde los angulos) ────
 FLIPPER_MOUNTS = np.array([
@@ -121,11 +121,15 @@ FLIPPER_COLLISION_DIST = 0.13
 
 # ── Lookahead de la trayectoria (puntos futuros del vortex que ve la politica)
 N_LOOKAHEAD    = 5      # nº de puntos futuros del rollout del vortex
-LOOKAHEAD_STEP = 0.20   # avance (m) del muestreo de la ruta por punto
+LOOKAHEAD_STEP = 0.25   # avance (m) del muestreo de la ruta por punto
 
 # ── Tamaños expuestos a la politica ──────────────────────────────────────────
-# guia(3) + lookahead(3*N) + twist_base(3) + flipper_qpos(4) + flipper_qvel(4) + upright(1)
-OBS_DIM = 15 + 3*N_LOOKAHEAD + HEATMAP_PIXELS**2
+# Estado (19) = guia_vortex(3) + waypoint_crudo(3) + twist[v_fwd,ω](2) +
+#   flipper_qpos(4) + flipper_qvel(4) + gravedad_en_cuerpo(3)
+# + lookahead(3*N) + heatmap(HEATMAP_PIXELS**2).
+# Nota: se quito v_lat (diferencial no strafea) y upright(1) se cambio por la
+# gravedad en cuerpo(3) para captar pitch/roll en pendientes.
+OBS_DIM = 19 + 3*N_LOOKAHEAD + HEATMAP_PIXELS**2
 ACT_DIM = 6    # v, ω, flipper×4
 
 # ── Navegacion global: planeacion A* sobre la zona segura de pallets ─────────

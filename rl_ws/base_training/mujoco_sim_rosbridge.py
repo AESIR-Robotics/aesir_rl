@@ -166,36 +166,28 @@ class MujocoHardwareBridge(Node):
         self.floor_contact_pub = self.create_publisher(
             Int32, "/hardware_node/floor_contact", 10
         )
-        # Contactos robot<->obstaculo (no letal aparte; el env lo usa para el
-        # castigo/terminacion de colision, igual que en el entrenamiento).
         self.obstacle_contact_pub = self.create_publisher(
             Int32, "/hardware_node/obstacle_contact", 10
         )
         self.command_sub = self.create_subscription(
             JointControl, "/commands_hardware", self._command_cb, 10
         )
-        # Obstaculo virtual del episodio (lo manda base_ros_env.reset()):
-        # data = [active, cx, cy, hx, hy]. active<=0 -> lo esconde bajo el piso.
         self.obstacle_sub = self.create_subscription(
             Float32MultiArray, "/virtual_obstacle", self._obstacle_cb, 10
         )
-
         self.vel_state_pub = self.create_publisher(
             Twist, "hardware_node/state_vel", 10
         )
         self.cmd_vel_sub = self.create_subscription(
             Twist, "hardware_node/cmd_vel", self._cmd_vel_cb, 10
         )
-
         self.pose_pub = self.create_publisher(
             PoseStamped, "hardware_node/pose", 10
         )
-
         # Reset rapido para RL: teletransporta el brazo a C.ARM_REST_POSE
         self._reset_srv = self.create_service(
             Trigger, "/mujoco_ros_bridge/reset_arm", self._reset_arm_cb
         )
-
         self._reset_sim_srv = self.create_service(
             Trigger, "/mujoco_ros_bridge/reset_sim", self._reset_sim_cb
         )
