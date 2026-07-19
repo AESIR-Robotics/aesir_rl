@@ -579,10 +579,12 @@ class GlobalNavigator:
         return np.concatenate(feats).astype(np.float32), np.asarray(samples, dtype=float)
 
     def step(self, robot_xy: np.ndarray, robot_yaw: float) -> dict:
-        if self._wi < len(self._wps):
-            wp = self._wps[self._wi]
-            if np.linalg.norm(robot_xy - wp) < REACH_DIST:
-                self._wi += 1
+        rxy = np.asarray(robot_xy, dtype=float)
+        d = np.linalg.norm(np.asarray(self._wps, dtype=float) - rxy, axis=1)
+        nearest = int(np.argmin(d))
+        self._wi = max(self._wi, min(nearest + 1, len(self._wps) - 1))
+        if float(d[self._wi]) < REACH_DIST:          # llegada fina al target actual
+            self._wi = min(self._wi + 1, len(self._wps) - 1)
 
         target = self._wps[min(self._wi, len(self._wps) - 1)]
         vortex_pt = self._vortex_at(robot_xy, target)

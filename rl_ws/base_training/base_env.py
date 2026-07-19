@@ -37,7 +37,8 @@ import numpy as np
 # que `from base_training.base_env import START_XY, ...` siga funcionando.
 from .config import (
     NAV_JSON,
-    V_MAX_MPS, W_MAX_RADPS, FLIPPER_MAX, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD,
+    V_MAX_MPS, W_MAX_RADPS, V_REF_MPS, W_REF_RADPS,
+    FLIPPER_MAX, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD,
     START_XY, GOAL_XY, SPAWN_Z, FINISH_DIST, EPISODE_MAX_STEPS,
     W_DIRECTION, W_VELOCITY, WP_BONUS, TIME_PENALTY, FALL_PENALTY,
     STUCK_MAX, ENERGY_W, FLIPPER_JERK_W, TILT_W, FLIPPER_COLLISION_W,
@@ -171,11 +172,12 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     flipper_collision_pen = flipper_collision_penalty(fb["flip_qpos"])
 
     # 7. Aceleraciones FUERTES del chasis (cuidar la integridad del robot):
-    #    cambio del twist base entre pasos, normalizado por [V_MAX, V_MAX, W_MAX].
+    #    cambio del twist base entre pasos, normalizado por la velocidad REAL
+    #    [V_REF, V_REF, W_REF] (twist es medido, no comando -> ref real, no escala).
     #    Zona muerta -> deja pasar la aceleracion normal (ir rapido); solo se
     #    castiga el exceso al cuadrado (jolts que dan;an el robot).
     twist = np.asarray(fb["twist"], dtype=np.float32)
-    accel = (twist - rs.last_twist) / np.array([V_MAX_MPS, V_MAX_MPS, W_MAX_RADPS],
+    accel = (twist - rs.last_twist) / np.array([V_REF_MPS, V_REF_MPS, W_REF_RADPS],
                                                 dtype=np.float32)
     rs.last_twist = twist.copy()
     accel_pen = ACCEL_W * max(0.0, float(np.linalg.norm(accel)) - ACCEL_DEADZONE) ** 2
@@ -183,32 +185,32 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     penalties = (penalty_stuck + action_cost + flipper_pen + tilt_pen
                  + flipper_collision_pen + accel_pen)
 
-    # 7. Waypoint cruzado -> solo bonus + penalizaciones ese paso
+    # 8. Waypoint cruzado -> solo bonus + penalizaciones ese paso
     if guidance["wp"] > rs.last_wp:
         rs.last_wp = guidance["wp"]
         rs.last_dist_to_target = float(np.linalg.norm(xy - target_xy))
         return WP_BONUS - penalties
 
-    # 8. Progreso hacia el waypoint actual
+    # 9. Progreso hacia el waypoint actual
     dist_to_target = float(np.linalg.norm(xy - target_xy))
     delta_dist = rs.last_dist_to_target - dist_to_target
     proximity_multiplier = float(np.exp(-dist_to_target))
     progress_reward = delta_dist * (50.0 + 100.0 * proximity_multiplier)
     rs.last_dist_to_target = dist_to_target
 
-    # 9. Alcanzar la velocidad y orientacion que pide el vortex + castigo por
+    # 10. Alcanzar la velocidad y orientacion que pide el vortex + castigo por
     #    retroceder. La DISTANCIA al punto-guia es la velocidad deseada (lejos ->
     #    rapido, cerca -> lento, p.ej. al llegar) y cos_t la orientacion. Se premia
     #    acercarse a esa velocidad encarando la guia; retroceder (v_fwd<0) se
     #    castiga -> evita la oscilacion.
     d_guide = float(np.linalg.norm(np.asarray(guidance["vortex"], dtype=float) - xy))
-    v_des = V_MAX_MPS * min(d_guide / GUIDE_SPEED_SCALE, 1.0)
-    speed_reward = W_VELOCITY * (1.0 - abs(v_fwd - v_des) / V_MAX_MPS) * max(0.0, float(cos_t))
+    v_des = V_REF_MPS * min(d_guide / GUIDE_SPEED_SCALE, 1.0)
+    speed_reward = W_VELOCITY * (1.0 - abs(v_fwd - v_des) / V_REF_MPS) * max(0.0, float(cos_t))
     # Encarar la guia: cos_t>0 premia ir de frente, cos_t<0 (de espaldas) castiga
     # -> rompe la simetria adelante/reversa del chasis y evita que aprenda a ir
     # en reversa hacia la meta cobrando el progreso (que es ciego a la orientacion).
     direction_reward = W_DIRECTION * float(cos_t)
-    backward_pen = BACKWARD_W * max(0.0, -v_fwd) / V_MAX_MPS
+    backward_pen = BACKWARD_W * max(0.0, -v_fwd) / V_REF_MPS
 
     return (progress_reward + direction_reward + speed_reward
             - backward_pen - penalties - TIME_PENALTY)

@@ -49,9 +49,36 @@ HEATMAP_RADIUS_M = 1.0
 HEATMAP_PIXELS = 64
 SAVE_HEATMAP_DEBUG = False
 
-# ── Escalas de comando (accion normalizada [-1,1] -> unidades fisicas) ───────
-V_MAX_MPS   = 0.8      # linear.x  a v_norm = 1
-W_MAX_RADPS = 1.5      # angular.z a w_norm = 1
+# ── Velocidad de la base: DOS pares, no confundir ────────────────────────────
+# Hay dos conceptos distintos porque la oruga DESLIZA (skid-steer): lo que se
+# COMANDA no es lo que el robot LOGRA.
+#
+#   1) V_MAX / W_MAX  = ESCALA DE COMANDO (setpoint tipo cmd_vel).
+#      accion=1 -> se pide este twist. set_base_twist lo pasa a velocidad de
+#      rueda con el modelo SIN deslizamiento (rueda = v/R avanzar, w*L/2/R girar)
+#      y MuJoCo lo ejecuta. NO es la velocidad que el robot alcanza: por el
+#      deslizamiento (sobre todo al girar) el robot logra bastante MENOS.
+#      Igual que un cmd_vel real: es una peticion, no una garantia.
+#      Estan calibrados para que accion=1 mueva la rueda cerca del ctrlrange
+#      (6.28 rad/s del XML) -> el robot llega a ~90% de su tope fisico.
+#         Lo usa: _apply_action / publish_action (el COMANDO).
+#
+#   2) V_REF / W_REF  = VELOCIDAD REAL alcanzable (medida a fondo en sim).
+#      Es lo que el chasis DE VERDAD alcanza a fondo. Lo usa el REWARD (v_des,
+#      normalizacion de accel/backward) porque el reward compara contra la
+#      velocidad MEDIDA (fb["twist"]) -> tiene que estar en m/s y rad/s reales.
+#         Lo usa: compute_reward (la REFERENCIA).
+#
+# Medido en sim (accion=1 -> velocidad real):
+#   V_MAX=0.85 -> 0.43 m/s   (90% de 0.48 max real)   | V_REF=0.48
+#   W_MAX=5.0  -> 0.70 rad/s (92% de 0.76 max real)   | W_REF=0.76
+# (Con W_MAX=0.68 el robot giraba a 0.004 rad/s: por eso los nombres _MPS/_RADPS
+#  de V_MAX/W_MAX ENGANAN -- son setpoint de comando, no velocidad lograda.)
+# Si cambias la fisica (forcerange/ruedas en el XML) hay que re-medir AMBOS pares.
+V_MAX_MPS   = 0.85     # COMANDO linear.x  a accion=1 (setpoint, no velocidad lograda)
+W_MAX_RADPS = 5.0      # COMANDO angular.z a accion=1 (setpoint, no velocidad lograda)
+V_REF_MPS   = 0.48     # REAL: velocidad lineal maxima medida  (referencia del reward)
+W_REF_RADPS = 0.76     # REAL: velocidad angular maxima medida (referencia del reward)
 FLIPPER_MAX = 3.1416   # rad a flip = 1
 # Limite de recorrido de los flippers (por software)
 FLIPPER_MIN_RAD = -1.3
@@ -98,7 +125,7 @@ ENERGY_W       = 1e-8
 FLIPPER_JERK_W = 1.0
 TILT_W         = 5.0
 FLIPPER_COLLISION_W = 50.0
-# Castigo por aceleraciones FUERTES del chasis (cuidar la integridad del robot
+# Castigo por aceleraciones fuertes del chasis (cuidar la integridad del robot
 # en terreno dificil).
 ACCEL_W        = 1.5
 ACCEL_DEADZONE = 0.3
@@ -178,11 +205,7 @@ SPAWN_SETTLE_STEPS = 50
 # ── Backend ROS2 (mujoco_sim_rosbridge.py + base_ros_env.py) ─────────────────
 CONTROL_HZ  = 20.0    # frecuencia del lazo de control RL sobre el bridge
 PHYSICS_HZ  = 100.0   # tick del timer del bridge (debe igualar ros2_controllers.yaml)
-# Factor de aceleracion respecto a TIEMPO REAL. El bridge avanza SIM_SPEEDUP
-# veces mas simulacion por segundo de reloj y BaseRosEnv duerme dt/SIM_SPEEDUP
-# — al vivir AMBOS aqui ya no pueden desincronizarse. Pon 1.0 para tiempo real
-# exacto (p.ej. hardware real / RViz). Maximo medido ~2.7x para este modelo.
-SIM_SPEEDUP = 2.5
+SIM_SPEEDUP = 1.0     # Factor de aceleracion respecto a TIEMPO REAL.
 SPAWN_YAW   = 0.0     # yaw inicial del chasis en el reset del bridge
 # Limites de rampa AVR446 del BRAZO en el bridge (rad/s, rad/s^2 por joint).
 # Los flippers usan FLIPPER_MAX_VEL / FLIPPER_MAX_ACCEL (arriba).
