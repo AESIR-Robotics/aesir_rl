@@ -52,6 +52,7 @@ from rl_ws.global_navigator import (
     build_platform_zone, plan_platform_route, plan_platform_route_with_obstacle,
 )
 from rl_ws.base_training.map_context import MapContext
+from rl_ws.base_training.base_env import flipper_targets   # gate de flippers (compartido)
 
 # TODOS los parametros (escalas de comando, mision, pesos de reward, geometria
 # de flippers, lookahead, OBS/ACT y la seccion ROS2) viven en base_training/
@@ -60,17 +61,22 @@ from rl_ws.base_training.map_context import MapContext
 from rl_ws.base_training.config import (
     NAV_JSON,
     V_MAX_MPS, W_MAX_RADPS, V_REF_MPS, W_REF_RADPS,
-    FLIPPER_MAX, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD,
+    FLIPPER_MAX, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD, FLIPPER_HOME_RAD,
     START_XY, GOAL_XY, FINISH_DIST, EPISODE_MAX_STEPS,
     W_DIRECTION, W_VELOCITY, WP_BONUS, TIME_PENALTY, FALL_PENALTY,
-    STUCK_MAX, ENERGY_W, FLIPPER_JERK_W, TILT_W, FLIPPER_COLLISION_W,
+    STUCK_MAX, ENERGY_W, FLIPPER_JERK_W, TILT_W, TILT_FREE, FLIPPER_COLLISION_W,
     ACCEL_W, ACCEL_DEADZONE, GUIDE_SPEED_SCALE, BACKWARD_W,
     FLIPPER_MOUNTS, FLIPPER_AXIS_SIGN, FLIPPER_L, FLIPPER_COLLISION_DIST,
     N_LOOKAHEAD, LOOKAHEAD_STEP, OBS_DIM, ACT_DIM,
     FLIPPER_JOINTS, CONTROL_HZ, SIM_SPEEDUP,
     USE_HEATMAP, OCTOMAP_BT_PATH, OCTOMAP_RESOLUTION, HEATMAP_RADIUS_M, HEATMAP_PIXELS,
     USE_VIRTUAL_OBSTACLE, GOAL_XY_RANGE, OBSTACLE_PENALTY,
+    TRACK_DEFS, ACTIVE_TRACKS,
 )
+# Pista ACTIVA (primera de ACTIVE_TRACKS): define el mundo que ve el env ROS.
+# El bridge (mujoco_sim_rosbridge.py) simula esta MISMA pista. Para probar otra,
+# cambia el orden de ACTIVE_TRACKS en config.py.
+_ACTIVE_TRACK = TRACK_DEFS[ACTIVE_TRACKS[0]]
 
 
 # ── Convencion "hardware" (espejo de topic_bridge_hardware.cpp) ──────────────
@@ -174,7 +180,10 @@ class _BridgeInterface(Node):
         self.obstacle_pub.publish(m)
 
     # ── Publicar accion ──────────────────────────────────────────────────────
-    def publish_action(self, v_norm: float, w_norm: float, flippers: np.ndarray):
+    def publish_action(self, v_norm: float, w_norm: float, flip_rad: np.ndarray):
+        """flip_rad = angulo objetivo (rad) de los 4 flippers, YA resuelto por el
+        gate (ver base_env.flipper_targets). El caller lo calcula; aqui solo se
+        recorta al limite por software y se convierte a convencion hardware."""
         tw = Twist()
         tw.linear.x  = float(np.clip(v_norm, -1.0, 1.0)) * V_MAX_MPS
         tw.angular.z = float(np.clip(w_norm, -1.0, 1.0)) * W_MAX_RADPS
@@ -183,13 +192,12 @@ class _BridgeInterface(Node):
         jc = JointControl()
         jc.header.stamp = self.get_clock().now().to_msg()
         jc.joint_names  = list(FLIPPER_JOINTS)
-        jc.position     = [ros_to_hw(float(np.clip(np.clip(f, -1.0, 1.0) * FLIPPER_MAX,
-                                                    FLIPPER_MIN_RAD, FLIPPER_MAX_RAD)))
-                           for f in flippers]
+        jc.position     = [ros_to_hw(float(np.clip(f, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD)))
+                           for f in flip_rad]
         self.joint_pub.publish(jc)
 
     def stop_robot(self):
-        self.publish_action(0.0, 0.0, np.zeros(4))
+        self.publish_action(0.0, 0.0, np.full(4, FLIPPER_HOME_RAD))
 
     # ── Reset de episodio (servicio del bridge) ─────────────────────────────
     def reset_sim(self, timeout: float = 5.0) -> bool:
@@ -224,8 +232,6 @@ class _BridgeInterface(Node):
 
 # ──────────────────────────── Observacion y reward ─────────────────────────
 def _build_obs(guidance: dict, fb: dict, heatmap: Optional[np.ndarray] = None) -> np.ndarray:
-    # MISMO orden y contenido que base_env.build_obs (BaseMujocoEnv/train_fast)
-    # para que un checkpoint sirva tal cual en ambos backends.
     twist = np.asarray(fb["twist"], dtype=np.float32)
     state = np.concatenate([
         guidance["obs"],                                    # 3   guia inmediata (vortex)
@@ -238,9 +244,7 @@ def _build_obs(guidance: dict, fb: dict, heatmap: Optional[np.ndarray] = None) -
     ]).astype(np.float32)
     if heatmap is None:
         return state
-    # MISMO orden que base_env.build_obs (usado por BaseMujocoEnv/train_fast):
-    # estado plano + heatmap aplanado al final -- asi el checkpoint CNN entrenado
-    # en un backend sirve tal cual en el otro.
+    
     return np.concatenate([state, heatmap.astype(np.float32).ravel()])
 
 
@@ -341,8 +345,13 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     flipper_pen = FLIPPER_JERK_W * float(np.square(current_flipper - rs.last_flip).mean())
     rs.last_flip = current_flipper.copy()
 
-    # 5. Inclinacion
-    tilt_pen = max(0.0, 0.65 - float(fb["upright"])) * TILT_W
+    # 5. Inclinacion total en cualquier eje (roll Y pitch): sqrt(gx^2+gy^2) =
+    #    sin(angulo total). Zona libre TILT_FREE (rampas/escalones); el exceso
+    #    castiga volcadura (roll) Y volteretas/wheelies (pitch) — MISMO que
+    #    base_env.compute_reward (train_fast).
+    gb = fb["grav_body"]
+    tilt = float(np.hypot(float(gb[0]), float(gb[1])))
+    tilt_pen = max(0.0, tilt - TILT_FREE) * TILT_W
 
     # 6. Auto-colision de flippers (dos flippers cuyas puntas se tocan) — se
     #    evalua sobre los angulos REALES medidos (fb["flip_qpos"]).
@@ -450,13 +459,18 @@ class BaseRosEnv:
                  goal_xy: Optional[Tuple[float, float]] = GOAL_XY,
                  control_hz: float = CONTROL_HZ,
                  max_steps: int = EPISODE_MAX_STEPS,
-                 use_platform: bool = True):
-        # use_platform=True  -> mundo NUEVO: plataforma plana (plataform.xml),
-        #   ruta directa + obstaculo virtual + zona segura, IGUAL que el
-        #   entrenamiento (BaseMujocoEnv). Es lo que ve la politica CNN actual.
-        # use_platform=False -> mundo VIEJO: A* sobre los pallets/sticks de
-        #   obstacles.json (mapa que ya no existe fisicamente). Se conserva para
-        #   correr checkpoints entrenados con ese mapa.
+                 use_platform: Optional[bool] = None):
+        # use_platform: None (default) -> se DERIVA de la pista activa
+        #   (ACTIVE_TRACKS[0]): kind="platform" -> True, kind="pallets" -> False.
+        #   Asi el env ROS ve el MISMO mundo que el bridge y el entrenamiento.
+        #   True  -> plataforma: ruta directa + obstaculo virtual + zona segura.
+        #   False -> pallets: A* sobre los pallets/sticks del JSON (mision fija).
+        if use_platform is None:
+            use_platform = (_ACTIVE_TRACK.get("kind", "platform") == "platform")
+        # nav_json y octomap de la pista activa (config ya los resolvio arriba,
+        # pero en modo pallets usamos el JSON de esa pista explicitamente).
+        if not use_platform:
+            nav_json = _ACTIVE_TRACK.get("nav_json", nav_json)
 
         self.obs_dim = OBS_DIM
         self.act_len = ACT_DIM
@@ -491,7 +505,8 @@ class BaseRosEnv:
         else:
             self.nav = GlobalNavigator(nav_json, waypoints=self.waypoints,
                                        n_lookahead=N_LOOKAHEAD, lookahead_step=LOOKAHEAD_STEP)
-        print(f"[base_env] {'Plataforma' if use_platform else 'Pallets (A*)'}: "
+        print(f"[base_env] pista={ACTIVE_TRACKS[0]} "
+              f"({'plataforma' if use_platform else 'pallets A*'}): "
               f"{tuple(self.start_xy)} -> {tuple(self.goal_xy)}  "
               f"({len(self.waypoints)} waypoints, "
               f"obstaculo={'si' if self.virtual_obstacle is not None else 'no'})")
@@ -594,8 +609,13 @@ class BaseRosEnv:
 
     # ── Step ─────────────────────────────────────────────────────────────────
     def step(self, action: np.ndarray):
-        # accion = [v, ω, flipper×4]: la politica controla base + flippers.
-        self._node.publish_action(action[0], action[1], action[2:6])
+        # accion = [v, ω, flipper×4, gate]. El gate (action[6]) decide si la
+        # politica controla los flippers o van a reposo (base_env.flipper_targets,
+        # MISMA logica que el backend directo).
+        flip_rad = flipper_targets(action)
+        if flip_rad is None:                         # CONTROL_FLIPPERS=False -> reposo
+            flip_rad = np.full(4, FLIPPER_HOME_RAD)
+        self._node.publish_action(action[0], action[1], flip_rad)
         time.sleep(self.dt / SIM_SPEEDUP)
 
         fb = self._node.feedback()

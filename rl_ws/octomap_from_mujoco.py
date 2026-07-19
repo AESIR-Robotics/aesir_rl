@@ -50,21 +50,29 @@ _DEFAULT_INFLATED_OUT = os.path.join(_HERE, "inflated_map.bt")
 # ----------------------------------------------------------------------
 # 1. Extraer geoms de colisión en coordenadas MUNDIALES desde el XML
 # ----------------------------------------------------------------------
+# Geoms que NO deben entrar al mapa estatico (el obstaculo virtual se
+# reposiciona por episodio; incluirlo congelaria una caja fantasma en el bt).
+_EXCLUDE_GEOM_NAMES = {"virtual_obstacle"}
+
+
 def load_collision_boxes(xml_path, include_names_prefix=None, exclude_planes=True):
     """
-    Devuelve una lista de dicts:
-        {"name": str, "center": (3,), "half_size": (3,), "rot": (3,3)}
-    para cada geom tipo BOX con contype != 0 (colisionable).
+    Devuelve (boxes, meshes, model, data):
+      boxes : lista de dicts {"name","center","half_size","rot"} por geom BOX
+              colisionable (contype != 0).
+      meshes: lista de dicts {"name","gid","center","rot","aabb"} por geom MESH
+              colisionable (aabb = (2,3) centro+half en frame local del geom) —
+              se rasterizan aparte por RAYCAST (rasterize_meshes_into).
+      model/data: el modelo cargado (lo reusa el raycast de meshes).
 
     include_names_prefix: si se da (ej. "fatal_"), solo toma geoms cuyo
-    nombre empiece con ese prefijo. Útil para separar obstáculos de
-    referencias visuales.
+    nombre empiece con ese prefijo.
     """
     model = mujoco.MjModel.from_xml_path(xml_path)
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)  # calcula geom_xpos / geom_xmat reales
 
-    boxes = []
+    boxes, meshes = [], []
     for gid in range(model.ngeom):
         geom_type = model.geom_type[gid]
         contype = model.geom_contype[gid]
@@ -72,37 +80,99 @@ def load_collision_boxes(xml_path, include_names_prefix=None, exclude_planes=Tru
 
         if exclude_planes and geom_type == mujoco.mjtGeom.mjGEOM_PLANE:
             continue
-        if geom_type != mujoco.mjtGeom.mjGEOM_BOX:
-            continue          # de momento solo boxes; ver nota de mesh arriba
         if contype == 0:
             continue          # geom puramente visual, no es obstáculo real
+        if name in _EXCLUDE_GEOM_NAMES:
+            continue          # dinamico por episodio, no va al mapa estatico
         if include_names_prefix and not name.startswith(include_names_prefix):
             continue
 
         center = data.geom_xpos[gid].copy()
         rot = data.geom_xmat[gid].reshape(3, 3).copy()
-        half_size = model.geom_size[gid].copy()  # (hx, hy, hz)
 
-        boxes.append({"name": name, "center": center, "half_size": half_size, "rot": rot})
+        if geom_type == mujoco.mjtGeom.mjGEOM_BOX:
+            boxes.append({"name": name, "center": center,
+                          "half_size": model.geom_size[gid].copy(), "rot": rot})
+        elif geom_type == mujoco.mjtGeom.mjGEOM_MESH:
+            aabb = model.geom_aabb[gid].reshape(2, 3).copy()   # (centro, half) local
+            meshes.append({"name": name, "gid": gid, "center": center,
+                           "rot": rot, "aabb": aabb})
+        # otros tipos (esfera/cilindro/capsula) no aparecen en las pistas
 
-    return boxes
+    return boxes, meshes, model, data
+
+
+def _mesh_world_corners(m):
+    """8 esquinas MUNDIALES del AABB local de un geom mesh."""
+    c_local, h_local = m["aabb"][0], m["aabb"][1]
+    signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)])
+    local = c_local + signs * h_local
+    return (m["rot"] @ local.T).T + m["center"]
+
+
+def rasterize_meshes_into(grid, world_min, resolution, model, data, meshes):
+    """
+    Rasteriza los geoms MESH en la MISMA grilla que los boxes, por RAYCAST:
+    para cada columna (x,y) dentro del AABB del mesh se lanza un rayo vertical
+    hacia abajo (mj_ray) y, si el primer impacto es ese mesh, se marca la
+    columna desde la base del AABB del mesh hasta la altura del impacto.
+    Captura la SUPERFICIE SUPERIOR real (lo que importa para el heatmap de
+    elevacion) de cualquier malla — rampas STL incluidas — sin point-in-mesh.
+
+    IMPORTANTE: usar un XML SIN robot (los track_*.xml), o los rayos cerca del
+    origen chocarian con el chasis.
+    """
+    if not meshes:
+        return 0
+    dims = np.array(grid.shape)
+    mesh_gids = {m["gid"] for m in meshes}
+    geomid = np.zeros(1, dtype=np.int32)
+    marked = 0
+    for m in meshes:
+        corners = _mesh_world_corners(m)
+        lo, hi = corners.min(axis=0), corners.max(axis=0)
+        z_top = hi[2] + 0.5                              # origen del rayo, sobre el mesh
+        ix0 = max(0, int((lo[0] - world_min[0]) / resolution))
+        ix1 = min(dims[0] - 1, int((hi[0] - world_min[0]) / resolution))
+        iy0 = max(0, int((lo[1] - world_min[1]) / resolution))
+        iy1 = min(dims[1] - 1, int((hi[1] - world_min[1]) / resolution))
+        vec = np.array([0.0, 0.0, -1.0])
+        for ix in range(ix0, ix1 + 1):
+            x = world_min[0] + (ix + 0.5) * resolution
+            for iy in range(iy0, iy1 + 1):
+                y = world_min[1] + (iy + 0.5) * resolution
+                pnt = np.array([x, y, z_top])
+                dist = mujoco.mj_ray(model, data, pnt, vec, None, 1, -1, geomid)
+                if dist < 0 or int(geomid[0]) not in mesh_gids:
+                    continue                              # sin impacto o pego en un box
+                hit_z = z_top - dist
+                iz0 = max(0, int((lo[2] - world_min[2]) / resolution))
+                iz1 = min(dims[2] - 1, int((hit_z - world_min[2]) / resolution))
+                if iz1 >= iz0:
+                    grid[ix, iy, iz0:iz1 + 1] = True
+                    marked += iz1 - iz0 + 1
+    return marked
 
 
 # ----------------------------------------------------------------------
 # 2. Rasterizar boxes -> grilla booleana 3D
 # ----------------------------------------------------------------------
-def rasterize_boxes(boxes, resolution, margin=0.5):
+def rasterize_boxes(boxes, resolution, margin=0.5, extra_corners=None):
     """
     Construye una grilla booleana 3D que cubre el AABB total de todos los
     boxes (+ margen), marcando True en las celdas ocupadas por algún box
     (soporta rotación arbitraria, no solo ejes alineados).
 
+    extra_corners: puntos (N,3) adicionales a cubrir por la grilla (p.ej. las
+    esquinas de los AABB de geoms mesh, que se rasterizan despues con
+    rasterize_meshes_into sobre ESTA misma grilla).
+
     Devuelve: (grid, origin, resolution)
         grid   -> np.ndarray bool, shape (nx, ny, nz)
         origin -> (3,) esquina mínima de la grilla en coordenadas mundo
     """
-    if not boxes:
-        raise ValueError("No se encontraron geoms tipo box con contype!=0 en el XML.")
+    if not boxes and extra_corners is None:
+        raise ValueError("No se encontraron geoms colisionables en el XML.")
 
     # AABB global considerando la rotación de cada box (caso general)
     mins, maxs = [], []
@@ -110,6 +180,10 @@ def rasterize_boxes(boxes, resolution, margin=0.5):
         corners = _box_world_corners(b["center"], b["half_size"], b["rot"])
         mins.append(corners.min(axis=0))
         maxs.append(corners.max(axis=0))
+    if extra_corners is not None and len(extra_corners):
+        pts = np.asarray(extra_corners, dtype=float)
+        mins.append(pts.min(axis=0))
+        maxs.append(pts.max(axis=0))
     world_min = np.min(mins, axis=0) - margin
     world_max = np.max(maxs, axis=0) + margin
 
@@ -200,6 +274,16 @@ def inflate_grid(grid, resolution, inflate_radius_m):
 # ----------------------------------------------------------------------
 # MAIN
 # ----------------------------------------------------------------------
+# XML de pista SIN robot para cada pista del registro (los rayos del raster de
+# meshes no deben chocar con el chasis). Las salidas van a rl_ws/tracks/<pista>/.
+_TRACK_XMLS = {
+    "flat":    os.path.join(_PROJECT_ROOT, "models", "plataform.xml"),
+    "steps":   os.path.join(_PROJECT_ROOT, "models", "track_steps.xml"),
+    "ramps":   os.path.join(_PROJECT_ROOT, "models", "track_ramps.xml"),
+    "pallets": os.path.join(_PROJECT_ROOT, "models", "track_pallets.xml"),
+}
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Genera un OctoMap (.bt) desde un XML de MuJoCo, sin ROS, "
@@ -207,6 +291,9 @@ def main():
     )
     parser.add_argument("xml_path", nargs="?", default=_DEFAULT_XML,
                         help="Ruta al XML de MuJoCo. Por defecto usa el modelo de este proyecto.")
+    parser.add_argument("--track", choices=sorted(_TRACK_XMLS), default=None,
+                        help="Modo pista: usa el XML de la pista (sin robot) y guarda los .bt "
+                             "en rl_ws/tracks/<pista>/ (lo que espera config.TRACK_DEFS).")
     parser.add_argument("--resolution", type=float, default=0.05,
                         help="Tamaño de voxel en metros (default 0.05 = 5cm)")
     parser.add_argument("--margin", type=float, default=0.5,
@@ -219,12 +306,24 @@ def main():
     parser.add_argument("--out-inflated", type=str, default=_DEFAULT_INFLATED_OUT)
     args = parser.parse_args()
 
+    if args.track:
+        args.xml_path = _TRACK_XMLS[args.track]
+        track_dir = os.path.join(_HERE, "tracks", args.track)
+        os.makedirs(track_dir, exist_ok=True)
+        args.out_raw = os.path.join(track_dir, "occupied_map.bt")
+        args.out_inflated = os.path.join(track_dir, "inflated_map.bt")
+
     print(f"📥 Cargando geoms de colisión desde: {args.xml_path}")
-    boxes = load_collision_boxes(args.xml_path, include_names_prefix=args.prefix)
-    print(f"   -> {len(boxes)} geoms tipo box encontrados como obstáculos")
+    boxes, meshes, model, data = load_collision_boxes(args.xml_path, include_names_prefix=args.prefix)
+    print(f"   -> {len(boxes)} boxes + {len(meshes)} meshes colisionables")
 
     print(f"🧱 Rasterizando a grilla booleana (resolución={args.resolution} m)...")
-    grid, origin = rasterize_boxes(boxes, args.resolution, margin=args.margin)
+    mesh_corners = np.concatenate([_mesh_world_corners(m) for m in meshes]) if meshes else None
+    grid, origin = rasterize_boxes(boxes, args.resolution, margin=args.margin,
+                                   extra_corners=mesh_corners)
+    if meshes:
+        n_mesh_vox = rasterize_meshes_into(grid, origin, args.resolution, model, data, meshes)
+        print(f"   -> meshes por raycast: +{n_mesh_vox} voxeles")
     print(f"   -> grilla shape={grid.shape}, ocupados={grid.sum()} voxeles")
 
     print(f"🌳 Construyendo OctoMap base...")

@@ -41,7 +41,7 @@ from rl_ws.base_training.robot_control import RampController
 from rl_ws.base_training.map_context import MapContext
 from rl_ws.global_navigator import (
     build_platform_zone, plan_platform_route, plan_platform_route_with_obstacle,
-    GlobalNavigator, quat_to_yaw, quat_to_grav_body,
+    plan_route, GlobalNavigator, quat_to_yaw, quat_to_grav_body,
 )
 
 CHECKOUT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -53,32 +53,39 @@ def _quat_upright(q) -> float:
 
 
 class BaseMujocoEnv:
-    """Un env MuJoCo directo. Misma tarea/obs/reward/accion que BaseRosEnv."""
+    """Un env MuJoCo directo. Misma tarea/obs/reward/accion que BaseRosEnv.
+
+    `track` = entrada de C.TRACK_DEFS (kind/xml/bt/spawn_z/settle_steps[/nav_json]).
+      kind="platform": mision procedural (spawn/meta random + obstaculo virtual).
+      kind="pallets":  mision clasica del JSON (A* sobre pallets, spawn/meta fijos)
+                       — la implementacion original de la pista de pallets."""
 
     def __init__(self, waypoints, model: mujoco.MjModel = None,
                  goal_xy=None, control_decimation: int = C.CONTROL_DECIMATION,
                  max_steps: int = C.EPISODE_MAX_STEPS,
                  map_ctx: Optional[MapContext] = None,
-                 platform_zone=None):
+                 platform_zone=None,
+                 track: dict = None):
         # Un modelo por env (mismo XML). VecMujocoEnv le pasa una COPIA propia
         # de MjModel a cada uno (ver VecMujocoEnv.__init__) porque el
         # obstaculo virtual fisico reescribe geom_pos/geom_size por env en
         # cada reset() -- si el MjModel viniera compartido por referencia,
         # los envs se pisarian el mismo geom entre threads.
-        self.model = model if model is not None else mujoco.MjModel.from_xml_path(C.XML_PATH)
+        self.track = track if track is not None else C.TRACK_DEFS[C.ACTIVE_TRACKS[0]]
+        self.track_name = self.track.get("name", "?")
+        self._kind = self.track.get("kind", "platform")
+        self._spawn_z = float(self.track.get("spawn_z", C.SPAWN_Z))
+        self._settle = int(self.track.get("settle_steps", C.SPAWN_SETTLE_STEPS))
+        self.model = model if model is not None else mujoco.MjModel.from_xml_path(self.track["xml"])
         self.data  = mujoco.MjData(self.model)
         self.decim = control_decimation
         self.max_steps = max_steps
         self._dt = float(self.model.opt.timestep)
 
-        # Contexto de mapa (octomap -> heatmap egocentrico), COMPARTIDO y
-        # de solo lectura entre todos los envs -- igual que `model` arriba.
-        # Si es None, build_obs regresa el vector plano de siempre (sin CNN).
         self.map_ctx = map_ctx
-        # Zona segura de la plataforma plana (cuadrado erosionado), COMPARTIDA
-        # y de solo lectura -- reemplaza la vieja zona de pallets (obsoleta,
-        # el mapa ahora es plataform.xml sin pallets fisicos).
-        self._platform_zone = platform_zone if platform_zone is not None else build_platform_zone()
+        self._platform_zone = platform_zone
+        if self._platform_zone is None and self._kind == "platform":
+            self._platform_zone = build_platform_zone()
 
         m = self.model
         aid = lambda n: mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_ACTUATOR, n)
@@ -110,18 +117,33 @@ class BaseMujocoEnv:
         self._obstacle_gid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "virtual_obstacle")
         self._obstacle_gids = {self._obstacle_gid} if self._obstacle_gid >= 0 else set()
 
-        # Mision (goal_xy inicial solo para la primera construccion -- el
-        # primer reset() ya sortea uno random y replanifica).
-        if goal_xy is None:
-            goal_xy = C.GOAL_XY or (0.0, 0.0)
-        self.goal_xy = np.array(goal_xy, dtype=np.float64)
-        # n_lookahead debe salir de config (define OBS_DIM); lookahead_step
-        # no afecta la dimension -> se usa el default de global_navigator.
-        # json_path=None -> modo plataforma plana (sin pallets/sticks del JSON
-        # obsoleto); edges_zone repele al robot del borde de la plataforma.
-        self.nav = GlobalNavigator(None, waypoints=waypoints,
-                                   n_lookahead=C.N_LOOKAHEAD,
-                                   edges_zone=self._platform_zone)
+        # Mision + navegador segun el tipo de pista.
+        if self._kind == "pallets":
+            # Pista clasica: ruta A* fija del JSON (planeada por el caller o
+            # aqui), meta = ultimo pallet; el navegador construye obstaculos
+            # (sticks/puerta) y bordes de pallets desde el JSON.
+            nav_json = self.track["nav_json"]
+            if goal_xy is None:
+                import json as _json
+                goal_xy = C.GOAL_XY or tuple(
+                    _json.load(open(nav_json))["pallets"][-1]["center_xy"])
+            self.goal_xy = np.array(goal_xy, dtype=np.float64)
+            if waypoints is None:
+                waypoints = plan_route(nav_json, C.START_XY, tuple(self.goal_xy))
+            self._fixed_waypoints = waypoints
+            self.nav = GlobalNavigator(nav_json, waypoints=waypoints,
+                                       n_lookahead=C.N_LOOKAHEAD)
+        else:
+            # Plataforma: goal_xy inicial solo para la primera construccion --
+            # el primer reset() ya sortea uno random y replanifica.
+            if goal_xy is None:
+                goal_xy = C.GOAL_XY or (0.0, 0.0)
+            self.goal_xy = np.array(goal_xy, dtype=np.float64)
+            if waypoints is None:
+                waypoints = plan_platform_route(C.START_XY, tuple(self.goal_xy))
+            self.nav = GlobalNavigator(None, waypoints=waypoints,
+                                       n_lookahead=C.N_LOOKAHEAD,
+                                       edges_zone=self._platform_zone)
 
         self._rs = W.RewardState()
         self._ep_steps = 0
@@ -184,20 +206,26 @@ class BaseMujocoEnv:
     # ── Fijar objetivos de la accion (las rampas los persiguen en apply) ────
     def _apply_action(self, action: np.ndarray):
         self.ctrl.set_base_twist(float(action[0]) * C.V_MAX_MPS, float(action[1]) * C.W_MAX_RADPS)
-        # flip_rad = np.clip(action[2:6] * C.FLIPPER_MAX, C.FLIPPER_MIN_RAD, C.FLIPPER_MAX_RAD)
-        # self.ctrl.set_flippers(flip_rad)
+        flip_rad = W.flipper_targets(action)
+        if flip_rad is not None:
+            self.ctrl.set_flippers(flip_rad)
 
     # ── Reset ────────────────────────────────────────────────────────────────
     def reset(self) -> np.ndarray:
         mujoco.mj_resetData(self.model, self.data)
         a = self._base_qadr
-        # Spawn random en [-SPAWN_XY_RANGE, SPAWN_XY_RANGE] para x,y, mirando
-        # a un yaw random (rotacion pura en Z, robot arranca nivelado).
-        spawn_xy = np.random.uniform(-C.SPAWN_XY_RANGE, C.SPAWN_XY_RANGE, 2)
-        spawn_yaw = np.random.uniform(-np.pi, np.pi)
+        if self._kind == "pallets":
+            # Pista clasica: spawn fijo en START_XY mirando al frente (como el
+            # bridge original); mision fija (ruta A* del JSON planeada en init).
+            spawn_xy = np.array(C.START_XY, dtype=float)
+            spawn_yaw = 0.0
+        else:
+            # Plataforma: spawn random en ±SPAWN_XY_RANGE con yaw random.
+            spawn_xy = np.random.uniform(-C.SPAWN_XY_RANGE, C.SPAWN_XY_RANGE, 2)
+            spawn_yaw = np.random.uniform(-np.pi, np.pi)
         self.data.qpos[a + 0] = spawn_xy[0]
         self.data.qpos[a + 1] = spawn_xy[1]
-        self.data.qpos[a + 2] = C.SPAWN_Z
+        self.data.qpos[a + 2] = self._spawn_z          # altura segun el techo de la pista
         self.data.qpos[a + 3:a + 7] = [np.cos(spawn_yaw / 2.0), 0.0, 0.0, np.sin(spawn_yaw / 2.0)]
         # Brazo en reposo (qpos + ctrl del actuador de posicion).
         for name, qadr, act in zip(C.ARM_JOINTS, self._arm_qadr, self._a_arm):
@@ -206,30 +234,34 @@ class BaseMujocoEnv:
         mujoco.mj_forward(self.model, self.data)
         self.ctrl.sync_from_data()          # rampas al estado nuevo (flippers en 0, vel 0)
         self._grav_comp_arm()
-        for _ in range(C.SPAWN_SETTLE_STEPS):
+        for _ in range(self._settle):
             self.ctrl.apply(self._dt)
             mujoco.mj_step(self.model, self.data)
 
         self._ep_steps = 0
         fb = self._feedback()
 
-        goal_xy = np.random.uniform(-C.GOAL_XY_RANGE, C.GOAL_XY_RANGE, 2)
-        self.goal_xy = np.asarray(goal_xy, dtype=np.float64)
-        if C.USE_VIRTUAL_OBSTACLE:
-            waypoints, vobs = plan_platform_route_with_obstacle(tuple(fb["xy"]), tuple(goal_xy))
-        else:
-            waypoints, vobs = plan_platform_route(tuple(fb["xy"]), tuple(goal_xy)), None
-        self.nav.replan(waypoints, obstacles=[vobs] if vobs is not None else [])
-
-        if self._obstacle_gid >= 0:
-            if vobs is not None:
-                self.model.geom_pos[self._obstacle_gid] = [
-                    vobs.x, vobs.y, C.PLATFORM_SURFACE_Z + C.VIRTUAL_OBSTACLE_HEIGHT_HALF]
-                self.model.geom_size[self._obstacle_gid] = [
-                    vobs.hx, vobs.hy, C.VIRTUAL_OBSTACLE_HEIGHT_HALF]
+        if self._kind == "platform":
+            # Nueva mision cada episodio: goal random + ruta que RODEA el
+            # obstaculo virtual (fisico, reposicionado abajo).
+            goal_xy = np.random.uniform(-C.GOAL_XY_RANGE, C.GOAL_XY_RANGE, 2)
+            self.goal_xy = np.asarray(goal_xy, dtype=np.float64)
+            if C.USE_VIRTUAL_OBSTACLE:
+                waypoints, vobs = plan_platform_route_with_obstacle(tuple(fb["xy"]), tuple(goal_xy))
             else:
-                self.model.geom_pos[self._obstacle_gid, 2] = -5.0   # fuera de juego
-            mujoco.mj_forward(self.model, self.data)
+                waypoints, vobs = plan_platform_route(tuple(fb["xy"]), tuple(goal_xy)), None
+            self.nav.replan(waypoints, obstacles=[vobs] if vobs is not None else [])
+
+            if self._obstacle_gid >= 0:
+                if vobs is not None:
+                    self.model.geom_pos[self._obstacle_gid] = [
+                        vobs.x, vobs.y, C.PLATFORM_SURFACE_Z + C.VIRTUAL_OBSTACLE_HEIGHT_HALF]
+                    self.model.geom_size[self._obstacle_gid] = [
+                        vobs.hx, vobs.hy, C.VIRTUAL_OBSTACLE_HEIGHT_HALF]
+                else:
+                    self.model.geom_pos[self._obstacle_gid, 2] = -5.0   # fuera de juego
+                mujoco.mj_forward(self.model, self.data)
+        # (pallets: mision fija, nada que replanear ni reposicionar)
 
         self.nav.reset(fb["xy"])
         guidance = self.nav.step(fb["xy"], fb["yaw"])
@@ -320,7 +352,8 @@ class BaseMujocoEnv:
             self._save_heatmap_debug(heatmap, fb)
         obs = W.build_obs(guidance, fb, heatmap)
         info = {"wp": guidance["wp"], "reached": reached, "reason": reason,
-                "dist_goal": float(np.linalg.norm(fb["xy"] - self.goal_xy))}
+                "dist_goal": float(np.linalg.norm(fb["xy"] - self.goal_xy)),
+                "track": self.track_name}
         return obs, reward, done, info
 
 
@@ -332,47 +365,51 @@ class VecMujocoEnv:
     buffer de PPO."""
 
     def __init__(self, n_envs: int = C.N_ENVS, control_decimation: int = C.CONTROL_DECIMATION,
-                 max_steps: int = C.EPISODE_MAX_STEPS, verbose: bool = True):
+                 max_steps: int = C.EPISODE_MAX_STEPS, verbose: bool = True,
+                 tracks: Optional[List[str]] = None):
+        """tracks: nombres de C.TRACK_DEFS a entrenar (default C.ACTIVE_TRACKS).
+        Con VARIAS pistas se reparten entre los envs round-robin: cada env vive
+        toda la corrida en SU pista (cargar el XML es caro; episodios nuevos ya
+        randomizan spawn/meta/obstaculo dentro de la pista)."""
         self.n = n_envs
         self.obs_dim = C.OBS_DIM
         self.act_dim = C.ACT_DIM
         self.verbose = verbose
+        self.tracks = list(tracks) if tracks else list(C.ACTIVE_TRACKS)
+        for t in self.tracks:
+            if t not in C.TRACK_DEFS:
+                raise ValueError(f"pista desconocida '{t}' (validas: {sorted(C.TRACK_DEFS)})")
 
-        # Zona segura de la plataforma plana (cuadrado erosionado por
-        # ROBOT_RADIUS) -- geometria estatica del mapa, se construye UNA vez y
-        # se comparte (read-only) entre todos los envs.
-        platform_zone = build_platform_zone()
-        goal = C.GOAL_XY or (0.0, 0.0)
-        waypoints = plan_platform_route(C.START_XY, goal)
+        # Recursos POR PISTA, compartidos (read-only) entre los envs de esa
+        # pista: MjModel base (cada env recibe su copia), MapContext (heatmap)
+        # y zona segura de plataforma.
+        self._track_res: Dict[str, dict] = {}
+        for t in self.tracks:
+            td = dict(C.TRACK_DEFS[t]); td["name"] = t
+            res = dict(td=td)
+            res["base_model"] = mujoco.MjModel.from_xml_path(td["xml"])
+            res["map_ctx"] = None
+            if getattr(C, "USE_HEATMAP", False):
+                res["map_ctx"] = MapContext(
+                    bt_path=td["bt"], resolution=C.OCTOMAP_RESOLUTION,
+                    radius_m=C.HEATMAP_RADIUS_M, patch_pixels=C.HEATMAP_PIXELS)
+            res["platform_zone"] = build_platform_zone() if td["kind"] == "platform" else None
+            self._track_res[t] = res
+
+        env_tracks = [self.tracks[i % len(self.tracks)] for i in range(n_envs)]
         if verbose:
-            print(f"[vec] Ruta inicial: {C.START_XY} -> {tuple(goal)}  ({len(waypoints)} waypoints)  "
-                  f"| n_envs={n_envs} | spawn/meta random cada episodio en "
-                  f"±{C.SPAWN_XY_RANGE:.0f}m / ±{C.GOAL_XY_RANGE:.0f}m")
+            counts = {t: env_tracks.count(t) for t in self.tracks}
+            print(f"[vec] n_envs={n_envs} | pistas={counts} | "
+                  f"flippers={'ON' if C.CONTROL_FLIPPERS else 'OFF'}")
 
-        # Contexto de mapa (heatmap por altura real) -- UNA sola vez, compartido
-        # y de solo lectura entre todos los envs (a diferencia del MjModel de
-        # abajo, este SI sigue siendo un unico objeto compartido: el heatmap
-        # estatico no se reescribe por env). Se activa si config.py tiene
-        # USE_HEATMAP=True. build_obs ya
-        # se encarga de aplanarlo dentro del mismo vector de obs -- por eso
-        # este vec-env NO necesita saber nada especial sobre el heatmap, sigue
-        # tratando obs como un array (N, obs_dim) normal.
-        self.map_ctx = None
-        if getattr(C, "USE_HEATMAP", False):
-            self.map_ctx = MapContext(
-                bt_path=C.OCTOMAP_BT_PATH,
-                resolution=C.OCTOMAP_RESOLUTION,
-                radius_m=C.HEATMAP_RADIUS_M,
-                patch_pixels=C.HEATMAP_PIXELS,
-            )
-
-        base_model = mujoco.MjModel.from_xml_path(C.XML_PATH)
-        models = [base_model] + [copy.deepcopy(base_model) for _ in range(n_envs - 1)]
-        self.envs = [BaseMujocoEnv(waypoints, model=models[i],
-                                   goal_xy=goal, control_decimation=control_decimation,
-                                   max_steps=max_steps, map_ctx=self.map_ctx,
-                                   platform_zone=platform_zone)
-                    for i in range(n_envs)]
+        self.envs = []
+        for i, t in enumerate(env_tracks):
+            res = self._track_res[t]
+            self.envs.append(BaseMujocoEnv(
+                None, model=copy.deepcopy(res["base_model"]),
+                control_decimation=control_decimation, max_steps=max_steps,
+                map_ctx=res["map_ctx"], platform_zone=res["platform_zone"],
+                track=res["td"]))
         self._pool = ThreadPoolExecutor(max_workers=n_envs)
         self._ep_return = np.zeros(n_envs, dtype=np.float64)
         self._ep_history: List[float] = []
@@ -402,7 +439,7 @@ class VecMujocoEnv:
                     self._n_reached += 1
                 if self.verbose and inf.get("reason"):
                     tag = "🏁" if inf.get("reached") else "🛑"
-                    print(f"[vec] env{i} {tag} {inf['reason']}  "
+                    print(f"[vec] env{i}[{inf.get('track','?')}] {tag} {inf['reason']}  "
                           f"ret={self._ep_return[i]:.1f}  wp={inf.get('wp')}")
                 self._ep_return[i] = 0.0
                 o = self.envs[i].reset()      # auto-reset

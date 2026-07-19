@@ -33,17 +33,54 @@ import numpy as np
 _HERE    = os.path.dirname(os.path.abspath(__file__))            # .../rl_ws/base_training
 ROOT     = os.path.dirname(os.path.dirname(_HERE))               # .../aesir_rl
 RL_WS    = os.path.abspath(os.path.join(_HERE, ".."))            # .../rl_ws
-NAV_JSON = os.path.join(RL_WS, "obstacles.json")
 _MODELS  = os.path.join(ROOT, "models")
-_FULL    = os.path.join(_MODELS, "aesir_complete.xml")
-_ROBOT   = os.path.join(_MODELS, "aesir_mujoco_robot.xml")
-XML_PATH = _FULL if os.path.exists(_FULL) else _ROBOT
 CHECKPOINT_DIR = Path(ROOT) / "checkpoints_base"
 
-# ── Parametros Heat_Map ──────────────────────────────────────
+# ── PISTAS (registro multi-pista) ────────────────────────────────────────────
+# Cada pista define: su XML completo (robot + terreno), sus octomaps (.bt, para
+# el heatmap) en rl_ws/tracks/<pista>/, la altura de spawn (el terreno cambia
+# de techo) y su tipo de navegacion:
+#   kind="platform" -> mision procedural (spawn/meta random, ruta directa +
+#                      obstaculo virtual, zona segura = cuadrado erosionado)
+#   kind="pallets"  -> mision clasica del JSON (A* sobre pallets/sticks,
+#                      spawn/meta fijos) — la implementacion original, intacta.
+# Los .bt se regeneran con: python3 rl_ws/octomap_from_mujoco.py --track <pista>
+TRACKS_DIR = os.path.join(RL_WS, "tracks")
+TRACK_DEFS = {
+    "flat": dict(
+        kind="platform",
+        xml=os.path.join(_MODELS, "aesir_complete_flat.xml"),
+        bt=os.path.join(TRACKS_DIR, "flat", "occupied_map.bt"),
+        spawn_z=0.20, settle_steps=50),          # techo terreno z=0.12
+    "steps": dict(
+        kind="platform",
+        xml=os.path.join(_MODELS, "aesir_complete_steps.xml"),
+        bt=os.path.join(TRACKS_DIR, "steps", "occupied_map.bt"),
+        spawn_z=0.55, settle_steps=150),         # escalones hasta z=0.42
+    "ramps": dict(
+        kind="platform",
+        xml=os.path.join(_MODELS, "aesir_complete_ramps.xml"),
+        bt=os.path.join(TRACKS_DIR, "ramps", "occupied_map.bt"),
+        spawn_z=0.45, settle_steps=150),         # rampas hasta z=0.28
+    "pallets": dict(
+        kind="pallets",
+        xml=os.path.join(_MODELS, "aesir_complete_pallets.xml"),
+        bt=os.path.join(TRACKS_DIR, "pallets", "occupied_map.bt"),
+        nav_json=os.path.join(TRACKS_DIR, "pallets", "obstacles.json"),
+        spawn_z=0.20, settle_steps=50),          # pista original de pallets
+}
+# Pistas ACTIVAS para entrenar: una o varias — VecMujocoEnv las reparte entre
+# los envs (round-robin). Ej: ["flat"], ["steps"], ["flat","steps","ramps"].
+ACTIVE_TRACKS = ["flat"]
 
+# Compatibilidad: el "mundo por default" (bridge ROS, scripts single-track) es
+# la PRIMERA pista activa. Para probar otra pista por ROS, cambia el orden.
+XML_PATH        = TRACK_DEFS[ACTIVE_TRACKS[0]]["xml"]
+OCTOMAP_BT_PATH = TRACK_DEFS[ACTIVE_TRACKS[0]]["bt"]
+NAV_JSON        = TRACK_DEFS["pallets"]["nav_json"]   # mapa de navegacion pallets
+
+# ── Parametros Heat_Map ──────────────────────────────────────
 USE_HEATMAP = True
-OCTOMAP_BT_PATH = os.path.join(RL_WS, "occupied_map.bt")
 OCTOMAP_RESOLUTION = 0.05
 HEATMAP_RADIUS_M = 1.0
 HEATMAP_PIXELS = 64
@@ -83,6 +120,10 @@ FLIPPER_MAX = 3.1416   # rad a flip = 1
 # Limite de recorrido de los flippers (por software)
 FLIPPER_MIN_RAD = -1.3
 FLIPPER_MAX_RAD = 3.14159
+# La politica CONTROLA los flippers (fase 2: terreno). False = fase 1 (solo
+# base; action[2:6] se ignora, los flippers quedan en reposo). El checkpoint es
+# compatible en ambos sentidos: ACT_DIM=6 siempre incluye los flippers.
+CONTROL_FLIPPERS = True
 
 # ── Mision (frame de aesir_complete.xml == frame de obstacles.json) ──────────
 START_XY: Tuple[float, float] = (-1.5, 3.5)
@@ -123,7 +164,11 @@ OBSTACLE_PENALTY = 1.0
 STUCK_MAX      = 1.0
 ENERGY_W       = 1e-8
 FLIPPER_JERK_W = 1.0
+# Inclinacion TOTAL en cualquier eje (roll Y pitch): se mide como la magnitud
+# horizontal de la gravedad en el cuerpo, sqrt(gx^2+gy^2) = sin(angulo total de
+# inclinacion). La inclinacio extrema la sigue cortando terminated() (upright < 0.20 ~= 78 grados).
 TILT_W         = 5.0
+TILT_FREE      = 0.70   # sin(~44°): inclinacion total libre antes de castigar
 FLIPPER_COLLISION_W = 50.0
 # Castigo por aceleraciones fuertes del chasis (cuidar la integridad del robot
 # en terreno dificil).
@@ -157,7 +202,16 @@ LOOKAHEAD_STEP = 0.25   # avance (m) del muestreo de la ruta por punto
 # Nota: se quito v_lat (diferencial no strafea) y upright(1) se cambio por la
 # gravedad en cuerpo(3) para captar pitch/roll en pendientes.
 OBS_DIM = 19 + 3*N_LOOKAHEAD + HEATMAP_PIXELS**2
-ACT_DIM = 6    # v, ω, flipper×4
+# Accion (7): v, ω, flipper×4, gate.
+#   [0] v      linear.x  (escala V_MAX)
+#   [1] ω      angular.z (escala W_MAX)
+#   [2:6] flipper×4  angulo objetivo de cada flipper (escala FLIPPER_MAX)
+#   [6] gate   >=0 -> la politica CONTROLA los flippers (usa [2:6]);
+#              <0  -> flippers a la pose de REPOSO (FLIPPER_HOME_RAD), [2:6] se
+#              ignora. Asi la politica "apaga" los flippers en plano (no estorban,
+#              como fase 1) y solo los "enciende" para trepar en terreno.
+ACT_DIM = 7
+FLIPPER_HOME_RAD = 0.0   # pose de reposo de los flippers cuando el gate esta OFF
 
 # ── Navegacion global: planeacion A* sobre la zona segura de pallets ─────────
 ROBOT_RADIUS         = 0.30   # radio con el que se erosiona la zona transitable

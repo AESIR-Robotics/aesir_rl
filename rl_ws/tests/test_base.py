@@ -161,7 +161,7 @@ class LiveTrajectoryPlot:
                                       lw=0.8, zorder=1, label="Safe zone"))
             ax.set_xlim(-he - 1, he + 1); ax.set_ylim(-he - 1, he + 1)
         else:
-            from plot_path_vortex import draw_map          # pista de pallets (fondo)
+            from rl_ws.utils.plot_path_vortex import draw_map          # pista de pallets (fondo)
             draw_map(ax, map_data)
 
         # ── Escena por episodio (se rellena en set_scene, cambia cada reset) ─
@@ -294,8 +294,8 @@ def main():
             while not done:
                 action = pick_action(policy, obs, device, args.stochastic)
 
-                if len(action) > 2:
-                    action[2:] = 0.0
+                #if len(action) > 2:
+                #    action[2:] = 0.0
                 obs, rew, done, info = env.step(action)
                 ep_reward += rew
                 steps += 1

@@ -57,7 +57,11 @@ if _ROOT not in sys.path:
 import rl_ws.base_training.config as C
 from rl_ws.base_training.robot_control import ramp_toward_position, ramp_toward_velocity
 
-XML_PATH = C.XML_PATH
+# PISTA ACTIVA: el bridge simula la PRIMERA pista de config.ACTIVE_TRACKS
+# (mismo mundo, spawn y octomap que usaria el entrenamiento en esa pista).
+# Para probar otra pista por ROS, cambia el orden de ACTIVE_TRACKS en config.
+_TRACK = C.TRACK_DEFS[C.ACTIVE_TRACKS[0]]
+XML_PATH = C.XML_PATH                     # == _TRACK["xml"]
 
 # Nombre de joint ROS -> actuador MuJoCo.
 JOINT_TO_ACTUATOR = {
@@ -71,8 +75,12 @@ JOINT_TO_ACTUATOR = {
 PHYSICS_HZ  = C.PHYSICS_HZ    # debe igualar update_rate en ros2_controllers.yaml
 SIM_SPEEDUP = C.SIM_SPEEDUP   # mismo valor que duerme BaseRosEnv (dt/SIM_SPEEDUP)
 
-# Spawn del chasis para el reset de episodio RL (mision de config).
-SPAWN_POSE = (C.START_XY[0], C.START_XY[1], C.SPAWN_Z, C.SPAWN_YAW)
+# Spawn del chasis para el reset de episodio RL: XY de la mision de config,
+# Z segun el TECHO del terreno de la pista activa (steps/ramps son mas altos)
+# — mismo spawn_z/settle que usa BaseMujocoEnv al entrenar en esa pista.
+SPAWN_POSE = (C.START_XY[0], C.START_XY[1],
+              float(_TRACK.get("spawn_z", C.SPAWN_Z)), C.SPAWN_YAW)
+SPAWN_SETTLE_STEPS = int(_TRACK.get("settle_steps", C.SPAWN_SETTLE_STEPS))
 
 # ── Limites de movimiento tipo AVR446 (rampa trapezoidal), en radianes ──────
 # Brazo desde config.ARM_JOINT_LIMITS; flippers con los MISMOS limites que el
@@ -197,7 +205,8 @@ class MujocoHardwareBridge(Node):
 
         self._timer = self.create_timer(1.0 / PHYSICS_HZ, self._physics_step)
         self.get_logger().info(
-            f"MuJoCo hardware bridge activo. XML={XML_PATH}  substeps={self._substeps}"
+            f"MuJoCo hardware bridge activo. pista={C.ACTIVE_TRACKS[0]}  "
+            f"XML={XML_PATH}  spawn_z={SPAWN_POSE[2]}  substeps={self._substeps}"
         )
 
     def _obstacle_cb(self, msg: Float32MultiArray) -> None:
@@ -272,7 +281,7 @@ class MujocoHardwareBridge(Node):
                 self.data.ctrl[aid] = 0.0
 
             mujoco.mj_forward(self.model, self.data)
-            for _ in range(C.SPAWN_SETTLE_STEPS):
+            for _ in range(SPAWN_SETTLE_STEPS):
                 self.data.qfrc_applied[self._arm_dof_adr] = self.data.qfrc_bias[self._arm_dof_adr]
                 mujoco.mj_step(self.model, self.data)
 

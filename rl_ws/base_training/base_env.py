@@ -38,14 +38,31 @@ import numpy as np
 from .config import (
     NAV_JSON,
     V_MAX_MPS, W_MAX_RADPS, V_REF_MPS, W_REF_RADPS,
-    FLIPPER_MAX, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD,
+    FLIPPER_MAX, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD, CONTROL_FLIPPERS, FLIPPER_HOME_RAD,
     START_XY, GOAL_XY, SPAWN_Z, FINISH_DIST, EPISODE_MAX_STEPS,
     W_DIRECTION, W_VELOCITY, WP_BONUS, TIME_PENALTY, FALL_PENALTY,
-    STUCK_MAX, ENERGY_W, FLIPPER_JERK_W, TILT_W, FLIPPER_COLLISION_W,
+    STUCK_MAX, ENERGY_W, FLIPPER_JERK_W, TILT_W, TILT_FREE, FLIPPER_COLLISION_W,
     ACCEL_W, ACCEL_DEADZONE, GUIDE_SPEED_SCALE, BACKWARD_W,
     FLIPPER_MOUNTS, FLIPPER_AXIS_SIGN, FLIPPER_L, FLIPPER_COLLISION_DIST,
     N_LOOKAHEAD, OBS_DIM, ACT_DIM, OBSTACLE_PENALTY,
 )
+
+
+# ── Gate de flippers (compartido por los dos backends) ───────────────────────
+def flipper_targets(action) -> Optional[np.ndarray]:
+    """Angulo objetivo (rad) de los 4 flippers segun la accion, o None si NO se
+    deben comandar (quedan como esten). Regla del gate action[6]:
+      - CONTROL_FLIPPERS=False -> None (fase 1: flippers en reposo, no controlados).
+      - gate >= 0 -> la politica los controla: action[2:6] escalado y recortado.
+      - gate <  0 -> flippers a la pose de REPOSO (FLIPPER_HOME_RAD).
+    Asi la politica APAGA los flippers en plano (no estorban) y los ENCIENDE para
+    trepar en terreno, con una sola dimension facil de aprender."""
+    if not CONTROL_FLIPPERS:
+        return None
+    if float(action[6]) >= 0.0:
+        return np.clip(np.asarray(action[2:6], dtype=np.float32) * FLIPPER_MAX,
+                       FLIPPER_MIN_RAD, FLIPPER_MAX_RAD)
+    return np.full(4, FLIPPER_HOME_RAD, dtype=np.float32)
 
 
 # ── Observacion ──────────────────────────────────────────────────────────────
@@ -165,8 +182,14 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     flipper_pen = FLIPPER_JERK_W * float(np.square(current_flipper - rs.last_flip).mean())
     rs.last_flip = current_flipper.copy()
 
-    # 5. Inclinacion
-    tilt_pen = max(0.0, 0.65 - float(fb["upright"])) * TILT_W
+    # 5. Inclinacion total en cualquier eje (roll Y pitch): magnitud horizontal
+    #    de la gravedad en el cuerpo = sqrt(gx^2+gy^2) = sin(angulo de inclinacion
+    #    total). Zona libre TILT_FREE para subir rampas/escalones (pitch moderado
+    #    OK); el exceso se castiga -> desalienta volcadura (roll) Y volteretas/
+    #    wheelies (pitch) por igual. terminated() corta la inclinacion extrema.
+    gb = fb["grav_body"]
+    tilt = float(np.hypot(float(gb[0]), float(gb[1])))
+    tilt_pen = max(0.0, tilt - TILT_FREE) * TILT_W
 
     # 6. Auto-colision de flippers (angulos REALES medidos)
     flipper_collision_pen = flipper_collision_penalty(fb["flip_qpos"])

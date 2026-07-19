@@ -1,0 +1,6 @@
+<mujoco model="track_pallets">
+  <!-- GENERADO: pista de pallets SIN robot (para generar su octomap). -->
+  <compiler angle="radian" autolimits="true" meshdir=""/>
+  <include file="aesir_pallets.xml"/>
+  <include file="aesir_puerta.xml"/>
+</mujoco>
