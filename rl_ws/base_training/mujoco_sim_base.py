@@ -281,6 +281,21 @@ class BaseMujocoEnv:
             return None
         return self.map_ctx.get_heatmap(robot_xy=fb["xy"], robot_z=fb["z"], robot_yaw=fb["yaw"])
 
+    def _get_flipper_edge(self, fb: dict):
+        """Borde real (escalon) en la direccion de extension de cada flipper
+        -- ver base_env.flipper_terrain_bonus. Al retroceder (fb["twist"][0]
+        < 0) delanteros y traseros intercambian su lado de escaneo, ver
+        base_env.flipper_travel_dir. None si no hay map_ctx."""
+        if self.map_ctx is None:
+            return None
+        travel_dir = W.flipper_travel_dir(fb)
+        found, d, h, climbable = self.map_ctx.get_flipper_climb_edges(
+            robot_xy=fb["xy"], robot_yaw=fb["yaw"],
+            mounts_xy=C.FLIPPER_MOUNTS[:, :2], axis_sign=C.FLIPPER_AXIS_SIGN * travel_dir,
+            look_ahead_m=C.FLIPPER_L, min_step_m=C.FLIPPER_TERRAIN_MIN_STEP_M,
+            max_climb_m=C.FLIPPER_TERRAIN_MAX_CLIMB_M, n_samples=C.FLIPPER_TERRAIN_SAMPLES)
+        return dict(found=found, d=d, h=h, climbable=climbable)
+
     def _close_heatmap_video(self):
         """Finaliza el writer de video si está abierto."""
         if self._heatmap_video_writer is not None:
@@ -344,6 +359,7 @@ class BaseMujocoEnv:
 
         self._ep_steps += 1
         fb = self._feedback()
+        fb["flipper_edge"] = self._get_flipper_edge(fb)
         guidance = self.nav.step(fb["xy"], fb["yaw"])
         reward = W.compute_reward(fb, guidance, a_exec, self._rs)
         done, reached, reason = W.terminated(fb, self.goal_xy, self._ep_steps, self.max_steps)

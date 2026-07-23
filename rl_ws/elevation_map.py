@@ -329,6 +329,87 @@ def get_circular_height_heatmap(global_elevation, origin_xy, resolution,
 
 
 # ----------------------------------------------------------------------
+# 5. Desnivel local por flipper (geometria PURA -- el juicio de "es
+#    trepable" o no vive en la capa de tarea/reward, no aqui)
+# ----------------------------------------------------------------------
+def sample_elevation_at(global_elevation, origin_xy, resolution, z_min, points_xy):
+    """Altura REAL (metros) en cada punto mundo de `points_xy` (N,2), por
+    vecino-mas-cercano sobre la grilla global. NaN (sin dato) -> z_min,
+    MISMA convencion que get_circular_height_heatmap (sin dato = piso)."""
+    pts = np.asarray(points_xy, dtype=np.float64)
+    ix = np.clip(np.round((pts[:, 0] - origin_xy[0]) / resolution).astype(int),
+                0, global_elevation.shape[0] - 1)
+    iy = np.clip(np.round((pts[:, 1] - origin_xy[1]) / resolution).astype(int),
+                0, global_elevation.shape[1] - 1)
+    h = global_elevation[ix, iy]
+    return np.where(np.isnan(h), z_min, h)
+
+
+def flipper_climb_edge(global_elevation, origin_xy, resolution, z_min,
+                       robot_xy, robot_yaw, mounts_xy, axis_sign,
+                       look_ahead_m, min_step_m, max_climb_m, n_samples=8):
+    """Busca el PRIMER borde real (escalon) en la direccion de extension de
+    cada flipper -- SOLO geometria + dos umbrales de tarea (min/max, ver
+    config.FLIPPER_TERRAIN_MIN_STEP_M / MAX_CLIMB_M):
+
+    Escanea `n_samples` puntos a distancias crecientes (hasta look_ahead_m)
+    desde el punto de montaje, en la MISMA direccion que flipper_terrain_delta
+    (adelante para delanteros, atras para traseros). Para cada flipper,
+    devuelve el PRIMER punto donde el desnivel sobre el mount cruza
+    min_step_m (filtra ruido del piso -- micro-irregularidades que no son un
+    escalon de verdad):
+        found     (4,) bool  -- se encontro un borde en el rango escaneado
+        d_edge    (4,) float -- distancia (m) del mount al borde (nan si no)
+        h_edge    (4,) float -- desnivel (m) del borde SOBRE el mount (nan si no)
+        climbable (4,) bool  -- found AND h_edge <= max_climb_m (no es una
+                                pared/obstaculo imposible de trepar)
+
+    mounts_xy/axis_sign: ver flipper_terrain_delta (misma convencion)."""
+    c, s = np.cos(robot_yaw), np.sin(robot_yaw)
+    R = np.array([[c, -s], [s, c]])   # local (x=adelante,y=izq) -> mundo
+
+    mounts_world = robot_xy + (R @ np.asarray(mounts_xy, dtype=np.float64).T).T
+    look_local = np.stack([np.sign(axis_sign), np.zeros(4)], axis=1)
+    look_world = (R @ look_local.T).T
+    h0 = sample_elevation_at(global_elevation, origin_xy, resolution, z_min, mounts_world)
+
+    found = np.zeros(4, dtype=bool)
+    d_edge = np.full(4, np.nan, dtype=np.float32)
+    h_edge = np.full(4, np.nan, dtype=np.float32)
+    for k in range(1, n_samples + 1):
+        d = look_ahead_m * k / n_samples
+        pts = mounts_world + look_world * d
+        h = sample_elevation_at(global_elevation, origin_xy, resolution, z_min, pts)
+        dh = (h - h0).astype(np.float32)
+        newly = (~found) & (dh >= min_step_m)
+        d_edge[newly] = d
+        h_edge[newly] = dh[newly]
+        found |= newly
+
+    climbable = found & (h_edge <= max_climb_m)
+    return found, d_edge, h_edge, climbable
+
+
+def flipper_terrain_delta(global_elevation, origin_xy, resolution, z_min,
+                          robot_xy, robot_yaw, mounts_xy, axis_sign, look_ahead_m):
+    """Desnivel REAL (metros, con signo) a `look_ahead_m` fijo -- version mas
+    simple, un solo punto de muestreo (SIN buscar el borde real). Se conserva
+    por compatibilidad; para el reward de flippers usar flipper_climb_edge,
+    que localiza el borde real en vez de asumir una distancia fija."""
+    c, s = np.cos(robot_yaw), np.sin(robot_yaw)
+    R = np.array([[c, -s], [s, c]])   # local (x=adelante,y=izq) -> mundo
+
+    mounts_world = robot_xy + (R @ np.asarray(mounts_xy, dtype=np.float64).T).T
+    look_local = np.stack([np.sign(axis_sign), np.zeros(4)], axis=1)
+    look_world = (R @ look_local.T).T
+    far_world = mounts_world + look_world * look_ahead_m
+
+    h0 = sample_elevation_at(global_elevation, origin_xy, resolution, z_min, mounts_world)
+    h1 = sample_elevation_at(global_elevation, origin_xy, resolution, z_min, far_world)
+    return (h1 - h0).astype(np.float32)
+
+
+# ----------------------------------------------------------------------
 # MODO STANDALONE — correr este script directo para ver el mapa de
 # elevación sin necesitar el entorno de PPO todavía.
 #

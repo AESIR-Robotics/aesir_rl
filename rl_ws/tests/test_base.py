@@ -81,6 +81,7 @@ _TERM_LABELS = [
     ("stuck",             "Castigo por atascarse"),
     ("energy",            "Castigo de energia"),
     ("flipper_jerk",      "Castigo jerk de flippers"),
+    ("flipper_terrain",   "Bonus flipper cerca de trepable"),
     ("tilt",              "Castigo por inclinacion"),
     ("flipper_collision", "Castigo auto-colision flippers"),
     ("accel",             "Castigo aceleraciones fuertes"),

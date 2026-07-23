@@ -42,6 +42,7 @@ from .config import (
     START_XY, GOAL_XY, SPAWN_Z, FINISH_DIST, EPISODE_MAX_STEPS,
     W_DIRECTION, W_VELOCITY, WP_BONUS, TIME_PENALTY, FALL_PENALTY,
     STUCK_MAX, STUCK_ANGULAR_THRESH_RAD, ENERGY_W, FLIPPER_JERK_W, TILT_W, TILT_FREE, FLIPPER_COLLISION_W,
+    FLIPPER_TERRAIN_W,
     ACCEL_W, ACCEL_DEADZONE, GUIDE_SPEED_SCALE, BACKWARD_W,
     FLIPPER_MOUNTS, FLIPPER_AXIS_SIGN, FLIPPER_L, FLIPPER_COLLISION_DIST,
     N_LOOKAHEAD, OBS_DIM, ACT_DIM, OBSTACLE_PENALTY,
@@ -147,6 +148,51 @@ def flipper_collision_penalty(flip_qpos: np.ndarray) -> float:
     return FLIPPER_COLLISION_W * pen
 
 
+def flipper_travel_dir(fb: dict) -> float:
+    """Signo de la direccion de avance en frame local: +1 adelante, -1 en
+    reversa. Misma convencion que backward_pen (v_fwd < 0 = retrocediendo,
+    ver compute_reward). Al retroceder, delanteros y traseros intercambian
+    su rol de escaneo/alcance -- ver flipper_terrain_bonus y
+    mujoco_sim_base._get_flipper_edge / base_ros_env._get_flipper_edge, que
+    deben usar este MISMO signo para el axis_sign efectivo del escaneo."""
+    return 1.0 if float(fb["twist"][0]) >= 0.0 else -1.0
+
+
+def flipper_terrain_bonus(fb: dict, flip_qpos: np.ndarray) -> float:
+    """Bonus por tener la PUNTA del flipper por delante Y arriba del borde
+    real mas cercano (ver elevation_map.flipper_climb_edge / map_context.
+    get_flipper_climb_edges). Criterio geometrico, no un angulo "correcto"
+    inventado: dado un borde a (d_edge, h_edge) del mount (medido por
+    flipper_climb_edge), la punta lo libra si su alcance igual o supera
+    d_edge Y su altura sobre el mount iguala o supera h_edge -- asi no
+    importa si el obstaculo esta a 15cm o 30cm, el mismo criterio pide MAS o
+    MENOS angulo segun corresponda.
+
+    Punta relativa al mount (pivote sobre eje y, ver flipper_tips):
+        offset_x = axis_sign * FLIPPER_L * sin(theta)
+        height   = FLIPPER_L * cos(theta)   -- altura sobre el mount
+    d_edge/h_edge se miden a lo largo de la direccion de ESCANEO, que es
+    axis_sign * travel_dir (ver _get_flipper_edge en ambos backends: cuando
+    el robot retrocede, delanteros y traseros escanean hacia el lado
+    contrario). El alcance a lo largo de esa MISMA direccion es:
+        reach = offset_x * (axis_sign * travel_dir) = travel_dir * FLIPPER_L * sin(theta)
+    (axis_sign**2 == 1 lo cancela). Con travel_dir=+1 (adelante) esto se
+    reduce exactamente a la formula original ya verificada.
+
+    0.0 si no hay heightmap disponible (fb["flipper_edge"] es None) o si el
+    flipper no tiene un borde trepable cerca (climbable=False, terreno
+    plano) -- no hay bonus por extender sin motivo."""
+    edge = fb.get("flipper_edge")
+    if edge is None:
+        return 0.0
+    theta = np.asarray(flip_qpos, dtype=np.float64)
+    travel_dir = flipper_travel_dir(fb)
+    reach = travel_dir * FLIPPER_L * np.sin(theta)
+    height = FLIPPER_L * np.cos(theta)
+    clear = edge["climbable"] & (reach >= edge["d"]) & (height >= edge["h"])
+    return FLIPPER_TERRAIN_W * float(np.mean(clear.astype(np.float32)))
+
+
 # ── Reward ───────────────────────────────────────────────────────────────────
 def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState) -> float:
     """Caida/piso letal o choque con el obstaculo (retorno temprano, termina el
@@ -216,11 +262,15 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     penalties = (penalty_stuck + action_cost + flipper_pen + tilt_pen
                  + flipper_collision_pen + accel_pen)
 
+    # 7b. Bonus por extender flippers cerca de terreno trepable (ver docstring
+    #     de flipper_terrain_bonus). Se suma siempre, no es una "penalizacion".
+    terrain_bonus = flipper_terrain_bonus(fb, fb["flip_qpos"])
+
     # 8. Waypoint cruzado -> solo bonus + penalizaciones ese paso
     if guidance["wp"] > rs.last_wp:
         rs.last_wp = guidance["wp"]
         rs.last_dist_to_target = float(np.linalg.norm(xy - target_xy))
-        return WP_BONUS - penalties
+        return WP_BONUS - penalties + terrain_bonus
 
     # 9. Progreso hacia el waypoint actual
     dist_to_target = float(np.linalg.norm(xy - target_xy))
@@ -243,7 +293,7 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     direction_reward = W_DIRECTION * float(cos_t)
     backward_pen = BACKWARD_W * max(0.0, -v_fwd) / V_REF_MPS
 
-    return (progress_reward + direction_reward + speed_reward
+    return (progress_reward + direction_reward + speed_reward + terrain_bonus
             - backward_pen - penalties - TIME_PENALTY)
 
 

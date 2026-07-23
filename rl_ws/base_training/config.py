@@ -171,6 +171,27 @@ FLIPPER_JERK_W = 1.0
 TILT_W         = 5.0
 TILT_FREE      = 0.70   # sin(~44°): inclinacion total libre antes de castigar
 FLIPPER_COLLISION_W = 50.0
+# Bonus por que la PUNTA de un flipper quede ADELANTE y ARRIBA del borde real
+# de un escalon/rampa cercano (terreno real, ver elevation_map.flipper_climb_edge).
+# NO reclama saber el "angulo optimo de contacto" (no hay forma de justificar
+# eso sin datos de expertos o un modelo de contacto real) -- solo verifica una
+# relacion geometrica concreta y comprobable:
+#   1) Escanea la direccion de extension de cada flipper buscando el PRIMER
+#      borde real: el primer punto donde el desnivel sobre el mount cruza
+#      FLIPPER_TERRAIN_MIN_STEP_M (filtra ruido de piso/rasterizado -- NO
+#      cualquier micro-irregularidad cuenta como "obstaculo").
+#   2) Si ese borde es mas alto que FLIPPER_TERRAIN_MAX_CLIMB_M, es una PARED
+#      (no trepable) -- se ignora, no empuja a extender el flipper hacia ella.
+#   3) Si es trepable (entre los dos umbrales), compara la punta del flipper
+#      (usando SOLO su angulo flip_qpos=theta, en el propio marco del mount:
+#      alcance = FLIPPER_L*sin(theta), altura_sobre_mount = FLIPPER_L*cos(theta)
+#      -- ver derivacion en base_env.flipper_terrain_bonus) contra (d_edge,
+#      h_edge): bonus si alcance >= d_edge Y altura >= h_edge (la punta ya
+#      libro el borde, no se quedo corta ni lo intento "por debajo").
+FLIPPER_TERRAIN_W           = 0.3
+FLIPPER_TERRAIN_MIN_STEP_M  = 0.03   # bajo esto = ruido de piso, no un escalon real
+FLIPPER_TERRAIN_MAX_CLIMB_M = 0.20   # techo heuristico de lo "trepable" (pared arriba)
+FLIPPER_TERRAIN_SAMPLES     = 8      # puntos escaneados hasta FLIPPER_L buscando el borde
 # Castigo por aceleraciones fuertes del chasis (cuidar la integridad del robot
 # en terreno dificil).
 ACCEL_W        = 3.0

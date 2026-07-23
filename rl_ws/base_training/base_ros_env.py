@@ -65,6 +65,7 @@ from rl_ws.base_training.config import (
     START_XY, GOAL_XY, FINISH_DIST, EPISODE_MAX_STEPS,
     W_DIRECTION, W_VELOCITY, WP_BONUS, TIME_PENALTY, FALL_PENALTY,
     STUCK_MAX, STUCK_ANGULAR_THRESH_RAD, ENERGY_W, FLIPPER_JERK_W, TILT_W, TILT_FREE, FLIPPER_COLLISION_W,
+    FLIPPER_TERRAIN_W, FLIPPER_TERRAIN_MAX_CLIMB_M, FLIPPER_TERRAIN_MIN_STEP_M, FLIPPER_TERRAIN_SAMPLES,
     ACCEL_W, ACCEL_DEADZONE, GUIDE_SPEED_SCALE, BACKWARD_W,
     FLIPPER_MOUNTS, FLIPPER_AXIS_SIGN, FLIPPER_L, FLIPPER_COLLISION_DIST,
     N_LOOKAHEAD, LOOKAHEAD_STEP, OBS_DIM, ACT_DIM,
@@ -298,6 +299,30 @@ def _flipper_collision_penalty(flip_qpos: np.ndarray) -> float:
     return FLIPPER_COLLISION_W * pen
 
 
+def _flipper_travel_dir(fb: dict) -> float:
+    """Signo de la direccion de avance en frame local -- MISMO que
+    base_env.flipper_travel_dir (train_fast): +1 adelante, -1 en reversa
+    (v_fwd < 0). Debe usarse el MISMO signo aqui y en _get_flipper_edge."""
+    return 1.0 if float(fb["twist"][0]) >= 0.0 else -1.0
+
+
+def _flipper_terrain_bonus(fb: dict, flip_qpos: np.ndarray) -> float:
+    """Bonus por tener la PUNTA del flipper por delante Y arriba del borde
+    real mas cercano -- MISMO criterio que base_env.flipper_terrain_bonus
+    (train_fast); ver ese docstring para el razonamiento geometrico completo,
+    incluido el intercambio de rol delantero/trasero al retroceder.
+    0.0 si no hay heightmap o si el flipper no tiene un borde trepable cerca."""
+    edge = fb.get("flipper_edge")
+    if edge is None:
+        return 0.0
+    theta = np.asarray(flip_qpos, dtype=np.float64)
+    travel_dir = _flipper_travel_dir(fb)
+    reach = travel_dir * FLIPPER_L * np.sin(theta)
+    height = FLIPPER_L * np.cos(theta)
+    clear = edge["climbable"] & (reach >= edge["d"]) & (height >= edge["h"])
+    return FLIPPER_TERRAIN_W * float(np.mean(clear.astype(np.float32)))
+
+
 def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardState) -> float:
     """Igual estructura que BaseMuJoCoEnv._reward (version directa-MuJoCo):
     caida letal -> castigos conservados (stuck, energia, jerk de flippers,
@@ -383,6 +408,11 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     terms["flipper_collision"] = -flipper_collision_pen
     terms["accel"]             = -accel_pen
 
+    # 7b. Bonus por extender flippers cerca de terreno trepable (ver docstring
+    #     de _flipper_terrain_bonus). Se suma SIEMPRE, no es una "penalizacion".
+    terrain_bonus = _flipper_terrain_bonus(fb, fb["flip_qpos"])
+    terms["flipper_terrain"] = terrain_bonus
+
     # 8. Waypoint cruzado — al cruzarlo
     #    se devuelve solo el bonus mas las penalizaciones (sin progreso ni
     #    direccion/velocidad ese paso).
@@ -391,7 +421,7 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
         rs.last_dist_to_target = float(np.linalg.norm(xy - target_xy))
         terms["wp_bonus"] = WP_BONUS
         rs.last_terms = terms
-        return WP_BONUS - penalties
+        return WP_BONUS - penalties + terrain_bonus
 
     # 9. Progreso hacia el waypoint actual (delta_dist * boost
     #    exponencial de proximidad, misma formula que la version pallet)
@@ -422,7 +452,7 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     terms["time"]      = -TIME_PENALTY
     rs.last_terms = terms
 
-    return (progress_reward + direction_reward + speed_reward
+    return (progress_reward + direction_reward + speed_reward + terrain_bonus
             - backward_pen - penalties - TIME_PENALTY)
 
 
@@ -554,6 +584,21 @@ class BaseRosEnv:
             return None
         return self.map_ctx.get_heatmap(robot_xy=fb["xy"], robot_z=fb["z"], robot_yaw=fb["yaw"])
 
+    def _get_flipper_edge(self, fb: dict):
+        """Borde real (escalon) en la direccion de extension de cada flipper
+        -- ver base_env.flipper_terrain_bonus. Al retroceder (fb["twist"][0]
+        < 0) delanteros y traseros intercambian su lado de escaneo, ver
+        _flipper_travel_dir. None si no hay map_ctx."""
+        if self.map_ctx is None:
+            return None
+        travel_dir = _flipper_travel_dir(fb)
+        found, d, h, climbable = self.map_ctx.get_flipper_climb_edges(
+            robot_xy=fb["xy"], robot_yaw=fb["yaw"],
+            mounts_xy=FLIPPER_MOUNTS[:, :2], axis_sign=FLIPPER_AXIS_SIGN * travel_dir,
+            look_ahead_m=FLIPPER_L, min_step_m=FLIPPER_TERRAIN_MIN_STEP_M,
+            max_climb_m=FLIPPER_TERRAIN_MAX_CLIMB_M, n_samples=FLIPPER_TERRAIN_SAMPLES)
+        return dict(found=found, d=d, h=h, climbable=climbable)
+
     # ── Mision (goal + ruta) segun el mundo activo ──────────────────────────
     def _sample_goal(self) -> np.ndarray:
         """goal fijo si se configuro uno; si no (solo modo plataforma), random
@@ -626,6 +671,7 @@ class BaseRosEnv:
         time.sleep(self.dt / SIM_SPEEDUP)
 
         fb = self._node.feedback()
+        fb["flipper_edge"] = self._get_flipper_edge(fb)
         guidance = self.nav.step(fb["xy"], fb["yaw"])
         reward = _compute_reward(fb, guidance, action, self._rs)
 

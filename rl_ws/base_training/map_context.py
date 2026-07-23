@@ -24,9 +24,13 @@ if _RL_WS not in sys.path:
     sys.path.insert(0, _RL_WS)
 
 try:
-    from rl_ws.elevation_map import octree_to_global_elevation, get_circular_height_heatmap
+    from rl_ws.elevation_map import (
+        octree_to_global_elevation, get_circular_height_heatmap, flipper_climb_edge,
+    )
 except ModuleNotFoundError:
-    from elevation_map import octree_to_global_elevation, get_circular_height_heatmap
+    from elevation_map import (
+        octree_to_global_elevation, get_circular_height_heatmap, flipper_climb_edge,
+    )
 
 
 class MapContext:
@@ -71,4 +75,20 @@ class MapContext:
             z_min=self.z_min, z_max=self.z_max,
             radius_m=self.radius_m, patch_pixels=self.patch_pixels,
             shape=self.shape,
+        )
+
+    def get_flipper_climb_edges(self, robot_xy, robot_yaw: float,
+                                mounts_xy, axis_sign, look_ahead_m: float,
+                                min_step_m: float, max_climb_m: float,
+                                n_samples: int = 8):
+        """Busca el borde real (escalon) en la direccion de extension de cada
+        flipper -- ver elevation_map.flipper_climb_edge. Solo geometria pura
+        (usa self.elevation cruda, NO el heatmap normalizado); el criterio de
+        "la punta lo libra" vive en base_env.flipper_terrain_bonus.
+        Devuelve (found, d_edge, h_edge, climbable), cada uno (4,)."""
+        return flipper_climb_edge(
+            self.elevation, self.origin, self.res, self.z_min,
+            robot_xy=robot_xy, robot_yaw=robot_yaw,
+            mounts_xy=mounts_xy, axis_sign=axis_sign, look_ahead_m=look_ahead_m,
+            min_step_m=min_step_m, max_climb_m=max_climb_m, n_samples=n_samples,
         )

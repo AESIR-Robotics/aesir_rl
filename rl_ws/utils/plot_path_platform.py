@@ -62,7 +62,7 @@ from base_training.config import (
 # bleeding en la caja del tramo siguiente. draw_vortex_field_route_exact (mas
 # abajo) evita esto asignando a cada punto el target del tramo REALMENTE mas
 # cercano (proyeccion sobre la polilinea), sin cajas fijas que se solapen.
-from plot_path_vortex import (
+from rl_ws.utils.plot_path_vortex import (
     simulate_vortex_path, draw_vortex_field, _field_vec,
     _FIELD_NORM, _FIELD_CMAP, _FIELD_VMIN, _FIELD_VMAX,
 )

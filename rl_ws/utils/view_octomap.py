@@ -13,13 +13,6 @@ Uso:
 import os
 import sys
 
-# --- Fix para conflicto ROS2 + pip con mpl_toolkits (paquete namespace) ---
-# Esto DEBE ir antes de cualquier otro import (incluso numpy/octomap), por si
-# alguno de ellos importa matplotlib/mpl_toolkits indirectamente y "fija"
-# la resolución equivocada antes de que podamos corregir sys.path.
-#
-# 1. Quitamos por completo la ruta del sistema (apt/ROS2) que trae una copia
-#    de mpl_toolkits incompatible con el matplotlib nuevo de pip.
 _BAD_PATHS = ["/usr/lib/python3/dist-packages"]
 sys.path = [p for p in sys.path if p not in _BAD_PATHS]
 
