@@ -71,7 +71,7 @@ TRACK_DEFS = {
 }
 # Pistas ACTIVAS para entrenar: una o varias — VecMujocoEnv las reparte entre
 # los envs (round-robin). Ej: ["flat"], ["steps"], ["flat","steps","ramps"].
-ACTIVE_TRACKS = ["flat"]
+ACTIVE_TRACKS = ["flat", "ramps", "steps", "pallets"]
 
 # Compatibilidad: el "mundo por default" (bridge ROS, scripts single-track) es
 # la PRIMERA pista activa. Para probar otra pista por ROS, cambia el orden.
@@ -155,13 +155,14 @@ VIRTUAL_OBSTACLE_HEIGHT_HALF = 0.3
 PLATFORM_SURFACE_Z            = 0.12    
 
 # ── Pesos de reward ──────────────────────────────────────────────────────────
-W_DIRECTION    = 0.5     # encarar al objetivo (cos Δθ)
-W_VELOCITY     = 0.5     # igualar la velocidad forward objetivo
+W_DIRECTION    = 0.7     # encarar al objetivo (cos Δθ)
+W_VELOCITY     = 0.7     # igualar la velocidad forward objetivo
 WP_BONUS       = 200.0   # bonus al cruzar un waypoint
 TIME_PENALTY   = 0.1
 FALL_PENALTY   = 250.0
 OBSTACLE_PENALTY = 1.0
 STUCK_MAX      = 1.0
+STUCK_ANGULAR_THRESH_RAD = 0.02
 ENERGY_W       = 1e-8
 FLIPPER_JERK_W = 1.0
 # Inclinacion TOTAL en cualquier eje (roll Y pitch): se mide como la magnitud
@@ -172,7 +173,7 @@ TILT_FREE      = 0.70   # sin(~44°): inclinacion total libre antes de castigar
 FLIPPER_COLLISION_W = 50.0
 # Castigo por aceleraciones fuertes del chasis (cuidar la integridad del robot
 # en terreno dificil).
-ACCEL_W        = 1.5
+ACCEL_W        = 3.0
 ACCEL_DEADZONE = 0.3
 # Velocidad deseada = DISTANCIA al punto-guia del vortex (lejos -> rapido, cerca
 # -> lento). Se premia alcanzarla encarando la guia; retroceder se castiga.
@@ -214,7 +215,7 @@ ACT_DIM = 7
 FLIPPER_HOME_RAD = 0.0   # pose de reposo de los flippers cuando el gate esta OFF
 
 # ── Navegacion global: planeacion A* sobre la zona segura de pallets ─────────
-ROBOT_RADIUS         = 0.30   # radio con el que se erosiona la zona transitable
+ROBOT_RADIUS         = 0.35   # radio con el que se erosiona la zona transitable
 GAP_BRIDGE_DISTANCE  = 0.15   # huecos entre pallets menores a esto se "puentean"
 GRID_RESOLUTION      = 0.05   # celda (m) de la grilla A*
 CORNER_DOT_THRESHOLD = 0.99   # giro se conserva como esquina si dot(v1,v2) < esto

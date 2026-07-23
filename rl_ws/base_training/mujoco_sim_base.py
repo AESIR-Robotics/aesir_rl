@@ -265,7 +265,7 @@ class BaseMujocoEnv:
 
         self.nav.reset(fb["xy"])
         guidance = self.nav.step(fb["xy"], fb["yaw"])
-        self._rs.reset(fb["xy"], float(np.linalg.norm(fb["xy"] - np.asarray(guidance["target"]))))
+        self._rs.reset(fb["xy"], float(np.linalg.norm(fb["xy"] - np.asarray(guidance["target"]))), fb["yaw"])
         heatmap = self._get_heatmap(fb)
         return W.build_obs(guidance, fb, heatmap)
 

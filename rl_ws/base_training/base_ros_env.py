@@ -64,7 +64,7 @@ from rl_ws.base_training.config import (
     FLIPPER_MAX, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD, FLIPPER_HOME_RAD,
     START_XY, GOAL_XY, FINISH_DIST, EPISODE_MAX_STEPS,
     W_DIRECTION, W_VELOCITY, WP_BONUS, TIME_PENALTY, FALL_PENALTY,
-    STUCK_MAX, ENERGY_W, FLIPPER_JERK_W, TILT_W, TILT_FREE, FLIPPER_COLLISION_W,
+    STUCK_MAX, STUCK_ANGULAR_THRESH_RAD, ENERGY_W, FLIPPER_JERK_W, TILT_W, TILT_FREE, FLIPPER_COLLISION_W,
     ACCEL_W, ACCEL_DEADZONE, GUIDE_SPEED_SCALE, BACKWARD_W,
     FLIPPER_MOUNTS, FLIPPER_AXIS_SIGN, FLIPPER_L, FLIPPER_COLLISION_DIST,
     N_LOOKAHEAD, LOOKAHEAD_STEP, OBS_DIM, ACT_DIM,
@@ -252,18 +252,20 @@ class _RewardState:
     """Estado entre pasos para el calculo de reward (progreso, stuck, jerk)."""
     def __init__(self):
         self.last_xy = None
+        self.last_yaw = 0.0
         self.last_dist_to_target = 0.0
         self.last_wp = 0
-        self.last_flip = np.zeros(4, dtype=np.float32)
+        self.last_flip = np.full(4, FLIPPER_HOME_RAD, dtype=np.float32)
         self.last_twist = np.zeros(3, dtype=np.float32)
         self.stuck = 0
         self.last_terms = {}          # desglose firmado del ultimo reward
 
-    def reset(self, xy: np.ndarray, dist_to_target: float):
+    def reset(self, xy: np.ndarray, dist_to_target: float, yaw: float = 0.0):
         self.last_xy = xy.copy()
+        self.last_yaw = float(yaw)
         self.last_dist_to_target = dist_to_target
         self.last_wp = 0
-        self.last_flip = np.zeros(4, dtype=np.float32)
+        self.last_flip = np.full(4, FLIPPER_HOME_RAD, dtype=np.float32)
         self.last_twist = np.zeros(3, dtype=np.float32)
         self.stuck = 0
         self.last_terms = {}
@@ -326,10 +328,13 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
         rs.last_terms = terms
         return -OBSTACLE_PENALTY
 
-    # 2. Inactividad 
+    # 2. Inactividad: SOLO cuenta "atascado" si NI se traslada NI gira
     move_dist = float(np.linalg.norm(xy - rs.last_xy))
+    yaw = float(fb["yaw"])
+    dyaw = abs((yaw - rs.last_yaw + np.pi) % (2.0 * np.pi) - np.pi)
     rs.last_xy = xy.copy()
-    if move_dist < 0.005:
+    rs.last_yaw = yaw
+    if move_dist < 0.005 and dyaw < STUCK_ANGULAR_THRESH_RAD:
         rs.stuck += 1
         penalty_stuck = min(STUCK_MAX, 0.01 * rs.stuck)
     else:
@@ -340,8 +345,10 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     #    la accion normalizada — mismo espiritu de penalizacion casi nula)
     action_cost = ENERGY_W * float(np.square(action).mean())
 
-    # 4. Movimiento erratico de flippers
-    current_flipper = action[2:6].astype(np.float32)
+    # 4. Movimiento erratico de flippers: delta del flipper EFECTIVO (post-gate)
+    current_flipper = flipper_targets(action)
+    if current_flipper is None:
+        current_flipper = np.full(4, FLIPPER_HOME_RAD, dtype=np.float32)
     flipper_pen = FLIPPER_JERK_W * float(np.square(current_flipper - rs.last_flip).mean())
     rs.last_flip = current_flipper.copy()
 
@@ -602,7 +609,7 @@ class BaseRosEnv:
 
         self.nav.reset(fb["xy"])
         guidance = self.nav.step(fb["xy"], fb["yaw"])
-        self._rs.reset(fb["xy"], float(np.linalg.norm(fb["xy"] - np.asarray(guidance["target"]))))
+        self._rs.reset(fb["xy"], float(np.linalg.norm(fb["xy"] - np.asarray(guidance["target"]))), fb["yaw"])
         self._ep_steps = 0
         self._fb = fb
         return _build_obs(guidance, fb, self._get_heatmap(fb))

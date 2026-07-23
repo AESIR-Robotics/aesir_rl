@@ -156,7 +156,7 @@ if __name__ == "__main__":
     ap.add_argument("--batch", type=int, default=C.BATCH_SIZE)
     ap.add_argument("--lr", type=float, default=C.LR)
     ap.add_argument("--wandb", action="store_true")
-    ap.add_argument("--resume", default=str(C.CHECKPOINT_DIR / "fast_best.pt"))
+    ap.add_argument("--resume", default=str(C.CHECKPOINT_DIR / "fast_iter01800.pt"))
     #ap.add_argument("--resume", default=None)
     args = ap.parse_args()
     train(n_envs=args.n_envs, steps_per_env=args.steps, iters=args.iters,
