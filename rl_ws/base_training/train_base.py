@@ -26,7 +26,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
 import numpy as np
 import torch
@@ -169,8 +169,8 @@ def train(num_iterations: int = C.ROS_ITERS,
                     obs = env.reset()
 
             with torch.no_grad():
-                _, _, lv = policy(torch.as_tensor(obs, dtype=torch.float32,
-                                                  device=device).unsqueeze(0))
+                _, lv = policy(torch.as_tensor(obs, dtype=torch.float32,
+                                               device=device).unsqueeze(0))
             adv, ret = buf.compute_gae(float(lv.item()), gamma, gae_lambda)
             m = ppo_update(policy, opt, buf.obs, buf.actions, buf.logps, adv, ret,
                            ppo_epochs, batch_size, clip_param, vf_coef, ent_coef, device)

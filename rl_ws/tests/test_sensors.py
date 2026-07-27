@@ -1,8 +1,6 @@
 import mujoco
 import mujoco.viewer
 import cv2
-import numpy as np
-import time
 
 from path_utils import get_xml_model_path
 

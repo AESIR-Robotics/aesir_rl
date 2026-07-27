@@ -70,3 +70,9 @@ checkpoints/
 *.mcap
 core
 MUJOCO_LOG.TXT
+
+# ============================================================================
+# Salidas generadas del pipeline RL (debug de heatmap, plots sueltos)
+# ============================================================================
+heatmap_debug/
+rl_ws/*.png

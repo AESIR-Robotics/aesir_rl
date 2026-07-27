@@ -42,16 +42,16 @@ def load_policy(path: str, obs_dim: int, act_dim: int, device) -> CNNActorCritic
     ckpt = torch.load(path, map_location=device)
     saved = ckpt["policy"]
 
-    # Chequeo de compatibilidad: el .pt debe tener el mismo act_dim/state_dim
-    # que el env actual (p.ej. si entrenaste con flippers ACT_DIM=6 y ahora el
-    # env es otro, o cambio N_LOOKAHEAD, el .pt no sirve para este env).
-    ckpt_act = int(saved["actor_mu.weight"].shape[0])
+    # Chequeo de compatibilidad: el .pt debe tener el mismo state_dim que el env
+    # actual (si cambio N_LOOKAHEAD o HEATMAP_PIXELS, el .pt no sirve aqui).
+    # act_dim ya lo valida el constructor de la politica (accion hibrida = 7
+    # exacto, ver CNNActorCritic), asi que no hace falta sondearlo del .pt.
     ckpt_state_dim = int(saved["state_encoder.0.weight"].shape[1])
     state_dim = obs_dim - C.HEATMAP_PIXELS ** 2
-    if ckpt_act != act_dim or ckpt_state_dim != state_dim:
+    if ckpt_state_dim != state_dim:
         raise SystemExit(
-            f"El checkpoint no coincide con el env: checkpoint(state={ckpt_state_dim}, "
-            f"act={ckpt_act}) vs env(state={state_dim}, act={act_dim}). "
+            f"El checkpoint no coincide con el env: checkpoint(state={ckpt_state_dim}) "
+            f"vs env(state={state_dim}). "
             f"Usa un .pt entrenado con esta misma configuracion.")
 
     policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS).to(device)
@@ -68,8 +68,12 @@ def pick_action(policy: CNNActorCritic, obs: np.ndarray, device, stochastic: boo
         action, _raw, _logp, _val = policy.act(obs, device)   # muestrea de la distribucion
         return action
     obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
-    mu, _std, _val = policy(obs_t)                       # media = accion deterministica
-    return mu.squeeze(0).cpu().numpy()
+    p, _val = policy(obs_t)                              # moda/media por bloque = accion deterministica
+    vw = p["mu_vw"].clamp(-1.0, 1.0)                                        # (1,2)
+    a, b = p["alpha"], p["beta"]
+    flip = (a - 1.0) / (a + b - 2.0).clamp(min=1e-6)      # moda de la Beta (alpha,beta>=1)
+    gate = (p["gate_logit"] > 0.0).float().unsqueeze(-1)  # Bernoulli mas probable
+    return torch.cat([vw, flip, gate], dim=-1).squeeze(0).cpu().numpy()
 
 _TERM_LABELS = [
     ("progress",          "Progreso (acercarse al wp)"),
@@ -82,7 +86,6 @@ _TERM_LABELS = [
     ("energy",            "Castigo de energia"),
     ("flipper_jerk",      "Castigo jerk de flippers"),
     ("flipper_terrain",   "Bonus flipper cerca de trepable"),
-    ("tilt",              "Castigo por inclinacion"),
     ("flipper_collision", "Castigo auto-colision flippers"),
     ("accel",             "Castigo aceleraciones fuertes"),
     ("fall",              "Castigo por caida/piso (terminal)"),

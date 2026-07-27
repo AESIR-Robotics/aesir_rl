@@ -25,11 +25,11 @@ if _RL_WS not in sys.path:
 
 try:
     from rl_ws.elevation_map import (
-        octree_to_global_elevation, get_circular_height_heatmap, flipper_climb_edge,
+        octree_to_global_elevation, get_circular_height_heatmap, flipper_terrain_edge,
     )
 except ModuleNotFoundError:
     from elevation_map import (
-        octree_to_global_elevation, get_circular_height_heatmap, flipper_climb_edge,
+        octree_to_global_elevation, get_circular_height_heatmap, flipper_terrain_edge,
     )
 
 
@@ -60,6 +60,10 @@ class MapContext:
          self.z_min, self.z_max) = octree_to_global_elevation(
             bt_path, resolution=resolution, margin=margin
         )
+        # Sustitucion NaN->z_min hecha UNA vez (la grilla es inmutable): antes
+        # se repetia en cada sample_elevation_at, o sea 9 veces por env-step.
+        self.elevation_filled = np.where(np.isnan(self.elevation),
+                                         self.z_min, self.elevation)
 
         print(f"[map_context] Cargado {bt_path}: grilla {self.elevation.shape}, "
               f"z_min={self.z_min:.3f}  z_max={self.z_max:.3f}")
@@ -77,18 +81,20 @@ class MapContext:
             shape=self.shape,
         )
 
-    def get_flipper_climb_edges(self, robot_xy, robot_yaw: float,
-                                mounts_xy, axis_sign, look_ahead_m: float,
-                                min_step_m: float, max_climb_m: float,
-                                n_samples: int = 8):
-        """Busca el borde real (escalon) en la direccion de extension de cada
-        flipper -- ver elevation_map.flipper_climb_edge. Solo geometria pura
-        (usa self.elevation cruda, NO el heatmap normalizado); el criterio de
-        "la punta lo libra" vive en base_env.flipper_terrain_bonus.
-        Devuelve (found, d_edge, h_edge, climbable), cada uno (4,)."""
-        return flipper_climb_edge(
-            self.elevation, self.origin, self.res, self.z_min,
+    def get_flipper_terrain_edges(self, robot_xy, robot_yaw: float,
+                                  mounts_xy, axis_sign, look_ahead_m: float,
+                                  min_step_m: float, max_climb_m: float,
+                                  max_descent_m: float, n_samples: int = 8):
+        """Busca el borde real (subida O bajada) en la direccion de extension
+        de cada flipper -- ver elevation_map.flipper_terrain_edge. Solo
+        geometria pura (usa self.elevation cruda, NO el heatmap normalizado);
+        el criterio de "la punta lo libra" vive en
+        base_env.flipper_terrain_bonus.
+        Devuelve (found, d_edge, h_edge, actionable), cada uno (4,)."""
+        return flipper_terrain_edge(
+            self.elevation_filled, self.origin, self.res, self.z_min,
             robot_xy=robot_xy, robot_yaw=robot_yaw,
             mounts_xy=mounts_xy, axis_sign=axis_sign, look_ahead_m=look_ahead_m,
-            min_step_m=min_step_m, max_climb_m=max_climb_m, n_samples=n_samples,
+            min_step_m=min_step_m, max_climb_m=max_climb_m,
+            max_descent_m=max_descent_m, n_samples=n_samples,
         )

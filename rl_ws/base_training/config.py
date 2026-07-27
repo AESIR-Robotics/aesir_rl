@@ -57,6 +57,11 @@ TRACK_DEFS = {
         xml=os.path.join(_MODELS, "aesir_complete_steps.xml"),
         bt=os.path.join(TRACKS_DIR, "steps", "occupied_map.bt"),
         spawn_z=0.55, settle_steps=150),         # escalones hasta z=0.42
+    "steps1m": dict(
+        kind="platform",
+        xml=os.path.join(_MODELS, "aesir_complete_steps1m.xml"),
+        bt=os.path.join(TRACKS_DIR, "steps1m", "occupied_map.bt"),
+        spawn_z=0.55, settle_steps=150),         # escalones de 1x1 m hasta z=0.42
     "ramps": dict(
         kind="platform",
         xml=os.path.join(_MODELS, "aesir_complete_ramps.xml"),
@@ -71,7 +76,7 @@ TRACK_DEFS = {
 }
 # Pistas ACTIVAS para entrenar: una o varias — VecMujocoEnv las reparte entre
 # los envs (round-robin). Ej: ["flat"], ["steps"], ["flat","steps","ramps"].
-ACTIVE_TRACKS = ["flat", "ramps", "steps", "pallets"]
+ACTIVE_TRACKS = ["steps1m"]
 
 # Compatibilidad: el "mundo por default" (bridge ROS, scripts single-track) es
 # la PRIMERA pista activa. Para probar otra pista por ROS, cambia el orden.
@@ -116,17 +121,16 @@ V_MAX_MPS   = 0.85     # COMANDO linear.x  a accion=1 (setpoint, no velocidad lo
 W_MAX_RADPS = 5.0      # COMANDO angular.z a accion=1 (setpoint, no velocidad lograda)
 V_REF_MPS   = 0.48     # REAL: velocidad lineal maxima medida  (referencia del reward)
 W_REF_RADPS = 0.76     # REAL: velocidad angular maxima medida (referencia del reward)
-FLIPPER_MAX = 3.1416   # rad a flip = 1
 # Limite de recorrido de los flippers (por software)
 FLIPPER_MIN_RAD = -1.3
 FLIPPER_MAX_RAD = 3.14159
 # La politica CONTROLA los flippers (fase 2: terreno). False = fase 1 (solo
 # base; action[2:6] se ignora, los flippers quedan en reposo). El checkpoint es
-# compatible en ambos sentidos: ACT_DIM=6 siempre incluye los flippers.
+# compatible en ambos sentidos: ACT_DIM=7 siempre incluye los flippers.
 CONTROL_FLIPPERS = True
 
 # ── Mision (frame de aesir_complete.xml == frame de obstacles.json) ──────────
-START_XY: Tuple[float, float] = (-1.5, 3.5)
+START_XY: Tuple[float, float] = (-2.0, 4.0)
 GOAL_XY:  Optional[Tuple[float, float]] = None   # None -> ultimo pallet del JSON
 SPAWN_Z   = 0.20
 FINISH_DIST       = 0.10
@@ -141,14 +145,6 @@ USE_VIRTUAL_OBSTACLE = True
 # real entre los dos waypoints que terminan bordeando el hueco abierto.
 VIRTUAL_OBSTACLE_HALF_SIZE     = 0.3    # media-arista MAXIMA (m); se achica si el hueco es mas chico
 VIRTUAL_OBSTACLE_MIN_HALF_SIZE = 0.10   # media-arista MINIMA; por debajo de esto se descarta el obstaculo
-# Margen (m) obligatorio entre la caja y cada waypoint vecino. Con REP_RANGE=0.1
-# (corto) y el limite de giro del robot, 0.15 dejaba muy poco margen de
-# reaccion y el vortex podia rozar una esquina en aproximaciones casi
-# tangenciales a un lado plano (ver tests/plot_path_platform.py). Con 0.30 +
-# el fix de direccion de repulsion (borde real del box, no su centro) da
-# 0/596 rozamientos en bateria de prueba.
-VIRTUAL_OBSTACLE_CLEARANCE     = 0.30
-VIRTUAL_OBSTACLE_MAX_SKIP      = 3      # cuantos waypoints vecinos se pueden saltar agrandando el hueco
 VIRTUAL_OBSTACLE_OFFSET_FRAC   = (0.2, 0.6)   # offset lateral, como fraccion del half_size del obstaculo
 
 VIRTUAL_OBSTACLE_HEIGHT_HALF = 0.3     
@@ -160,19 +156,18 @@ W_VELOCITY     = 0.7     # igualar la velocidad forward objetivo
 WP_BONUS       = 200.0   # bonus al cruzar un waypoint
 TIME_PENALTY   = 0.1
 FALL_PENALTY   = 250.0
+FALL_UPRIGHT_MIN = 0.20   # R[2,2]=cos(inclinacion); <0.20 -> volcado (~78°)
+FALL_Z_MIN       = 0.10   # altura del chasis (m) por debajo de la cual se cayo
 OBSTACLE_PENALTY = 1.0
 STUCK_MAX      = 1.0
 STUCK_ANGULAR_THRESH_RAD = 0.02
 ENERGY_W       = 1e-8
-FLIPPER_JERK_W = 1.0
-# Inclinacion TOTAL en cualquier eje (roll Y pitch): se mide como la magnitud
-# horizontal de la gravedad en el cuerpo, sqrt(gx^2+gy^2) = sin(angulo total de
-# inclinacion). La inclinacio extrema la sigue cortando terminated() (upright < 0.20 ~= 78 grados).
-TILT_W         = 5.0
-TILT_FREE      = 0.70   # sin(~44°): inclinacion total libre antes de castigar
-FLIPPER_COLLISION_W = 50.0
+FLIPPER_JERK_W = 0.5
+# (La inclinacion NO tiene castigo graduado propio: es una condicion de caida,
+#  ver FALL_UPRIGHT_MIN arriba -- un solo umbral, castigo + terminacion.)
+FLIPPER_COLLISION_W = 10.0
 # Bonus por que la PUNTA de un flipper quede ADELANTE y ARRIBA del borde real
-# de un escalon/rampa cercano (terreno real, ver elevation_map.flipper_climb_edge).
+# de un escalon/rampa cercano (terreno real, ver elevation_map.flipper_terrain_edge).
 # NO reclama saber el "angulo optimo de contacto" (no hay forma de justificar
 # eso sin datos de expertos o un modelo de contacto real) -- solo verifica una
 # relacion geometrica concreta y comprobable:
@@ -188,9 +183,23 @@ FLIPPER_COLLISION_W = 50.0
 #      -- ver derivacion en base_env.flipper_terrain_bonus) contra (d_edge,
 #      h_edge): bonus si alcance >= d_edge Y altura >= h_edge (la punta ya
 #      libro el borde, no se quedo corta ni lo intento "por debajo").
-FLIPPER_TERRAIN_W           = 0.3
-FLIPPER_TERRAIN_MIN_STEP_M  = 0.03   # bajo esto = ruido de piso, no un escalon real
-FLIPPER_TERRAIN_MAX_CLIMB_M = 0.20   # techo heuristico de lo "trepable" (pared arriba)
+FLIPPER_TERRAIN_W           = 5.0    # medido contra flipper_jerk_pen (flip_qvel real) en
+                                      # rollout de 800 steps random: con W=0.3 el bonus medio
+                                      # (0.0033) era ~150x menor que el castigo de jerk medio
+                                      # (0.50) -- con W=5.0 el bonus max (1.25) queda en el
+                                      # mismo orden que el pico de jerk (2.25), y el bonus SI
+                                      # puede compensar el costo transitorio de extender el
+                                      # flipper una vez que la politica aprenda a MANTENER la
+                                      # posicion (qvel->0 en reposo, jerk cae a ~0 sostenido).
+FLIPPER_TERRAIN_MIN_STEP_M  = 0.10   # |desnivel| bajo esto = ruido de piso, no un borde real
+FLIPPER_TERRAIN_MAX_CLIMB_M = 0.45   # techo heuristico de lo "trepable" (pared arriba)
+# BAJADA (h_edge < 0): mismo criterio espejado -- la punta debe pasar el borde
+# Y alcanzar HACIA ABAJO el suelo inferior (height <= h_edge), lo que exige
+# |theta| > 90 grados (permitido: FLIPPER_MAX_RAD = 180 grados). Techo de lo
+# alcanzable, acotado por la geometria: con caida `drop` a distancia d_edge hace
+# falta cos(th) <= -drop/L Y sin(th) >= d_edge/L a la vez; para el rango util de
+# d_edge (0.04-0.18 m) eso topa cerca de 0.30 m, no en FLIPPER_L=0.35.
+FLIPPER_TERRAIN_MAX_DESCENT_M = 0.35
 FLIPPER_TERRAIN_SAMPLES     = 8      # puntos escaneados hasta FLIPPER_L buscando el borde
 # Castigo por aceleraciones fuertes del chasis (cuidar la integridad del robot
 # en terreno dificil).
@@ -199,7 +208,12 @@ ACCEL_DEADZONE = 0.3
 # Velocidad deseada = DISTANCIA al punto-guia del vortex (lejos -> rapido, cerca
 # -> lento). Se premia alcanzarla encarando la guia; retroceder se castiga.
 GUIDE_SPEED_SCALE = 1.0   # [m] distancia del guia que ya pide velocidad plena V_MAX
-BACKWARD_W        = 4.0   # castigo por retroceder (x fraccion de V_MAX en reversa)
+BACKWARD_W        = 3.0   # castigo por retroceder (x fraccion de V_MAX en reversa)
+
+# ── Terminacion por atasco (sin progreso hacia la meta) ──────────────────────
+STUCK_TIMEOUT_STEPS = 1000     # pasos sin progreso -> termina
+STUCK_NO_PROGRESS_M = 0.05    # mejora minima (m) hacia la meta que reinicia el contador
+
 
 # ── Geometria de flippers (para detectar auto-colision desde los angulos) ────
 FLIPPER_MOUNTS = np.array([
@@ -224,12 +238,15 @@ LOOKAHEAD_STEP = 0.25   # avance (m) del muestreo de la ruta por punto
 # Nota: se quito v_lat (diferencial no strafea) y upright(1) se cambio por la
 # gravedad en cuerpo(3) para captar pitch/roll en pendientes.
 OBS_DIM = 19 + 3*N_LOOKAHEAD + HEATMAP_PIXELS**2
-# Accion (7): v, ω, flipper×4, gate.
+# Accion (7): v, ω, flipper×4, gate. Distribucion HIBRIDA (ver CNNActorCritic/
+# MLPActorCritic): v,ω Gaussiana (recortada a [-1,1]); flipper×4 Beta (soporte
+# YA en [0,1], sin recorte); gate Bernoulli (0.0/1.0 exacto, sin recorte).
 #   [0] v      linear.x  (escala V_MAX)
 #   [1] ω      angular.z (escala W_MAX)
-#   [2:6] flipper×4  angulo objetivo de cada flipper (escala FLIPPER_MAX)
-#   [6] gate   >=0 -> la politica CONTROLA los flippers (usa [2:6]);
-#              <0  -> flippers a la pose de REPOSO (FLIPPER_HOME_RAD), [2:6] se
+#   [2:6] flipper×4  muestra Beta en [0,1], reescalada afin a
+#         [FLIPPER_MIN_RAD, FLIPPER_MAX_RAD] (ver base_env.flipper_targets)
+#   [6] gate   1.0 -> la politica CONTROLA los flippers (usa [2:6]);
+#              0.0 -> flippers a la pose de REPOSO (FLIPPER_HOME_RAD), [2:6] se
 #              ignora. Asi la politica "apaga" los flippers en plano (no estorban,
 #              como fase 1) y solo los "enciende" para trepar en terreno.
 ACT_DIM = 7

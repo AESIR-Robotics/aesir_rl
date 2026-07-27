@@ -32,10 +32,9 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -52,7 +51,13 @@ from rl_ws.global_navigator import (
     build_platform_zone, plan_platform_route, plan_platform_route_with_obstacle,
 )
 from rl_ws.base_training.map_context import MapContext
-from rl_ws.base_training.base_env import flipper_targets   # gate de flippers (compartido)
+# Logica de tarea COMPARTIDA con el backend directo-MuJoCo: funciones puras de
+# (fb, flip_qpos)/config, sin ROS ni MuJoCo -- se importan en vez de espejarlas
+# para que no puedan divergir (el reward de flippers vive solo en base_env).
+from rl_ws.base_training.base_env import (
+    flipper_targets, flipper_collision_penalty, flipper_terrain_bonus, flipper_edge,
+    is_fallen,
+)
 
 # TODOS los parametros (escalas de comando, mision, pesos de reward, geometria
 # de flippers, lookahead, OBS/ACT y la seccion ROS2) viven en base_training/
@@ -61,13 +66,12 @@ from rl_ws.base_training.base_env import flipper_targets   # gate de flippers (c
 from rl_ws.base_training.config import (
     NAV_JSON,
     V_MAX_MPS, W_MAX_RADPS, V_REF_MPS, W_REF_RADPS,
-    FLIPPER_MAX, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD, FLIPPER_HOME_RAD,
+    FLIPPER_MIN_RAD, FLIPPER_MAX_RAD, FLIPPER_HOME_RAD,
     START_XY, GOAL_XY, FINISH_DIST, EPISODE_MAX_STEPS,
     W_DIRECTION, W_VELOCITY, WP_BONUS, TIME_PENALTY, FALL_PENALTY,
-    STUCK_MAX, STUCK_ANGULAR_THRESH_RAD, ENERGY_W, FLIPPER_JERK_W, TILT_W, TILT_FREE, FLIPPER_COLLISION_W,
-    FLIPPER_TERRAIN_W, FLIPPER_TERRAIN_MAX_CLIMB_M, FLIPPER_TERRAIN_MIN_STEP_M, FLIPPER_TERRAIN_SAMPLES,
+    FALL_UPRIGHT_MIN, FALL_Z_MIN,
+    STUCK_MAX, STUCK_ANGULAR_THRESH_RAD, ENERGY_W, FLIPPER_JERK_W,
     ACCEL_W, ACCEL_DEADZONE, GUIDE_SPEED_SCALE, BACKWARD_W,
-    FLIPPER_MOUNTS, FLIPPER_AXIS_SIGN, FLIPPER_L, FLIPPER_COLLISION_DIST,
     N_LOOKAHEAD, LOOKAHEAD_STEP, OBS_DIM, ACT_DIM,
     FLIPPER_JOINTS, CONTROL_HZ, SIM_SPEEDUP,
     USE_HEATMAP, OCTOMAP_BT_PATH, OCTOMAP_RESOLUTION, HEATMAP_RADIUS_M, HEATMAP_PIXELS,
@@ -256,7 +260,6 @@ class _RewardState:
         self.last_yaw = 0.0
         self.last_dist_to_target = 0.0
         self.last_wp = 0
-        self.last_flip = np.full(4, FLIPPER_HOME_RAD, dtype=np.float32)
         self.last_twist = np.zeros(3, dtype=np.float32)
         self.stuck = 0
         self.last_terms = {}          # desglose firmado del ultimo reward
@@ -266,61 +269,10 @@ class _RewardState:
         self.last_yaw = float(yaw)
         self.last_dist_to_target = dist_to_target
         self.last_wp = 0
-        self.last_flip = np.full(4, FLIPPER_HOME_RAD, dtype=np.float32)
         self.last_twist = np.zeros(3, dtype=np.float32)
         self.stuck = 0
         self.last_terms = {}
 
-
-def _flipper_tips(flip_qpos: np.ndarray) -> np.ndarray:
-    """Posicion 3D (x,y,z) de la punta de cada flipper dado su angulo de pivote
-    (rad, convencion ROS). Pivote sobre eje y:
-        tip = mount + (axis_sign * L * sin(theta), 0, L * cos(theta))"""
-    th = np.asarray(flip_qpos, dtype=np.float64)
-    tips = FLIPPER_MOUNTS.copy()
-    tips[:, 0] += FLIPPER_AXIS_SIGN * FLIPPER_L * np.sin(th)
-    tips[:, 2] += FLIPPER_L * np.cos(th)
-    return tips
-
-
-def _flipper_collision_penalty(flip_qpos: np.ndarray) -> float:
-    """Castigo por auto-colision de flippers: por cada par de puntas mas cercano
-    que FLIPPER_COLLISION_DIST, castigo proporcional a la penetracion. Los pares
-    que geometricamente NO pueden chocar (flippers de lados y opuestos) quedan
-    siempre lejos del umbral, asi que no disparan. Colisionan sobre todo el par
-    trasero (1,2) y el delantero (3,4) al girar uno hacia el otro."""
-    tips = _flipper_tips(flip_qpos)
-    pen = 0.0
-    for i in range(4):
-        for j in range(i + 1, 4):
-            d = float(np.linalg.norm(tips[i] - tips[j]))
-            if d < FLIPPER_COLLISION_DIST:
-                pen += FLIPPER_COLLISION_DIST - d
-    return FLIPPER_COLLISION_W * pen
-
-
-def _flipper_travel_dir(fb: dict) -> float:
-    """Signo de la direccion de avance en frame local -- MISMO que
-    base_env.flipper_travel_dir (train_fast): +1 adelante, -1 en reversa
-    (v_fwd < 0). Debe usarse el MISMO signo aqui y en _get_flipper_edge."""
-    return 1.0 if float(fb["twist"][0]) >= 0.0 else -1.0
-
-
-def _flipper_terrain_bonus(fb: dict, flip_qpos: np.ndarray) -> float:
-    """Bonus por tener la PUNTA del flipper por delante Y arriba del borde
-    real mas cercano -- MISMO criterio que base_env.flipper_terrain_bonus
-    (train_fast); ver ese docstring para el razonamiento geometrico completo,
-    incluido el intercambio de rol delantero/trasero al retroceder.
-    0.0 si no hay heightmap o si el flipper no tiene un borde trepable cerca."""
-    edge = fb.get("flipper_edge")
-    if edge is None:
-        return 0.0
-    theta = np.asarray(flip_qpos, dtype=np.float64)
-    travel_dir = _flipper_travel_dir(fb)
-    reach = travel_dir * FLIPPER_L * np.sin(theta)
-    height = FLIPPER_L * np.cos(theta)
-    clear = edge["climbable"] & (reach >= edge["d"]) & (height >= edge["h"])
-    return FLIPPER_TERRAIN_W * float(np.mean(clear.astype(np.float32)))
 
 
 def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardState) -> float:
@@ -338,11 +290,13 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
 
     # Desglose FIRMADO del reward (la suma de todos los terminos == reward total).
     terms = {k: 0.0 for k in ("fall", "obstacle", "stuck", "energy", "flipper_jerk",
-                              "tilt", "flipper_collision", "accel", "wp_bonus", "progress",
+                              "flipper_collision", "accel", "flipper_terrain",
+                              "wp_bonus", "progress",
                               "direction", "velocity", "backward", "time")}
 
-    # 1. Caida letal (chasis muy bajo) o tocar piso (salirse de los pallets):
-    if fb["z"] < 0.10 or fb.get("floor_contact", 0) > 0:
+    # 1. Caida letal: volcado, chasis muy bajo o tocar piso -- MISMAS condiciones
+    #    que corta _terminated(), asi caerse SIEMPRE cuesta FALL_PENALTY.
+    if is_fallen(fb):
         terms["fall"] = -FALL_PENALTY
         rs.last_terms = terms
         return -FALL_PENALTY
@@ -370,24 +324,18 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     #    la accion normalizada — mismo espiritu de penalizacion casi nula)
     action_cost = ENERGY_W * float(np.square(action).mean())
 
-    # 4. Movimiento erratico de flippers: delta del flipper EFECTIVO (post-gate)
-    current_flipper = flipper_targets(action)
-    if current_flipper is None:
-        current_flipper = np.full(4, FLIPPER_HOME_RAD, dtype=np.float32)
-    flipper_pen = FLIPPER_JERK_W * float(np.square(current_flipper - rs.last_flip).mean())
-    rs.last_flip = current_flipper.copy()
+    # 4. Movimiento erratico de flippers: velocidad angular REAL medida
+    #    (fb["flip_qvel"], ya limitada por la rampa) -- MISMO cambio que
+    #    base_env.compute_reward, ver ese comentario para el razonamiento.
+    flipper_pen = FLIPPER_JERK_W * float(np.square(fb["flip_qvel"]).mean())
 
-    # 5. Inclinacion total en cualquier eje (roll Y pitch): sqrt(gx^2+gy^2) =
-    #    sin(angulo total). Zona libre TILT_FREE (rampas/escalones); el exceso
-    #    castiga volcadura (roll) Y volteretas/wheelies (pitch) — MISMO que
-    #    base_env.compute_reward (train_fast).
-    gb = fb["grav_body"]
-    tilt = float(np.hypot(float(gb[0]), float(gb[1])))
-    tilt_pen = max(0.0, tilt - TILT_FREE) * TILT_W
+    # 5. (La inclinacion ya no tiene castigo graduado: pasar FALL_UPRIGHT_MIN es
+    #    caida letal -- FALL_PENALTY + fin de episodio, ver base_env.is_fallen.
+    #    MISMO que base_env.compute_reward (train_fast).)
 
     # 6. Auto-colision de flippers (dos flippers cuyas puntas se tocan) — se
     #    evalua sobre los angulos REALES medidos (fb["flip_qpos"]).
-    flipper_collision_pen = _flipper_collision_penalty(fb["flip_qpos"])
+    flipper_collision_pen = flipper_collision_penalty(fb["flip_qpos"])
 
     # 7. Aceleraciones FUERTES del chasis (cuidar la integridad del robot):
     #    cambio del twist base entre pasos, normalizado por [V_MAX, V_MAX, W_MAX].
@@ -399,18 +347,17 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     rs.last_twist = twist.copy()
     accel_pen = ACCEL_W * max(0.0, float(np.linalg.norm(accel)) - ACCEL_DEADZONE) ** 2
 
-    penalties = (penalty_stuck + action_cost + flipper_pen + tilt_pen
+    penalties = (penalty_stuck + action_cost + flipper_pen
                  + flipper_collision_pen + accel_pen)
     terms["stuck"]             = -penalty_stuck
     terms["energy"]            = -action_cost
     terms["flipper_jerk"]      = -flipper_pen
-    terms["tilt"]              = -tilt_pen
     terms["flipper_collision"] = -flipper_collision_pen
     terms["accel"]             = -accel_pen
 
     # 7b. Bonus por extender flippers cerca de terreno trepable (ver docstring
-    #     de _flipper_terrain_bonus). Se suma SIEMPRE, no es una "penalizacion".
-    terrain_bonus = _flipper_terrain_bonus(fb, fb["flip_qpos"])
+    #     de base_env.flipper_terrain_bonus). Se suma SIEMPRE, no es un castigo.
+    terrain_bonus = flipper_terrain_bonus(fb, fb["flip_qpos"])
     terms["flipper_terrain"] = terrain_bonus
 
     # 8. Waypoint cruzado — al cruzarlo
@@ -461,10 +408,11 @@ def _terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int, max_steps: int) ->
     if ep_steps >= max_steps:
         print("[base_env] ⏰ Episodio terminado por limite de pasos")
         return True, False
-    if fb["upright"] < 0.20:
+    # Mismos umbrales que base_env.is_fallen (que cobra FALL_PENALTY).
+    if fb["upright"] < FALL_UPRIGHT_MIN:
         print("[base_env] 🛑 Episodio terminado por caida (base demasiado inclinado)")
         return True, False
-    if fb["z"] < 0.10:
+    if fb["z"] < FALL_Z_MIN:
         print("[base_env] 🛑 Episodio terminado por caida (base demasiado bajo)")
         return True, False
     #if fb.get("floor_contact", 0) > 0:
@@ -584,21 +532,6 @@ class BaseRosEnv:
             return None
         return self.map_ctx.get_heatmap(robot_xy=fb["xy"], robot_z=fb["z"], robot_yaw=fb["yaw"])
 
-    def _get_flipper_edge(self, fb: dict):
-        """Borde real (escalon) en la direccion de extension de cada flipper
-        -- ver base_env.flipper_terrain_bonus. Al retroceder (fb["twist"][0]
-        < 0) delanteros y traseros intercambian su lado de escaneo, ver
-        _flipper_travel_dir. None si no hay map_ctx."""
-        if self.map_ctx is None:
-            return None
-        travel_dir = _flipper_travel_dir(fb)
-        found, d, h, climbable = self.map_ctx.get_flipper_climb_edges(
-            robot_xy=fb["xy"], robot_yaw=fb["yaw"],
-            mounts_xy=FLIPPER_MOUNTS[:, :2], axis_sign=FLIPPER_AXIS_SIGN * travel_dir,
-            look_ahead_m=FLIPPER_L, min_step_m=FLIPPER_TERRAIN_MIN_STEP_M,
-            max_climb_m=FLIPPER_TERRAIN_MAX_CLIMB_M, n_samples=FLIPPER_TERRAIN_SAMPLES)
-        return dict(found=found, d=d, h=h, climbable=climbable)
-
     # ── Mision (goal + ruta) segun el mundo activo ──────────────────────────
     def _sample_goal(self) -> np.ndarray:
         """goal fijo si se configuro uno; si no (solo modo plataforma), random
@@ -671,7 +604,7 @@ class BaseRosEnv:
         time.sleep(self.dt / SIM_SPEEDUP)
 
         fb = self._node.feedback()
-        fb["flipper_edge"] = self._get_flipper_edge(fb)
+        fb["flipper_edge"] = flipper_edge(self.map_ctx, fb)
         guidance = self.nav.step(fb["xy"], fb["yaw"])
         reward = _compute_reward(fb, guidance, action, self._rs)
 

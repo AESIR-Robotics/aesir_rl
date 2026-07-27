@@ -33,37 +33,47 @@ from typing import Optional, Tuple
 
 import numpy as np
 
-# Constantes de la tarea — TODAS viven en config.py; se re-exportan aqui para
-# que `from base_training.base_env import START_XY, ...` siga funcionando.
+# Constantes de la tarea — TODAS viven en config.py; aqui solo se importan las
+# que este modulo usa de verdad (los consumidores leen config.py directamente).
 from .config import (
-    NAV_JSON,
-    V_MAX_MPS, W_MAX_RADPS, V_REF_MPS, W_REF_RADPS,
-    FLIPPER_MAX, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD, CONTROL_FLIPPERS, FLIPPER_HOME_RAD,
-    START_XY, GOAL_XY, SPAWN_Z, FINISH_DIST, EPISODE_MAX_STEPS,
+    V_REF_MPS, W_REF_RADPS,
+    FLIPPER_MIN_RAD, FLIPPER_MAX_RAD, CONTROL_FLIPPERS, FLIPPER_HOME_RAD,
+    FINISH_DIST,
+    STUCK_TIMEOUT_STEPS, STUCK_NO_PROGRESS_M,
     W_DIRECTION, W_VELOCITY, WP_BONUS, TIME_PENALTY, FALL_PENALTY,
-    STUCK_MAX, STUCK_ANGULAR_THRESH_RAD, ENERGY_W, FLIPPER_JERK_W, TILT_W, TILT_FREE, FLIPPER_COLLISION_W,
+    FALL_UPRIGHT_MIN, FALL_Z_MIN,
+    STUCK_MAX, STUCK_ANGULAR_THRESH_RAD, ENERGY_W, FLIPPER_JERK_W, FLIPPER_COLLISION_W,
     FLIPPER_TERRAIN_W,
+    FLIPPER_TERRAIN_MIN_STEP_M, FLIPPER_TERRAIN_MAX_CLIMB_M,
+    FLIPPER_TERRAIN_MAX_DESCENT_M, FLIPPER_TERRAIN_SAMPLES,
     ACCEL_W, ACCEL_DEADZONE, GUIDE_SPEED_SCALE, BACKWARD_W,
     FLIPPER_MOUNTS, FLIPPER_AXIS_SIGN, FLIPPER_L, FLIPPER_COLLISION_DIST,
-    N_LOOKAHEAD, OBS_DIM, ACT_DIM, OBSTACLE_PENALTY,
+    OBSTACLE_PENALTY,
 )
 
 
 # ── Gate de flippers (compartido por los dos backends) ───────────────────────
 def flipper_targets(action) -> Optional[np.ndarray]:
     """Angulo objetivo (rad) de los 4 flippers segun la accion, o None si NO se
-    deben comandar (quedan como esten). Regla del gate action[6]:
+    deben comandar (quedan como esten).
       - CONTROL_FLIPPERS=False -> None (fase 1: flippers en reposo, no controlados).
-      - gate >= 0 -> la politica los controla: action[2:6] escalado y recortado.
-      - gate <  0 -> flippers a la pose de REPOSO (FLIPPER_HOME_RAD).
-    Asi la politica APAGA los flippers en plano (no estorban) y los ENCIENDE para
-    trepar en terreno, con una sola dimension facil de aprender."""
+      - action[6] = gate DISCRETO (Bernoulli, 0.0 o 1.0 exacto -- ver
+        CNNActorCritic/MLPActorCritic): 0 -> reposo (FLIPPER_HOME_RAD),
+        1 -> la politica controla via action[2:6].
+      - action[2:6] = muestra de una Beta por flipper, YA en [0,1] (soporte
+        acotado, sin necesidad de clip) -- se reescala afin a
+        [FLIPPER_MIN_RAD, FLIPPER_MAX_RAD]. Antes esto era una Gaussiana
+        recortada con np.clip, lo que genera una inconsistencia entre la
+        accion cruda que ve el log-prob y la accion recortada que ejecuta el
+        entorno; con Beta el soporte ya es exacto, no hace falta recortar."""
     if not CONTROL_FLIPPERS:
         return None
-    if float(action[6]) >= 0.0:
-        return np.clip(np.asarray(action[2:6], dtype=np.float32) * FLIPPER_MAX,
-                       FLIPPER_MIN_RAD, FLIPPER_MAX_RAD)
-    return np.full(4, FLIPPER_HOME_RAD, dtype=np.float32)
+    if float(action[6]) < 0.5:
+        return np.full(4, FLIPPER_HOME_RAD, dtype=np.float32)
+    # clip defensivo: la Beta ya garantiza [0,1], pero esta funcion tambien la
+    # llaman scripts/tests con acciones a mano, y de aqui sale el comando real.
+    u = np.clip(np.asarray(action[2:6], dtype=np.float32), 0.0, 1.0)
+    return FLIPPER_MIN_RAD + u * (FLIPPER_MAX_RAD - FLIPPER_MIN_RAD)
 
 
 # ── Observacion ──────────────────────────────────────────────────────────────
@@ -110,9 +120,10 @@ class RewardState:
         self.last_yaw = 0.0
         self.last_dist_to_target = 0.0
         self.last_wp = 0
-        self.last_flip = np.full(4, FLIPPER_HOME_RAD, dtype=np.float32)
         self.last_twist = np.zeros(3, dtype=np.float32)
         self.stuck = 0
+        self.best_dist_goal = np.inf
+        self.no_progress_steps = 0
 
     def reset(self, xy: np.ndarray, dist_to_target: float, yaw: float = 0.0):
         self.last_xy = xy.copy()
@@ -120,8 +131,9 @@ class RewardState:
         self.last_dist_to_target = dist_to_target
         self.last_wp = 0
         self.last_twist = np.zeros(3, dtype=np.float32)
-        self.last_flip = np.full(4, FLIPPER_HOME_RAD, dtype=np.float32)
         self.stuck = 0
+        self.best_dist_goal = np.inf
+        self.no_progress_steps = 0
 
 
 # ── Auto-colision de flippers ────────────────────────────────────────────────
@@ -148,6 +160,25 @@ def flipper_collision_penalty(flip_qpos: np.ndarray) -> float:
     return FLIPPER_COLLISION_W * pen
 
 
+def flipper_edge(map_ctx, fb: dict) -> Optional[dict]:
+    """Borde real (subida O bajada) en la direccion de extension de cada
+    flipper -- ver flipper_terrain_bonus. Al retroceder (fb["twist"][0] < 0)
+    delanteros y traseros intercambian su lado de escaneo, ver
+    flipper_travel_dir. None si no hay map_ctx (USE_HEATMAP=False). Compartido
+    por los dos backends: no toca ni MuJoCo ni ROS, solo map_ctx + config."""
+    if map_ctx is None:
+        return None
+    found, d, h, actionable = map_ctx.get_flipper_terrain_edges(
+        robot_xy=fb["xy"], robot_yaw=fb["yaw"],
+        mounts_xy=FLIPPER_MOUNTS[:, :2],
+        axis_sign=FLIPPER_AXIS_SIGN * flipper_travel_dir(fb),
+        look_ahead_m=FLIPPER_L, min_step_m=FLIPPER_TERRAIN_MIN_STEP_M,
+        max_climb_m=FLIPPER_TERRAIN_MAX_CLIMB_M,
+        max_descent_m=FLIPPER_TERRAIN_MAX_DESCENT_M,
+        n_samples=FLIPPER_TERRAIN_SAMPLES)
+    return dict(found=found, d=d, h=h, actionable=actionable)
+
+
 def flipper_travel_dir(fb: dict) -> float:
     """Signo de la direccion de avance en frame local: +1 adelante, -1 en
     reversa. Misma convencion que backward_pen (v_fwd < 0 = retrocediendo,
@@ -159,12 +190,11 @@ def flipper_travel_dir(fb: dict) -> float:
 
 
 def flipper_terrain_bonus(fb: dict, flip_qpos: np.ndarray) -> float:
-    """Bonus por tener la PUNTA del flipper por delante Y arriba del borde
-    real mas cercano (ver elevation_map.flipper_climb_edge / map_context.
-    get_flipper_climb_edges). Criterio geometrico, no un angulo "correcto"
-    inventado: dado un borde a (d_edge, h_edge) del mount (medido por
-    flipper_climb_edge), la punta lo libra si su alcance igual o supera
-    d_edge Y su altura sobre el mount iguala o supera h_edge -- asi no
+    """Bonus por poner la PUNTA del flipper donde sirve respecto del borde real
+    mas cercano (ver elevation_map.flipper_terrain_edge / map_context.
+    get_flipper_terrain_edges). Criterio geometrico, no un angulo "correcto"
+    inventado: dado un borde a (d_edge, h_edge) del mount, la punta tiene que
+    PASARLO horizontalmente y quedar del lado util en vertical -- asi no
     importa si el obstaculo esta a 15cm o 30cm, el mismo criterio pide MAS o
     MENOS angulo segun corresponda.
 
@@ -172,31 +202,56 @@ def flipper_terrain_bonus(fb: dict, flip_qpos: np.ndarray) -> float:
         offset_x = axis_sign * FLIPPER_L * sin(theta)
         height   = FLIPPER_L * cos(theta)   -- altura sobre el mount
     d_edge/h_edge se miden a lo largo de la direccion de ESCANEO, que es
-    axis_sign * travel_dir (ver _get_flipper_edge en ambos backends: cuando
-    el robot retrocede, delanteros y traseros escanean hacia el lado
-    contrario). El alcance a lo largo de esa MISMA direccion es:
+    axis_sign * travel_dir (ver flipper_edge: cuando el robot retrocede,
+    delanteros y traseros escanean hacia el lado contrario). El alcance a lo
+    largo de esa MISMA direccion es:
         reach = offset_x * (axis_sign * travel_dir) = travel_dir * FLIPPER_L * sin(theta)
-    (axis_sign**2 == 1 lo cancela). Con travel_dir=+1 (adelante) esto se
-    reduce exactamente a la formula original ya verificada.
+    (axis_sign**2 == 1 lo cancela).
 
-    0.0 si no hay heightmap disponible (fb["flipper_edge"] es None) o si el
-    flipper no tiene un borde trepable cerca (climbable=False, terreno
-    plano) -- no hay bonus por extender sin motivo."""
+    Criterio, segun el SIGNO del borde (misma derivacion, espejada):
+        SUBIDA  (h_edge > 0): reach >= d_edge  Y  height >= h_edge
+            la punta libro el escalon por arriba -> puede apoyarse y treparlo.
+        BAJADA  (h_edge < 0): reach >= d_edge  Y  height <= h_edge
+            la punta alcanza el suelo inferior mas alla del borde -> apoya y
+            el chasis baja controlado en vez de cabecear al vacio. Exige
+            |theta| > 90 grados (height < 0), dentro de FLIPPER_MAX_RAD=180.
+
+    0.0 si no hay heightmap (fb["flipper_edge"] es None) o si ningun flipper
+    tiene un borde atacable cerca (terreno plano) -- no hay bonus por extender
+    sin motivo."""
     edge = fb.get("flipper_edge")
     if edge is None:
         return 0.0
-    theta = np.asarray(flip_qpos, dtype=np.float64)
+    actionable = edge["actionable"]
+    if not actionable.any():         # caso comun (terreno plano) -- corta antes del trig
+        return 0.0
+    theta = np.asarray(flip_qpos, dtype=np.float32)
     travel_dir = flipper_travel_dir(fb)
     reach = travel_dir * FLIPPER_L * np.sin(theta)
     height = FLIPPER_L * np.cos(theta)
-    clear = edge["climbable"] & (reach >= edge["d"]) & (height >= edge["h"])
-    return FLIPPER_TERRAIN_W * float(np.mean(clear.astype(np.float32)))
+    h_edge = edge["h"]
+    with np.errstate(invalid="ignore"):
+        height_ok = np.where(h_edge > 0, height >= h_edge, height <= h_edge)
+        clear = actionable & (reach >= edge["d"]) & height_ok
+    return FLIPPER_TERRAIN_W * (np.count_nonzero(clear) / 4.0)
+
+
+# ── Caida (condicion UNICA, compartida por reward y terminacion) ─────────────
+def is_fallen(fb: dict) -> bool:
+    """El robot se cayo: volcado (inclinacion excesiva), chasis demasiado bajo,
+    o tocando el piso. UNA sola definicion para que compute_reward (que cobra
+    FALL_PENALTY) y terminated (que corta el episodio) usen EXACTAMENTE los
+    mismos umbrales -- si no, terminar por volcarse saldria gratis y seria un
+    escape barato de un episodio con retorno futuro negativo."""
+    return (fb["upright"] < FALL_UPRIGHT_MIN
+            or fb["z"] < FALL_Z_MIN
+            or fb.get("floor_contact", 0) > 0)
 
 
 # ── Reward ───────────────────────────────────────────────────────────────────
 def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState) -> float:
-    """Caida/piso letal o choque con el obstaculo (retorno temprano, termina el
-    episodio) -> castigos (stuck, energia, jerk flippers, inclinacion,
+    """Caida letal (volcado/muy bajo/piso) o choque con el obstaculo (retorno
+    temprano, termina el episodio) -> castigos (stuck, energia, jerk flippers,
     auto-colision flippers) -> bonus al cruzar waypoint (retorno temprano) ->
     progreso (delta_dist * boost exponencial de proximidad) + seguir
     velocidad/direccion de la guia del vortex (solo si avanza)."""
@@ -205,8 +260,9 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     target_xy = np.asarray(guidance["target"], dtype=np.float64)
     v_fwd = float(fb["twist"][0])
 
-    # 1. Caida letal (chasis muy bajo) o tocar piso (salirse de los pallets)
-    if fb["z"] < 0.10 or fb.get("floor_contact", 0) > 0:
+    # 1. Caida letal: volcado, chasis muy bajo o tocar piso -- MISMAS condiciones
+    #    que corta terminated(), asi caerse SIEMPRE cuesta FALL_PENALTY.
+    if is_fallen(fb):
         return -FALL_PENALTY
 
     if fb.get("obstacle_contact", 0) > 0:
@@ -228,22 +284,16 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     # 3. Costo de energia
     action_cost = ENERGY_W * float(np.square(action).mean())
 
-    # 4. Movimiento erratico de flippers: delta del flipper EFECTIVO (post-gate:
-    #    home fijo si gate=OFF o CONTROL_FLIPPERS=False, comandado si gate=ON) 
-    current_flipper = flipper_targets(action)
-    if current_flipper is None:
-        current_flipper = np.full(4, FLIPPER_HOME_RAD, dtype=np.float32)
-    flipper_pen = FLIPPER_JERK_W * float(np.square(current_flipper - rs.last_flip).mean())
-    rs.last_flip = current_flipper.copy()
+    # 4. Movimiento erratico de flippers: velocidad angular REAL medida
+    #    (fb["flip_qvel"], ya limitada por la rampa FLIPPER_MAX_VEL/ACCEL), no
+    #    el delta del target comandado -- ese delta es ruido de muestreo de la
+    #    politica estocastica (target resampleado cada step) y no refleja
+    #    movimiento fisico real, lo que antes inflaba este castigo muy por
+    #    encima de flipper_terrain_bonus incluso con el flipper quieto.
+    flipper_pen = FLIPPER_JERK_W * float(np.square(fb["flip_qvel"]).mean())
 
-    # 5. Inclinacion total en cualquier eje (roll Y pitch): magnitud horizontal
-    #    de la gravedad en el cuerpo = sqrt(gx^2+gy^2) = sin(angulo de inclinacion
-    #    total). Zona libre TILT_FREE para subir rampas/escalones (pitch moderado
-    #    OK); el exceso se castiga -> desalienta volcadura (roll) Y volteretas/
-    #    wheelies (pitch) por igual. terminated() corta la inclinacion extrema.
-    gb = fb["grav_body"]
-    tilt = float(np.hypot(float(gb[0]), float(gb[1])))
-    tilt_pen = max(0.0, tilt - TILT_FREE) * TILT_W
+    # 5. (La inclinacion ya no tiene castigo graduado: pasar FALL_UPRIGHT_MIN es
+    #    caida letal -- FALL_PENALTY + fin de episodio, ver is_fallen arriba.)
 
     # 6. Auto-colision de flippers (angulos REALES medidos)
     flipper_collision_pen = flipper_collision_penalty(fb["flip_qpos"])
@@ -259,7 +309,7 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     rs.last_twist = twist.copy()
     accel_pen = ACCEL_W * max(0.0, float(np.linalg.norm(accel)) - ACCEL_DEADZONE) ** 2
 
-    penalties = (penalty_stuck + action_cost + flipper_pen + tilt_pen
+    penalties = (penalty_stuck + action_cost + flipper_pen
                  + flipper_collision_pen + accel_pen)
 
     # 7b. Bonus por extender flippers cerca de terreno trepable (ver docstring
@@ -299,20 +349,30 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
 
 # ── Terminacion ──────────────────────────────────────────────────────────────
 def terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int,
-               max_steps: int) -> Tuple[bool, bool, Optional[str]]:
+               max_steps: int, rs: "RewardState") -> Tuple[bool, bool, Optional[str]]:
     """Devuelve (done, reached_goal, reason). 'reason' es un texto corto para
     logear (o None si no termino) — el caller decide si imprimir (util para no
-    spamear con N envs en paralelo)."""
+    spamear con N envs en paralelo). Las tres condiciones de caida usan los
+    MISMOS umbrales que is_fallen() (que cobra FALL_PENALTY); aqui se checan
+    por separado solo para poder logear el motivo exacto."""
     if ep_steps >= max_steps:
         return True, False, "limite de pasos"
-    if fb["upright"] < 0.20:
+    if fb["upright"] < FALL_UPRIGHT_MIN:
         return True, False, "caida (demasiado inclinado)"
-    if fb["z"] < 0.10:
+    if fb["z"] < FALL_Z_MIN:
         return True, False, "caida (demasiado bajo)"
     if fb.get("floor_contact", 0) > 0:
         return True, False, "toco el piso"
     #if fb.get("obstacle_contact", 0) > 0:
     #    return True, False, "choco con el obstaculo"
-    if float(np.linalg.norm(fb["xy"] - goal_xy)) < FINISH_DIST:
+    dist_goal = float(np.linalg.norm(fb["xy"] - goal_xy))
+    if dist_goal < FINISH_DIST:
         return True, True, "META alcanzada"
+    if dist_goal < rs.best_dist_goal - STUCK_NO_PROGRESS_M:
+        rs.best_dist_goal = dist_goal
+        rs.no_progress_steps = 0
+    else:
+        rs.no_progress_steps += 1
+        if rs.no_progress_steps >= STUCK_TIMEOUT_STEPS:
+            return True, False, "atascado (sin progreso)"
     return False, False, None

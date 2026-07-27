@@ -8,7 +8,6 @@ bridge ROS2) y los scripts de visualizacion/tests. Todos los parametros
 ajustables viven en base_training/config.py.
 """
 import json
-import os
 import numpy as np
 from shapely.geometry import Polygon as ShapelyPolygon
 from shapely.geometry import Point as ShapelyPoint
@@ -24,8 +23,7 @@ try:
         REACH_DIST, MAX_GUIDE_DIST, N_LOOKAHEAD, LOOKAHEAD_STEP,
         ATT_GAIN, ATT_RANGE, REP_GAIN, REP_RANGE, ROBOT_HALF, SWIRL, MIN_PROGRESS,
         PLATFORM_HALF_EXTENT, VIRTUAL_OBSTACLE_HALF_SIZE,
-        VIRTUAL_OBSTACLE_MIN_HALF_SIZE, VIRTUAL_OBSTACLE_CLEARANCE,
-        VIRTUAL_OBSTACLE_MAX_SKIP, VIRTUAL_OBSTACLE_OFFSET_FRAC,
+        VIRTUAL_OBSTACLE_MIN_HALF_SIZE, VIRTUAL_OBSTACLE_OFFSET_FRAC,
     )
 except ImportError:
     from base_training.config import (
@@ -34,8 +32,7 @@ except ImportError:
         REACH_DIST, MAX_GUIDE_DIST, N_LOOKAHEAD, LOOKAHEAD_STEP,
         ATT_GAIN, ATT_RANGE, REP_GAIN, REP_RANGE, ROBOT_HALF, SWIRL, MIN_PROGRESS,
         PLATFORM_HALF_EXTENT, VIRTUAL_OBSTACLE_HALF_SIZE,
-        VIRTUAL_OBSTACLE_MIN_HALF_SIZE, VIRTUAL_OBSTACLE_CLEARANCE,
-        VIRTUAL_OBSTACLE_MAX_SKIP, VIRTUAL_OBSTACLE_OFFSET_FRAC,
+        VIRTUAL_OBSTACLE_MIN_HALF_SIZE, VIRTUAL_OBSTACLE_OFFSET_FRAC,
     )
 
 def box_corners_2d(center_xy: np.ndarray, half_sizes: np.ndarray, rot_mat: np.ndarray) -> np.ndarray:

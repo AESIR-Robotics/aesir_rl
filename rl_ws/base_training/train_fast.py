@@ -34,7 +34,6 @@ if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
 import rl_ws.base_training.config as C
-from rl_ws.base_training.ppo import MLPActorCritic, ppo_update, compute_gae
 from rl_ws.base_training.mujoco_sim_base import VecMujocoEnv
 
 try:
@@ -107,7 +106,7 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
                 obs = nobs
 
             with torch.no_grad():
-                _, _, lv = policy(torch.as_tensor(obs, dtype=torch.float32, device=device))
+                _, lv = policy(torch.as_tensor(obs, dtype=torch.float32, device=device))
             last_val = lv.squeeze(-1).cpu().numpy()
 
             adv, ret = compute_gae(b_rew, b_val, b_done, last_val, gamma, gae_lambda)
@@ -156,8 +155,8 @@ if __name__ == "__main__":
     ap.add_argument("--batch", type=int, default=C.BATCH_SIZE)
     ap.add_argument("--lr", type=float, default=C.LR)
     ap.add_argument("--wandb", action="store_true")
-    #ap.add_argument("--resume", default=str(C.CHECKPOINT_DIR / "fast_iter01800.pt"))
-    ap.add_argument("--resume", default=None)
+    ap.add_argument("--resume", default=str(C.CHECKPOINT_DIR / "fast_iter01000.pt"))
+    #ap.add_argument("--resume", default=None)
     args = ap.parse_args()
     train(n_envs=args.n_envs, steps_per_env=args.steps, iters=args.iters,
           batch_size=args.batch, lr=args.lr, use_wandb=args.wandb, resume_from=args.resume)

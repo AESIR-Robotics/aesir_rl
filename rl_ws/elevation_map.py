@@ -333,80 +333,82 @@ def get_circular_height_heatmap(global_elevation, origin_xy, resolution,
 #    trepable" o no vive en la capa de tarea/reward, no aqui)
 # ----------------------------------------------------------------------
 def sample_elevation_at(global_elevation, origin_xy, resolution, z_min, points_xy):
-    """Altura REAL (metros) en cada punto mundo de `points_xy` (N,2), por
+    """Altura REAL (metros) en cada punto mundo de `points_xy` (...,2), por
     vecino-mas-cercano sobre la grilla global. NaN (sin dato) -> z_min,
-    MISMA convencion que get_circular_height_heatmap (sin dato = piso)."""
+    MISMA convencion que get_circular_height_heatmap (sin dato = piso).
+    Acepta cualquier shape (...,2) -- devuelve la misma sin el ultimo eje.
+    Si `global_elevation` ya viene sin NaN (ver MapContext.elevation_filled)
+    el np.where de abajo es un no-op barato."""
     pts = np.asarray(points_xy, dtype=np.float64)
-    ix = np.clip(np.round((pts[:, 0] - origin_xy[0]) / resolution).astype(int),
+    ix = np.clip(np.round((pts[..., 0] - origin_xy[0]) / resolution).astype(int),
                 0, global_elevation.shape[0] - 1)
-    iy = np.clip(np.round((pts[:, 1] - origin_xy[1]) / resolution).astype(int),
+    iy = np.clip(np.round((pts[..., 1] - origin_xy[1]) / resolution).astype(int),
                 0, global_elevation.shape[1] - 1)
     h = global_elevation[ix, iy]
     return np.where(np.isnan(h), z_min, h)
 
 
-def flipper_climb_edge(global_elevation, origin_xy, resolution, z_min,
-                       robot_xy, robot_yaw, mounts_xy, axis_sign,
-                       look_ahead_m, min_step_m, max_climb_m, n_samples=8):
-    """Busca el PRIMER borde real (escalon) en la direccion de extension de
-    cada flipper -- SOLO geometria + dos umbrales de tarea (min/max, ver
-    config.FLIPPER_TERRAIN_MIN_STEP_M / MAX_CLIMB_M):
+def flipper_terrain_edge(global_elevation, origin_xy, resolution, z_min,
+                         robot_xy, robot_yaw, mounts_xy, axis_sign,
+                         look_ahead_m, min_step_m, max_climb_m, max_descent_m,
+                         n_samples=8):
+    """Busca el PRIMER borde real en la direccion de extension de cada flipper,
+    SUBIDA o BAJADA -- SOLO geometria + umbrales de tarea (ver
+    config.FLIPPER_TERRAIN_MIN_STEP_M / MAX_CLIMB_M / MAX_DESCENT_M):
 
     Escanea `n_samples` puntos a distancias crecientes (hasta look_ahead_m)
-    desde el punto de montaje, en la MISMA direccion que flipper_terrain_delta
+    desde el punto de montaje, hacia el lado al que ese flipper se extiende
     (adelante para delanteros, atras para traseros). Para cada flipper,
-    devuelve el PRIMER punto donde el desnivel sobre el mount cruza
-    min_step_m (filtra ruido del piso -- micro-irregularidades que no son un
-    escalon de verdad):
-        found     (4,) bool  -- se encontro un borde en el rango escaneado
-        d_edge    (4,) float -- distancia (m) del mount al borde (nan si no)
-        h_edge    (4,) float -- desnivel (m) del borde SOBRE el mount (nan si no)
-        climbable (4,) bool  -- found AND h_edge <= max_climb_m (no es una
-                                pared/obstaculo imposible de trepar)
+    devuelve el PRIMER punto donde |desnivel| sobre el mount cruza min_step_m
+    (filtra ruido del piso -- micro-irregularidades que no son un borde real):
+        found      (4,) bool  -- se encontro un borde en el rango escaneado
+        d_edge     (4,) float -- distancia (m) del mount al borde (nan si no)
+        h_edge     (4,) float -- desnivel CON SIGNO (m) sobre el mount:
+                                 >0 escalon a subir, <0 caida a bajar (nan si no)
+        actionable (4,) bool  -- found AND el borde esta dentro de lo que el
+                                 flipper puede atacar: subida <= max_climb_m
+                                 (arriba de eso es pared) o bajada <=
+                                 max_descent_m (mas abajo la punta no llega)
 
-    mounts_xy/axis_sign: ver flipper_terrain_delta (misma convencion)."""
+    OJO: al detectar |dh| (no solo dh>0), en terreno mixto el "primer borde"
+    puede ser ahora una BAJADA donde antes se reportaba la siguiente subida.
+
+    mounts_xy: (4,2) posicion de cada mount en frame LOCAL del robot.
+    axis_sign: (4,) signo del lado de extension (+1 delanteros, -1 traseros;
+               multiplicar por travel_dir para invertirlo en reversa, ver
+               base_env.flipper_travel_dir)."""
     c, s = np.cos(robot_yaw), np.sin(robot_yaw)
     R = np.array([[c, -s], [s, c]])   # local (x=adelante,y=izq) -> mundo
 
-    mounts_world = robot_xy + (R @ np.asarray(mounts_xy, dtype=np.float64).T).T
+    mounts_world = robot_xy + np.asarray(mounts_xy, dtype=np.float64) @ R.T
     look_local = np.stack([np.sign(axis_sign), np.zeros(4)], axis=1)
-    look_world = (R @ look_local.T).T
-    h0 = sample_elevation_at(global_elevation, origin_xy, resolution, z_min, mounts_world)
+    look_world = look_local @ R.T
 
-    found = np.zeros(4, dtype=bool)
-    d_edge = np.full(4, np.nan, dtype=np.float32)
-    h_edge = np.full(4, np.nan, dtype=np.float32)
-    for k in range(1, n_samples + 1):
-        d = look_ahead_m * k / n_samples
-        pts = mounts_world + look_world * d
-        h = sample_elevation_at(global_elevation, origin_xy, resolution, z_min, pts)
-        dh = (h - h0).astype(np.float32)
-        newly = (~found) & (dh >= min_step_m)
-        d_edge[newly] = d
-        h_edge[newly] = dh[newly]
-        found |= newly
+    # Los n_samples+1 puntos (mount + escaneo) de los 4 flippers en UN solo
+    # gather: (K,4,2) -> una llamada a sample_elevation_at en vez de n_samples+1.
+    # `d` conserva la expresion original (look_ahead_m*k/n_samples) porque el
+    # orden de las operaciones decide de que lado del np.round cae el punto.
+    d_steps = np.array([look_ahead_m * k / n_samples for k in range(1, n_samples + 1)])
+    pts = np.empty((n_samples + 1, 4, 2), dtype=np.float64)
+    pts[0] = mounts_world
+    pts[1:] = mounts_world + look_world * d_steps[:, None, None]
 
-    climbable = found & (h_edge <= max_climb_m)
-    return found, d_edge, h_edge, climbable
+    h = sample_elevation_at(global_elevation, origin_xy, resolution, z_min, pts)
+    dh = (h[1:] - h[0]).astype(np.float32)          # (n_samples,4)
 
+    hit = np.abs(dh) >= min_step_m                  # (n_samples,4) subida O bajada
+    found = hit.any(axis=0)                         # (4,)
+    first = hit.argmax(axis=0)                      # primer k con desnivel (0 si ninguno)
+    d_edge = np.where(found, d_steps[first], np.nan).astype(np.float32)
+    h_edge = np.where(found, dh[first, np.arange(4)], np.nan).astype(np.float32)
 
-def flipper_terrain_delta(global_elevation, origin_xy, resolution, z_min,
-                          robot_xy, robot_yaw, mounts_xy, axis_sign, look_ahead_m):
-    """Desnivel REAL (metros, con signo) a `look_ahead_m` fijo -- version mas
-    simple, un solo punto de muestreo (SIN buscar el borde real). Se conserva
-    por compatibilidad; para el reward de flippers usar flipper_climb_edge,
-    que localiza el borde real en vez de asumir una distancia fija."""
-    c, s = np.cos(robot_yaw), np.sin(robot_yaw)
-    R = np.array([[c, -s], [s, c]])   # local (x=adelante,y=izq) -> mundo
-
-    mounts_world = robot_xy + (R @ np.asarray(mounts_xy, dtype=np.float64).T).T
-    look_local = np.stack([np.sign(axis_sign), np.zeros(4)], axis=1)
-    look_world = (R @ look_local.T).T
-    far_world = mounts_world + look_world * look_ahead_m
-
-    h0 = sample_elevation_at(global_elevation, origin_xy, resolution, z_min, mounts_world)
-    h1 = sample_elevation_at(global_elevation, origin_xy, resolution, z_min, far_world)
-    return (h1 - h0).astype(np.float32)
+    # Atacable = subida no-pared, o bajada que la punta todavia alcanza.
+    # (con h_edge=nan ambas comparaciones dan False, y found ya es False)
+    with np.errstate(invalid="ignore"):
+        actionable = found & np.where(h_edge > 0,
+                                      h_edge <= max_climb_m,
+                                      -h_edge <= max_descent_m)
+    return found, d_edge, h_edge, actionable
 
 
 # ----------------------------------------------------------------------

@@ -2,46 +2,41 @@ r"""
 ppo_cnn_extractor.py
 =====================
 CNNActorCritic -- reemplazo DIRECTO de MLPActorCritic (definida en ppo.py),
-con la MISMA interfaz publica exacta, verificada contra tu ppo.py real:
+con la MISMA interfaz publica externa que necesita ppo_update()/train_fast.py:
 
-    forward(obs)              -> (mu, std, value)      igual forma que MLP
-    act_batch(obs_np, device) -> (act, logp, val) numpy  igual forma que MLP
-    act(obs_np, device)       -> (act, logp, val) de UNA obs (no vectorizado)
-    evaluate(obs, actions)    -> (logp, value, entropy)  MISMO nombre, MISMA
-                                  forma que MLPActorCritic.evaluate():
-                                    logp    (batch,1)  (sum(-1, keepdim=True))
-                                    value   (batch,1)  (sin squeeze)
-                                    entropy escalar    (.mean() ya aplicado)
+    act_batch(obs_np, device) -> (action, raw, logp, val) numpy
+    act(obs_np, device)       -> (action, raw, logp, val) de UNA obs
+    evaluate(obs, actions)    -> (logp, value, entropy)
+        logp    (batch,1)  (sum(-1, keepdim=True))
+        value   (batch,1)  (sin squeeze)
+        entropy escalar    (.mean() ya aplicado)
 
-Por que esto importa: ppo_update() en ppo.py llama a
-`lp, val, ent = policy.evaluate(obs[idx], actions[idx])` y despues hace
-aritmetica de tensores asumiendo esas formas exactas (`r = exp(lp-old_logp)`,
-`F.smooth_l1_loss(val, ret_t[idx])`, `ent_c*ent`). Si evaluate() regresa
-formas distintas, el training explota o (peor) entrena mal en silencio.
-Con esta version, CERO cambios son necesarios en ppo.py: ppo_update() y
-compute_gae() son agnosticos a la arquitectura, solo llaman al metodo
-publico de policy -- por eso basta con importar CNNActorCritic en vez de
-MLPActorCritic en train_fast.py.
-
-Como interpreta el vector de obs (aplanado por base_env.build_obs):
-    obs = [state (state_dim,) | heatmap.ravel() (H*W,)]
-La red corta la cola, la reacomoda a (1,H,W) y la mete a un CNN chico;
-el resto sigue como el MLP de siempre (mismo trunk conceptual, Tanh incl.).
+Distribucion de accion HIBRIDA (ver config.ACT_DIM), no una Gaussiana unica:
+    [0:2] v, ω        -- Normal, recortada a [-1,1] (igual que siempre)
+    [2:6] flipper×4   -- Beta, soporte YA en [0,1] (sin necesidad de recortar
+                         -- antes esto era Normal+clip, lo que genera una
+                         inconsistencia entre la accion cruda que ve el
+                         log-prob y la accion recortada que ejecuta el
+                         entorno; con Beta el soporte ya es exacto)
+    [6]   gate        -- Bernoulli, 0.0/1.0 exacto (antes era un escalar
+                         continuo umbralizado en 0, cuya entropia no esta
+                         acotada y puede crecer sin limite si el reward no
+                         la contrarresta -- Bernoulli tiene entropia maxima
+                         log(2), acotada por diseño)
+forward() ya NO regresa (mu,std,value) -- regresa (params: dict, value); el
+unico llamador externo (train_fast.py, bootstrap del ultimo value para GAE)
+solo necesita `value`, ver el `_, lv = policy(obs)` ahi.
 """
 
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.distributions import Normal
+import torch.nn.functional as F
+from torch.distributions import Normal, Beta, Bernoulli
 
-try:
-    from . import config as _C
-    _HIDDEN = _C.HIDDEN
-    _LOG_STD_INIT = _C.LOG_STD_INIT
-    _LOG_STD_MIN = _C.LOG_STD_MIN
-    _LOG_STD_MAX = _C.LOG_STD_MAX
-except ImportError:
-    _HIDDEN, _LOG_STD_INIT, _LOG_STD_MIN, _LOG_STD_MAX = 128, 0.0, -20.0, 2.0
+from . import config as C
+
+_BETA_EPS = 1e-6   # margen numerico lejos de 0/1 (soporte abierto de Beta)
 
 
 # ----------------------------------------------------------------------
@@ -68,13 +63,13 @@ class HeightmapCNN(nn.Module):
 
 
 # ----------------------------------------------------------------------
-# 2. Actor-Critic completo -- MISMO contrato publico que MLPActorCritic
+# 2. Actor-Critic completo -- accion hibrida (Normal + Beta + Bernoulli)
 # ----------------------------------------------------------------------
 class CNNActorCritic(nn.Module):
     def __init__(self, obs_dim: int, act_dim: int,
                  map_pixels: int = 64, map_feat_dim: int = 128,
-                 state_feat_dim: int = 64, hidden: int = _HIDDEN,
-                 log_std_init: float = _LOG_STD_INIT):
+                 state_feat_dim: int = 64, hidden: int = C.HIDDEN,
+                 log_std_init: float = C.LOG_STD_INIT):
         super().__init__()
 
         self.map_pixels = map_pixels
@@ -84,6 +79,11 @@ class CNNActorCritic(nn.Module):
             raise ValueError(
                 f"obs_dim={obs_dim} <= map_pixels^2={self.map_len}. "
                 f"OBS_DIM en config.py debe ser state_dim + H*W, no solo H*W."
+            )
+        if act_dim != 7:
+            raise ValueError(
+                f"act_dim={act_dim} -- la accion hibrida asume EXACTO 7: "
+                f"[v, ω, flipper×4, gate] (ver config.ACT_DIM)."
             )
         self.act_dim = act_dim
 
@@ -96,9 +96,11 @@ class CNNActorCritic(nn.Module):
             nn.Linear(map_feat_dim + state_feat_dim, hidden), nn.Tanh(),
         )
 
-        self.actor_mu = nn.Linear(hidden, act_dim)
+        self.actor_vw = nn.Linear(hidden, 2)               # mu de [v, ω]
+        self.log_std_vw = nn.Parameter(torch.full((2,), log_std_init))
+        self.actor_flip = nn.Linear(hidden, 8)              # (alpha_raw,beta_raw) x 4 flippers
+        self.actor_gate = nn.Linear(hidden, 1)               # logit del gate (Bernoulli)
         self.critic = nn.Linear(hidden, 1)
-        self.log_std = nn.Parameter(torch.full((act_dim,), log_std_init))
 
     def _split(self, obs: torch.Tensor):
         """obs: (batch, obs_dim) -> (state (batch,state_dim), map_img (batch,1,H,W))"""
@@ -107,108 +109,93 @@ class CNNActorCritic(nn.Module):
         return state, map_img
 
     def forward(self, obs):
-        """(batch, obs_dim) -> (mu, std, value) -- MISMA forma que MLPActorCritic.forward"""
+        """(batch, obs_dim) -> (params: dict, value (batch,1)).
+        params = {mu_vw, std_vw, alpha, beta, gate_logit} -- ver _dists()."""
         state, map_img = self._split(obs)
         feat = torch.cat([self.map_encoder(map_img), self.state_encoder(state)], dim=1)
         z = self.shared(feat)
 
-        mu = self.actor_mu(z)                                 # SIN tanh -- ver ppo.py.forward
-        value = self.critic(z)                                # (batch,1), SIN squeeze -- igual que MLP
-        log_std = torch.clamp(self.log_std, _LOG_STD_MIN, _LOG_STD_MAX)
-        return mu, log_std.exp().expand_as(mu), value
+        mu_vw = self.actor_vw(z)                                        # (batch,2)
+        log_std_vw = torch.clamp(self.log_std_vw, C.LOG_STD_MIN, C.LOG_STD_MAX)
+        std_vw = log_std_vw.exp().expand_as(mu_vw)
+
+        raw_flip = self.actor_flip(z)                                   # (batch,8)
+        alpha = F.softplus(raw_flip[:, 0::2]) + 1.0                     # (batch,4)
+        beta_ = F.softplus(raw_flip[:, 1::2]) + 1.0                     # (batch,4)
+
+        gate_logit = self.actor_gate(z).squeeze(-1)                     # (batch,)
+        value = self.critic(z)                                          # (batch,1)
+
+        return dict(mu_vw=mu_vw, std_vw=std_vw, alpha=alpha, beta=beta_,
+                    gate_logit=gate_logit), value
+
+    def _dists(self, obs):
+        params, value = self(obs)
+        d_vw = Normal(params["mu_vw"], params["std_vw"])
+        d_flip = Beta(params["alpha"], params["beta"])
+        d_gate = Bernoulli(logits=params["gate_logit"])
+        return d_vw, d_flip, d_gate, value
 
     @torch.no_grad()
     def act_batch(self, obs_np: np.ndarray, device):
-        """Rollout vectorizado (VecMujocoEnv, N envs) -- misma forma que MLP."""
+        """Rollout vectorizado (VecMujocoEnv, N envs)."""
         obs = torch.as_tensor(obs_np, dtype=torch.float32, device=device)
-        mu, std, value = self(obs)
-        dist = Normal(mu, std)
-        raw = dist.sample()
-        logp = dist.log_prob(raw).sum(-1)
-        action = raw.clamp(-1.0, 1.0)
+        d_vw, d_flip, d_gate, value = self._dists(obs)
+
+        raw_vw = d_vw.sample()                                          # (batch,2)
+        raw_flip = d_flip.sample().clamp(_BETA_EPS, 1.0 - _BETA_EPS)     # (batch,4)
+        raw_gate = d_gate.sample()                                      # (batch,)
+
+        logp = (d_vw.log_prob(raw_vw).sum(-1)
+                + d_flip.log_prob(raw_flip).sum(-1)
+                + d_gate.log_prob(raw_gate))
+
+        action_vw = raw_vw.clamp(-1.0, 1.0)
+        raw = torch.cat([raw_vw, raw_flip, raw_gate.unsqueeze(-1)], dim=-1)
+        action = torch.cat([action_vw, raw_flip, raw_gate.unsqueeze(-1)], dim=-1)
+
         return (action.cpu().numpy(), raw.cpu().numpy(), logp.cpu().numpy(),
                 value.squeeze(-1).cpu().numpy())
 
     @torch.no_grad()
     def act(self, obs_np: np.ndarray, device):
-        """Version de UNA obs (envs no vectorizados: train_base/test_base) --
-        misma forma que MLP.act()."""
+        """Version de UNA obs (envs no vectorizados: train_base/test_base)."""
         obs = torch.as_tensor(obs_np, dtype=torch.float32, device=device).unsqueeze(0)
-        mu, std, value = self(obs)
-        dist = Normal(mu, std)
-        raw = dist.sample()
-        logp = dist.log_prob(raw).sum(dim=-1)
-        action = raw.clamp(-1.0, 1.0)
+        d_vw, d_flip, d_gate, value = self._dists(obs)
+
+        raw_vw = d_vw.sample()
+        raw_flip = d_flip.sample().clamp(_BETA_EPS, 1.0 - _BETA_EPS)
+        raw_gate = d_gate.sample()
+
+        logp = (d_vw.log_prob(raw_vw).sum(-1)
+                + d_flip.log_prob(raw_flip).sum(-1)
+                + d_gate.log_prob(raw_gate))
+
+        action_vw = raw_vw.clamp(-1.0, 1.0)
+        raw = torch.cat([raw_vw, raw_flip, raw_gate.unsqueeze(-1)], dim=-1)
+        action = torch.cat([action_vw, raw_flip, raw_gate.unsqueeze(-1)], dim=-1)
+
         return (action.squeeze(0).cpu().numpy(), raw.squeeze(0).cpu().numpy(),
                 float(logp.item()), float(value.item()))
 
     def evaluate(self, obs, actions):
-        """(logp, value, entropy) -- MISMO nombre y MISMAS formas que
-        MLPActorCritic.evaluate(), verificado contra como ppo_update() lo usa:
+        """(logp, value, entropy) -- MISMAS formas que antes, ver ppo_update():
             logp    (batch,1)
             value   (batch,1)
-            entropy escalar (mean ya aplicado)
-        """
-        mu, std, value = self(obs)
-        dist = Normal(mu, std)
-        logp = dist.log_prob(actions).sum(-1, keepdim=True)
-        entropy = dist.entropy().sum(-1).mean()
+            entropy escalar (mean ya aplicado, suma de las 3 distribuciones)
+        `actions` = el tensor `raw` guardado por act_batch/act (7 columnas)."""
+        d_vw, d_flip, d_gate, value = self._dists(obs)
+
+        raw_vw = actions[:, 0:2]
+        raw_flip = actions[:, 2:6].clamp(_BETA_EPS, 1.0 - _BETA_EPS)
+        raw_gate = actions[:, 6]
+
+        logp = (d_vw.log_prob(raw_vw).sum(-1, keepdim=True)
+                + d_flip.log_prob(raw_flip).sum(-1, keepdim=True)
+                + d_gate.log_prob(raw_gate).unsqueeze(-1))
+
+        entropy = (d_vw.entropy().sum(-1)
+                   + d_flip.entropy().sum(-1)
+                   + d_gate.entropy()).mean()
+
         return logp, value, entropy
-
-
-# ----------------------------------------------------------------------
-# TEST -- confirma formas EXACTAS contra lo que ppo_update() espera,
-# usando dimensiones y heatmap reales de tu proyecto.
-# ----------------------------------------------------------------------
-if __name__ == "__main__":
-    print("=" * 60)
-    print("Test: CNNActorCritic vs contrato de ppo.py (MLPActorCritic)")
-    print("=" * 60)
-
-    N_LOOKAHEAD = 3          # <-- AJUSTA a tu valor real de config.py
-    STATE_DIM = 15 + 3 * N_LOOKAHEAD
-    MAP_PIXELS = 32
-    OBS_DIM = STATE_DIM + MAP_PIXELS * MAP_PIXELS
-    ACT_DIM = 6
-
-    print(f"STATE_DIM={STATE_DIM}  OBS_DIM={OBS_DIM}  ACT_DIM={ACT_DIM}")
-    net = CNNActorCritic(obs_dim=OBS_DIM, act_dim=ACT_DIM, map_pixels=MAP_PIXELS)
-    device = torch.device("cpu")
-
-    import sys
-    sys.path.insert(0, ".")
-    from map_context import MapContext
-    map_ctx = MapContext(bt_path="occ2.bt", resolution=0.05, radius_m=1.0, patch_pixels=MAP_PIXELS)
-    heatmap = map_ctx.get_heatmap(robot_xy=np.array([3.0, -2.5]), robot_z=0.15, robot_yaw=np.pi / 2)
-    state = np.random.randn(STATE_DIM).astype(np.float32)
-    obs_flat = np.concatenate([state, heatmap.astype(np.float32).ravel()])
-    obs_batch = np.stack([obs_flat] * 4)   # simula N=4 envs
-
-    # -- act_batch: shapes que espera el rollout de train_fast.py --
-    act, logp, val = net.act_batch(obs_batch, device)
-    assert act.shape == (4, ACT_DIM), act.shape
-    assert logp.shape == (4,), logp.shape
-    assert val.shape == (4,), val.shape
-    print(f"act_batch OK  -> act{act.shape} logp{logp.shape} val{val.shape}")
-
-    # -- act: version de una sola obs --
-    a1, lp1, v1 = net.act(obs_flat, device)
-    assert a1.shape == (ACT_DIM,), a1.shape
-    print(f"act OK        -> act{a1.shape} logp={lp1:.3f} val={v1:.3f}")
-
-    # -- evaluate: EXACTO lo que ppo_update() necesita --
-    obs_t = torch.as_tensor(obs_batch, dtype=torch.float32)
-    act_t = torch.as_tensor(act, dtype=torch.float32)
-    lp, val_t, ent = net.evaluate(obs_t, act_t)
-    assert lp.shape == (4, 1), lp.shape          # keepdim=True
-    assert val_t.shape == (4, 1), val_t.shape    # sin squeeze
-    assert ent.dim() == 0, ent.shape             # escalar (mean ya aplicado)
-    print(f"evaluate OK   -> logp{tuple(lp.shape)} value{tuple(val_t.shape)} entropy=escalar({ent.item():.3f})")
-
-    # -- simula EXACTO lo que hace ppo_update() con estos tensores --
-    old_logp = torch.as_tensor(logp, dtype=torch.float32).unsqueeze(-1)
-    r = torch.exp(lp - old_logp)
-    print(f"ratio r shape (debe ser [4,1]): {tuple(r.shape)}")
-    assert r.shape == (4, 1)
-
-    print("✅ TODO calza exacto con el contrato de ppo_update() / MLPActorCritic")
