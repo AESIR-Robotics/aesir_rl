@@ -86,7 +86,7 @@
         <!-- Rampa -->
         <body
             name="rampa"
-            pos="0 0 0.125"
+            pos="0 0 0.12"
             euler="90 0 0">
 
             <geom

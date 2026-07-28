@@ -5,7 +5,7 @@ mujoco_hardware_bridge.py — Reemplazo de hardware_loopback.py con fisica real 
 hardware_loopback.py hace eco instantaneo: lo que se comanda es lo que se reporta,
 sin fisica real. Este nodo en cambio:
 
-  1. Recibe /commands_hardware (hardware.msg.JointControl) — lo que publica
+  1. Recibe /commands_hardware (sensor_msgs.msg.JointState) — lo que publica
      TopicBridgeHardware::write() (posicion ya en convencion "hardware" [0,2pi]).
      Incluye brazo (joint_1..6), flippers (flipper_1..4_joint) y gripper
      (left/right_finger_joint) — ver target_joints en topic_bridge_hardware.cpp.
@@ -40,7 +40,6 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from geometry_msgs.msg import Twist, PoseStamped
-from hardware.msg import JointControl
 from std_srvs.srv import Trigger
 from std_msgs.msg import Int32, Float32MultiArray
 
@@ -144,6 +143,7 @@ class MujocoHardwareBridge(Node):
         self._pos_ramp_target = {n: float(self.data.qpos[self._qpos_adr[n]]) for n in POSITION_JOINT_LIMITS}
         self._pos_ramp_pos    = dict(self._pos_ramp_target)
         self._pos_ramp_vel    = {n: 0.0 for n in POSITION_JOINT_LIMITS}
+        self._pos_ramp_accel  = {n: POSITION_JOINT_LIMITS[n]["max_accel"] for n in POSITION_JOINT_LIMITS}
 
         # DOFs/qpos del freejoint del chasis, para leer velocidad base y publicarla
         # como Twist (igual que hardware_node/state_vel en el driver real).
@@ -178,7 +178,7 @@ class MujocoHardwareBridge(Node):
             Int32, "/hardware_node/obstacle_contact", 10
         )
         self.command_sub = self.create_subscription(
-            JointControl, "/commands_hardware", self._command_cb, 10
+            JointState, "/commands_hardware", self._command_cb, 10
         )
         self.obstacle_sub = self.create_subscription(
             Float32MultiArray, "/virtual_obstacle", self._obstacle_cb, 10
@@ -289,15 +289,18 @@ class MujocoHardwareBridge(Node):
         response.message = f"Sim reset to spawn {SPAWN_POSE}"
         return response
 
-    def _command_cb(self, msg: JointControl) -> None:
+    def _command_cb(self, msg: JointState) -> None:
         with self._lock:
-            for name, pos_hw in zip(msg.joint_names, msg.position):
+            for idx, (name, pos_hw) in enumerate(zip(msg.name, msg.position)):
                 aid = self._aid.get(name)
                 if aid is None:
                     continue
                 target = hw_to_ros(pos_hw)
                 if name in POSITION_JOINT_LIMITS:
                     self._pos_ramp_target[name] = target
+                    if idx < len(msg.effort):
+                        accel_cmd = float(msg.effort[idx])
+                        self._pos_ramp_accel[name] = min(abs(accel_cmd), POSITION_JOINT_LIMITS[name]["max_accel"])
                 else:
                     self.data.ctrl[aid] = target  # gripper: passthrough directo, sin rampa
 
@@ -321,9 +324,10 @@ class MujocoHardwareBridge(Node):
         with self._lock:
             for _ in range(self._substeps):
                 for name, lim in POSITION_JOINT_LIMITS.items():
+                    max_accel = min(self._pos_ramp_accel[name], lim["max_accel"])
                     pos, vel = ramp_toward_position(
                         self._pos_ramp_pos[name], self._pos_ramp_vel[name],
-                        self._pos_ramp_target[name], lim["max_vel"], lim["max_accel"], dt,
+                        self._pos_ramp_target[name], lim["max_vel"], max_accel, dt,
                     )
                     self._pos_ramp_pos[name], self._pos_ramp_vel[name] = pos, vel
                     self.data.ctrl[self._aid[name]] = pos

@@ -15,7 +15,7 @@ Por dentro, en cada step():
 
     accion [v, ω, flipper×4]
         ── Twist ──────────▶ hardware_node/cmd_vel        (bridge)
-        ── JointControl ───▶ /commands_hardware            (bridge)
+        ── JointState ─────▶ /commands_hardware            (bridge)
     (se deja avanzar la fisica real del bridge ~1/control_hz segundos)
         pose/twist/joints  ◀── hardware_node/pose, state_vel, joint_states
     guia = global_navigator.step(xy, yaw)   -- A* + vortex APF
@@ -43,7 +43,6 @@ import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist, PoseStamped
 from sensor_msgs.msg import JointState
-from hardware.msg import JointControl
 from std_srvs.srv import Trigger
 from std_msgs.msg import Int32, Float32MultiArray
 
@@ -62,6 +61,7 @@ from rl_ws.base_training.config import (
     NAV_JSON,
     V_MAX_MPS, W_MAX_RADPS, V_REF_MPS, W_REF_RADPS,
     FLIPPER_MAX, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD, FLIPPER_HOME_RAD,
+    FLIPPER_MAX_ACCEL,
     START_XY, GOAL_XY, FINISH_DIST, EPISODE_MAX_STEPS,
     W_DIRECTION, W_VELOCITY, WP_BONUS, TIME_PENALTY, FALL_PENALTY,
     STUCK_MAX, STUCK_ANGULAR_THRESH_RAD, ENERGY_W, FLIPPER_JERK_W, TILT_W, TILT_FREE, FLIPPER_COLLISION_W,
@@ -108,7 +108,7 @@ class _BridgeInterface(Node):
         self._obstacle_contact = 0                       # nº de contactos robot<->obstaculo
 
         self.cmd_vel_pub = self.create_publisher(Twist, "hardware_node/cmd_vel", 10)
-        self.joint_pub   = self.create_publisher(JointControl, "/commands_hardware", 10)
+        self.joint_pub   = self.create_publisher(JointState, "/commands_hardware", 10)
         # Manda el obstaculo virtual del episodio al bridge (lo hace fisico/visible).
         self.obstacle_pub = self.create_publisher(Float32MultiArray, "/virtual_obstacle", 10)
         self.create_subscription(PoseStamped, "hardware_node/pose", self._pose_cb, 10)
@@ -184,17 +184,29 @@ class _BridgeInterface(Node):
     def publish_action(self, v_norm: float, w_norm: float, flip_rad: np.ndarray):
         """flip_rad = angulo objetivo (rad) de los 4 flippers, YA resuelto por el
         gate (ver base_env.flipper_targets). El caller lo calcula; aqui solo se
-        recorta al limite por software y se convierte a convencion hardware."""
+        recorta al limite por software y se convierte a convencion hardware.
+
+        El comando se publica como sensor_msgs/JointState en /commands_hardware.
+        - name: flipper joints
+        - position: angulo objetivo en convencion hardware
+        - effort: aceleracion solicitada para mover los flippers (rad/s^2)
+        """
         tw = Twist()
         tw.linear.x  = float(np.clip(v_norm, -1.0, 1.0)) * V_MAX_MPS
         tw.angular.z = float(np.clip(w_norm, -1.0, 1.0)) * W_MAX_RADPS
         self.cmd_vel_pub.publish(tw)
 
-        jc = JointControl()
+        jc = JointState()
         jc.header.stamp = self.get_clock().now().to_msg()
-        jc.joint_names  = list(FLIPPER_JOINTS)
-        jc.position     = [ros_to_hw(float(np.clip(f, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD)))
-                           for f in flip_rad]
+        jc.name = list(FLIPPER_JOINTS)
+        jc.position = [ros_to_hw(float(np.clip(f, FLIPPER_MIN_RAD, FLIPPER_MAX_RAD)))
+                       for f in flip_rad]
+
+        # Effort representa aceleracion de flippers hacia la posicion deseada.
+        jc.effort = [
+            0.0 if abs(pos - hw_to_ros(cur)) < 1e-4 else float(np.sign(pos - hw_to_ros(cur)) * FLIPPER_MAX_ACCEL)
+            for pos, cur in zip(jc.position, self._flip_qpos)
+        ]
         self.joint_pub.publish(jc)
 
     def stop_robot(self):

@@ -1,10 +1,8 @@
 #include "hardware_interface/system_interface.hpp"
 #include "hardware_interface/types/hardware_interface_type_values.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "std_msgs/msg/float64_multi_array.hpp"
 #include "pluginlib/class_list_macros.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
-#include "hardware/msg/joint_control.hpp"
 
 #include <vector>
 #include <mutex>
@@ -32,13 +30,8 @@ class TopicBridgeHardware : public hardware_interface::SystemInterface
 private:
   rclcpp::Node::SharedPtr node_;
 
-  // Publisher for the custom JointControl message
-  rclcpp::Publisher<hardware::msg::JointControl>::SharedPtr command_pub_;
-
-  // Subscriber to update per-joint acceleration at runtime
-  // Topic: /hardware_bridge/set_acceleration
-  // Message: std_msgs/Float64MultiArray (one value per joint, in order)
-  rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr accel_sub_;
+  // Publisher for standard JointState commands
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr command_pub_;
 
   // Subscriber for incoming physical hardware feedback
   rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr feedback_sub_;
@@ -54,9 +47,6 @@ private:
   std::vector<double> latest_hw_states_;     // lastest position states
   std::vector<double> latest_hw_vel_states_; // velocity states
 
-  // Per-joint acceleration — updated at runtime via topic
-  std::vector<double> hw_acc_cmds_;
-  std::mutex acc_mutex_;   // Protect acceleration vector from concurrent access
   std::mutex state_mutex_; // Protects the state arrays from being read and written at the exact same time
 
   const std::vector<std::string> target_joints = {
@@ -88,9 +78,6 @@ public:
     hw_commands_.resize(nr_joints, 0.0);
     hw_vel_cmds_.resize(nr_joints, 0.0);
     hw_eff_cmds_.resize(nr_joints, 0.0);
-
-    // Default acceleration for every joint
-    hw_acc_cmds_.resize(nr_joints, DEFAULT_ACCELERATION);
 
     // -----------------------------------------------------------------
     // Node setup
@@ -130,30 +117,9 @@ public:
       }
     }
 
-    // Publisher: JointControl commands
-    command_pub_ = node_->create_publisher<hardware::msg::JointControl>(
+    // Publisher: standard JointState commands
+    command_pub_ = node_->create_publisher<sensor_msgs::msg::JointState>(
       "/commands_hardware", 10);
-
-    // Subscriber: runtime acceleration update
-    // Send a Float64MultiArray with exactly nr_joints values.
-    accel_sub_ = node_->create_subscription<std_msgs::msg::Float64MultiArray>(
-      "/hardware_bridge/set_acceleration",
-      10,
-      [this, nr_joints](const std_msgs::msg::Float64MultiArray::SharedPtr msg)
-      {
-        if (msg->data.size() != nr_joints) {
-          RCLCPP_WARN(
-            node_->get_logger(),
-            "set_acceleration: expected %zu values, got %zu — ignoring.",
-            nr_joints, msg->data.size());
-          return;
-        }
-        std::lock_guard<std::mutex> lock(acc_mutex_);
-        for (size_t i = 0; i < nr_joints; ++i) {
-          hw_acc_cmds_[i] = msg->data[i];
-        }
-        RCLCPP_INFO(node_->get_logger(), "Acceleration updated for all joints.");
-      });
 
     // Subscriber: Listen to physical hardware encoders
     feedback_sub_ = node_->create_subscription<sensor_msgs::msg::JointState>(
@@ -182,7 +148,7 @@ public:
 
     RCLCPP_INFO(node_->get_logger(),
       "TopicBridgeHardware initialised with %zu joints. "
-      "Publish Float64MultiArray to '/hw_bridge/set_acceleration' to update acceleration.",
+      "Commands are published as JointState; effort values are used as acceleration.",
       nr_joints);
 
     return hardware_interface::CallbackReturn::SUCCESS;
@@ -230,7 +196,7 @@ public:
     const rclcpp::Time & /*time*/,
     const rclcpp::Duration & /*period*/) override
   {
-    // Spin the node once to process incoming acceleration messages
+    // Spin the node once to process incoming feedback messages
     rclcpp::spin_some(node_);
 
     {
@@ -245,20 +211,15 @@ public:
   }
 
   // ---------------------------------------------------------------------------
-  // Write: publish JointControl with position, velocity, acceleration, effort
+  // Write: publish standard JointState with position, velocity, effort
+  // (effort is interpreted as acceleration)
   // ---------------------------------------------------------------------------
   hardware_interface::return_type write(
     const rclcpp::Time & time,
     const rclcpp::Duration & /*period*/) override
   {
-    hardware::msg::JointControl msg;
+    sensor_msgs::msg::JointState msg;
     msg.header.stamp = time;
-
-    std::vector<double> acc_snapshot;
-    {
-      std::lock_guard<std::mutex> lock(acc_mutex_);
-      acc_snapshot = hw_acc_cmds_;
-    }
 
     for (size_t i = 0; i < info_.joints.size(); ++i) {
       // Check if the current joint name exists in our target list
@@ -267,15 +228,14 @@ public:
         // ROS [-π, π]  →  Hardware [0, 2π]
         double pos_cmd = ros_to_hw(hw_commands_[i]);
 
-        msg.joint_names.push_back(info_.joints[i].name);
+        msg.name.push_back(info_.joints[i].name);
         msg.position.push_back(pos_cmd);
         msg.velocity.push_back(hw_vel_cmds_[i]);
-        msg.acceleration.push_back(acc_snapshot[i]);
         msg.effort.push_back(hw_eff_cmds_[i]);
       }
     }
 
-    if (!msg.joint_names.empty()) {
+    if (!msg.name.empty()) {
       command_pub_->publish(msg);
     }
 

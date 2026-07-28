@@ -7,7 +7,6 @@ find_package(geometry_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(hardware_interface REQUIRED)
 find_package(pluginlib REQUIRED)
-find_package(hardware REQUIRED)
 find_package(moveit_ros_planning_interface REQUIRED)
 
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/launch")
@@ -33,7 +32,6 @@ install(TARGETS arm_command_node
 
 ament_target_dependencies(${PROJECT_NAME}
   rclcpp
-  hardware
   hardware_interface
   pluginlib
   sensor_msgs

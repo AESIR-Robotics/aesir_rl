@@ -12,7 +12,7 @@ import math
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Twist
-from hardware.msg import JointControl
+from sensor_msgs.msg import JointState
 
 # Raiz del proyecto al path para leer los MISMOS limites que usa el entrenamiento
 # (tests/ -> rl_ws -> aesir_rl). Asi 'w'/'a'/'d' comandan exactamente V_MAX/W_MAX
@@ -20,7 +20,7 @@ from hardware.msg import JointControl
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
-from rl_ws.base_training.config import V_MAX_MPS, W_MAX_RADPS
+from rl_ws.base_training.config import V_MAX_MPS, W_MAX_RADPS, FLIPPER_MAX_ACCEL
 
 # Keybindings
 MOVE_BINDINGS = {
@@ -68,7 +68,7 @@ class AesirTeleop(Node):
     def __init__(self):
         super().__init__('aesir_teleop')
         self.cmd_vel_pub = self.create_publisher(Twist, '/hardware_node/cmd_vel', 10)
-        self.joint_pub = self.create_publisher(JointControl, '/commands_hardware', 10)
+        self.joint_pub = self.create_publisher(JointState, '/commands_hardware', 10)
 
         # Robot parameters — MISMOS limites que el entrenamiento (config.py), asi
         # 'w'/'a'/'d' mandan justo el tope que comandaria la politica (accion=1).
@@ -88,20 +88,24 @@ class AesirTeleop(Node):
         self.cmd_vel_pub.publish(twist)
 
     def publish_flippers(self):
-        jc = JointControl()
+        jc = JointState()
 
         # Numeracion del modelo: flipper_1,2 = FRENTE ; flipper_3,4 = ATRAS.
         # Los dos flippers de cada par tienen el mismo eje (delanteros (0,1,0),
         # traseros (0,-1,0)), asi que con el mismo valor ya se mueven juntos ->
         # NO hay que invertir ningun lado (antes se invertia por el modelo viejo).
         # Neutro = math.pi (convencion "hardware"); + front_angle mueve el par.
-        jc.joint_names = ['flipper_1_joint', 'flipper_2_joint',
-                          'flipper_3_joint', 'flipper_4_joint']
+        jc.name = ['flipper_1_joint', 'flipper_2_joint',
+                   'flipper_3_joint', 'flipper_4_joint']
         jc.position = [
             math.pi + self.front_angle,   # flipper_1 (frente-izq)
             math.pi + self.front_angle,   # flipper_2 (frente-der)
             math.pi + self.rear_angle,    # flipper_3 (atras-izq)
             math.pi + self.rear_angle,    # flipper_4 (atras-der)
+        ]
+        jc.effort = [
+            float(np.sign(pos - math.pi) * FLIPPER_MAX_ACCEL)
+            for pos in jc.position
         ]
         self.joint_pub.publish(jc)
 
