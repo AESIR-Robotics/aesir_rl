@@ -211,7 +211,7 @@ GUIDE_SPEED_SCALE = 1.0   # [m] distancia del guia que ya pide velocidad plena V
 BACKWARD_W        = 3.0   # castigo por retroceder (x fraccion de V_MAX en reversa)
 
 # ── Terminacion por atasco (sin progreso hacia la meta) ──────────────────────
-STUCK_TIMEOUT_STEPS = 1000     # pasos sin progreso -> termina
+STUCK_TIMEOUT_STEPS = 300     # pasos sin progreso -> termina
 STUCK_NO_PROGRESS_M = 0.05    # mejora minima (m) hacia la meta que reinicia el contador
 
 
@@ -315,7 +315,17 @@ ARM_JOINT_LIMITS = {
 HIDDEN        = 256      # neuronas por capa del trunk (2 capas Tanh)
 LOG_STD_INIT  = -0.5     # log-std inicial de la gaussiana de la politica
 LOG_STD_MIN   = -5.0     # clamp del log-std aprendible
-LOG_STD_MAX   = 1.0
+# Techo del log-std de v/w. IMPORTANTE: de las 7 dimensiones de accion, estas
+# dos son las UNICAS que pueden inflar la entropia sin limite -- los flippers
+# usan Beta (entropia diferencial sobre [0,1] acotada por 0) y el gate usa
+# Bernoulli (acotada por log 2). Con LOG_STD_MAX=1.0 (sigma<=2.72) el bono de
+# entropia ganaba: medido en los checkpoints, sigma_v subio 1.70 -> 1.98 entre
+# iter 1250 y 1500 y seguia. Como la accion se recorta a [-1,1], sigma=1.98
+# satura ~61% de las muestras en +-1 -> el comando lineal se vuelve bang-bang
+# aleatorio (de ahi los QACC inestables). Con 0.0 el tope es sigma=1.0, que
+# para una accion en [-1,1] sigue siendo mucha exploracion.
+# El clamp se aplica en forward(), asi que baja tambien al reanudar un .pt viejo.
+LOG_STD_MAX   = 0.0
 MAX_GRAD_NORM = 0.5      # clip de norma de gradiente en el update
 
 # ── Hiperparametros PPO / entrenamiento ──────────────────────────────────────

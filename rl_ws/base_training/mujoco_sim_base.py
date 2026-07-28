@@ -414,6 +414,11 @@ class VecMujocoEnv:
         self._pool = ThreadPoolExecutor(max_workers=n_envs)
         self._ep_return = np.zeros(n_envs, dtype=np.float64)
         self._ep_history: List[float] = []
+        self._success_history: List[bool] = []
+        # Success rate POR PISTA: con varias pistas activas la tasa global
+        # esconde que una pista facil compense a una dificil (o al reves).
+        # Ventana propia por pista, no compartida.
+        self._success_by_track: Dict[str, List[bool]] = {t: [] for t in self.tracks}
         self._n_reached = 0
 
     def reset(self) -> np.ndarray:
@@ -436,6 +441,18 @@ class VecMujocoEnv:
                 self._ep_history.append(float(self._ep_return[i]))
                 if len(self._ep_history) > 100:
                     self._ep_history.pop(0)
+                # Success rate movil: mismo criterio que avg_return (ultimos 100
+                # episodios TERMINADOS, no por iteracion) -- con ~17 episodios
+                # por iteracion la tasa cruda salta demasiado para leerla.
+                won = bool(inf.get("reached"))
+                self._success_history.append(won)
+                if len(self._success_history) > 100:
+                    self._success_history.pop(0)
+                by_tr = self._success_by_track.get(inf.get("track"))
+                if by_tr is not None:
+                    by_tr.append(won)
+                    if len(by_tr) > 100:
+                        by_tr.pop(0)
                 if inf.get("reached"):
                     self._n_reached += 1
                 if self.verbose and inf.get("reason"):
@@ -452,6 +469,18 @@ class VecMujocoEnv:
 
     def avg_return(self) -> float:
         return float(np.mean(self._ep_history)) if self._ep_history else float("nan")
+
+    def success_rate(self) -> float:
+        """Fraccion de los ultimos 100 episodios TERMINADOS que llegaron a la
+        meta. Es la metrica de tarea: n_reached es acumulado (siempre sube, no
+        dice si esta mejorando) y avg_return mezcla progreso con castigos."""
+        return float(np.mean(self._success_history)) if self._success_history else float("nan")
+
+    def success_rate_by_track(self) -> Dict[str, float]:
+        """{pista: success rate de SUS ultimos 100 episodios}. nan mientras esa
+        pista no haya terminado ninguno todavia."""
+        return {t: (float(np.mean(h)) if h else float("nan"))
+                for t, h in self._success_by_track.items()}
 
     @property
     def n_reached(self) -> int:

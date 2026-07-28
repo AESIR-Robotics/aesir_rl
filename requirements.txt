@@ -6,3 +6,5 @@ shapely==2.1.2
 matplotlib==3.10.9
 pillow==12.2.0
 wandb==0.28.0
+pyoctomap==1.2.1
+scipy==1.18.0

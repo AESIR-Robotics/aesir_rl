@@ -98,12 +98,22 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
     try:
         for it in range(start_iter, start_iter + iters):
             t0 = time.time()
+            n_done = n_ok = 0
             for t in range(T):
                 action, raw, logp, val = policy.act_batch(obs, device)
-                nobs, rew, done, _info = venv.step(action)
+                nobs, rew, done, infos = venv.step(action)
                 b_obs[t], b_act[t], b_logp[t] = obs, raw, logp
                 b_rew[t], b_val[t], b_done[t] = rew, val, done
                 obs = nobs
+
+                for d, inf in zip(done, infos):
+                    if d:
+                        n_done += 1
+                        n_ok += int(bool(inf.get("reached")))
+
+            sr_iter = n_ok / max(n_done, 1)      # tasa cruda de ESTA iteracion
+            sr_100 = venv.success_rate()          # movil, ultimos 100 episodios
+            sr_track = venv.success_rate_by_track()   # movil, por pista
 
             with torch.no_grad():
                 _, lv = policy(torch.as_tensor(obs, dtype=torch.float32, device=device))
@@ -122,14 +132,23 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
             avg = venv.avg_return()
             dt = time.time() - t0
             sps = T * N / dt
-            print(f"[Iter {it:4d}] avg_ret={avg:8.2f}  reached={venv.n_reached:3d}  "
-                  f"pi={m['pi']:+.4f}  v={m['v']:.3f}  ent={m['ent']:.3f}  "
-                  f"({dt:.1f}s, {sps:.0f} steps/s)")
+            print(f"[Iter {it:4d}] success={sr_100:5.1%} (100ep)  avg_ret={avg:8.2f}  "
+                  f"reached={venv.n_reached:4d}  pi={m['pi']:+.4f}  v={m['v']:.3f}  "
+                  f"ent={m['ent']:.3f}  ({dt:.1f}s, {sps:.0f} steps/s)")
+            print(f"           episodios: {n_done:3d}  meta={n_ok:3d} ({sr_iter:.0%})")
+            if len(sr_track) > 1:      # con UNA pista el desglose == el global
+                print("           por pista: " + "  ".join(
+                    f"{t}={r:.0%}" if r == r else f"{t}=--" for t, r in sr_track.items()))
 
             if use_wandb:
-                wandb.log({"iter": it, "avg_ep_r": avg, "n_reached": venv.n_reached,
-                           "policy_loss": m["pi"], "value_loss": m["v"],
-                           "entropy": m["ent"], "steps_per_s": sps})
+                log = {"iter": it, "avg_ep_r": avg, "n_reached": venv.n_reached,
+                       "policy_loss": m["pi"], "value_loss": m["v"],
+                       "entropy": m["ent"], "steps_per_s": sps,
+                       "success_rate": sr_100, "success_rate_iter": sr_iter}
+                # nan = esa pista aun no termina ningun episodio; no lo mandamos
+                # para no ensuciar la grafica de wandb con huecos.
+                log.update({f"success_rate/{t}": r for t, r in sr_track.items() if r == r})
+                wandb.log(log)
 
             if (it + 1) % save_every == 0:
                 p = C.CHECKPOINT_DIR / f"fast_iter{it+1:05d}.pt"
@@ -155,7 +174,7 @@ if __name__ == "__main__":
     ap.add_argument("--batch", type=int, default=C.BATCH_SIZE)
     ap.add_argument("--lr", type=float, default=C.LR)
     ap.add_argument("--wandb", action="store_true")
-    ap.add_argument("--resume", default=str(C.CHECKPOINT_DIR / "fast_iter01000.pt"))
+    ap.add_argument("--resume", default=str(C.CHECKPOINT_DIR / "fast_iter01050.pt"))
     #ap.add_argument("--resume", default=None)
     args = ap.parse_args()
     train(n_envs=args.n_envs, steps_per_env=args.steps, iters=args.iters,
