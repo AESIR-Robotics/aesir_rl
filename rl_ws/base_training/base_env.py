@@ -190,50 +190,57 @@ def flipper_travel_dir(fb: dict) -> float:
 
 
 def flipper_terrain_bonus(fb: dict, flip_qpos: np.ndarray) -> float:
-    """Bonus por poner la PUNTA del flipper donde sirve respecto del borde real
-    mas cercano (ver elevation_map.flipper_terrain_edge / map_context.
-    get_flipper_terrain_edges). Criterio geometrico, no un angulo "correcto"
-    inventado: dado un borde a (d_edge, h_edge) del mount, la punta tiene que
-    PASARLO horizontalmente y quedar del lado util en vertical -- asi no
-    importa si el obstaculo esta a 15cm o 30cm, el mismo criterio pide MAS o
-    MENOS angulo segun corresponda.
+    """Premia poner la PUNTA del flipper donde sirve respecto del borde real
+    (d_edge, h_edge) que detecto elevation_map.flipper_terrain_edge. Criterio
+    geometrico, no un angulo "correcto" inventado: la punta debe pasar el borde
+    y quedar del lado util, asi el mismo criterio pide mas o menos angulo segun
+    la distancia y altura del obstaculo.
 
-    Punta relativa al mount (pivote sobre eje y, ver flipper_tips):
-        offset_x = axis_sign * FLIPPER_L * sin(theta)
-        height   = FLIPPER_L * cos(theta)   -- altura sobre el mount
-    d_edge/h_edge se miden a lo largo de la direccion de ESCANEO, que es
-    axis_sign * travel_dir (ver flipper_edge: cuando el robot retrocede,
-    delanteros y traseros escanean hacia el lado contrario). El alcance a lo
-    largo de esa MISMA direccion es:
-        reach = offset_x * (axis_sign * travel_dir) = travel_dir * FLIPPER_L * sin(theta)
-    (axis_sign**2 == 1 lo cancela).
+    Punta relativa al mount (pivote sobre eje y, ver flipper_tips), medida a lo
+    largo de la direccion de ESCANEO (axis_sign * travel_dir; axis_sign**2 == 1
+    lo cancela, por eso solo queda travel_dir):
+        reach  = travel_dir * FLIPPER_L * sin(theta)
+        height = FLIPPER_L * cos(theta)
+    Region factible, segun el signo del borde (misma derivacion, espejada):
+        SUBIDA (h>0): reach >= d  Y  height >= h   -- libra el escalon por arriba
+        BAJADA (h<0): reach >= d  Y  height <= h   -- alcanza el suelo inferior,
+                      baja controlado en vez de cabecear (exige |theta| > 90)
 
-    Criterio, segun el SIGNO del borde (misma derivacion, espejada):
-        SUBIDA  (h_edge > 0): reach >= d_edge  Y  height >= h_edge
-            la punta libro el escalon por arriba -> puede apoyarse y treparlo.
-        BAJADA  (h_edge < 0): reach >= d_edge  Y  height <= h_edge
-            la punta alcanza el suelo inferior mas alla del borde -> apoya y
-            el chasis baja controlado en vez de cabecear al vacio. Exige
-            |theta| > 90 grados (height < 0), dentro de FLIPPER_MAX_RAD=180.
+    DENSO y ANCLADO en vez de indicador binario:
+        calidad(th) = clip(1 - hypot(max(0,d-reach), s_height)/FLIPPER_L, 0, 1)
+        score       = (calidad(th) - calidad(reposo)) / (1 - calidad(reposo))
+    Denso porque el indicador solo acertaba ~3% de las veces -> sin gradiente el
+    97% restante (mismo enfoque que R_flipper de arXiv 2306.10352). Anclado
+    porque sin ello el 66% del bonus se cobraba con los flippers EN REPOSO
+    (medido 0.333 de 0.503), premiando merodear el borde sin actuar. calidad==1
+    equivale al criterio binario, asi que es una generalizacion, no otro criterio.
 
-    0.0 si no hay heightmap (fb["flipper_edge"] es None) o si ningun flipper
-    tiene un borde atacable cerca (terreno plano) -- no hay bonus por extender
-    sin motivo."""
+    0.0 si no hay heightmap o si ningun flipper tiene borde atacable cerca."""
     edge = fb.get("flipper_edge")
     if edge is None:
         return 0.0
     actionable = edge["actionable"]
     if not actionable.any():         # caso comun (terreno plano) -- corta antes del trig
         return 0.0
-    theta = np.asarray(flip_qpos, dtype=np.float32)
     travel_dir = flipper_travel_dir(fb)
-    reach = travel_dir * FLIPPER_L * np.sin(theta)
-    height = FLIPPER_L * np.cos(theta)
-    h_edge = edge["h"]
-    with np.errstate(invalid="ignore"):
-        height_ok = np.where(h_edge > 0, height >= h_edge, height <= h_edge)
-        clear = actionable & (reach >= edge["d"]) & height_ok
-    return FLIPPER_TERRAIN_W * (np.count_nonzero(clear) / 4.0)
+    d_edge, h_edge = edge["d"], edge["h"]
+
+    def _quality(theta):
+        reach = travel_dir * FLIPPER_L * np.sin(theta)
+        height = FLIPPER_L * np.cos(theta)
+        s_reach = np.maximum(0.0, d_edge - reach)
+        s_height = np.where(h_edge > 0,
+                            np.maximum(0.0, h_edge - height),    # subida
+                            np.maximum(0.0, height - h_edge))    # bajada
+        return np.clip(1.0 - np.hypot(s_reach, s_height) / FLIPPER_L, 0.0, 1.0)
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        q = _quality(np.asarray(flip_qpos, dtype=np.float64))
+        q_rest = _quality(np.full(4, FLIPPER_HOME_RAD, dtype=np.float64))
+        # los no-atacables tienen d/h = nan -> se anulan aqui (nan no se propaga)
+        score = np.where(actionable & (q_rest < 1.0 - 1e-6),
+                         np.maximum(0.0, (q - q_rest) / (1.0 - q_rest)), 0.0)
+    return FLIPPER_TERRAIN_W * float(np.sum(score) / 4.0)
 
 
 # ── Caida (condicion UNICA, compartida por reward y terminacion) ─────────────
