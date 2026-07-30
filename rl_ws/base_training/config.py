@@ -122,7 +122,7 @@ W_MAX_RADPS = 5.0      # COMANDO angular.z a accion=1 (setpoint, no velocidad lo
 V_REF_MPS   = 0.48     # REAL: velocidad lineal maxima medida  (referencia del reward)
 W_REF_RADPS = 0.76     # REAL: velocidad angular maxima medida (referencia del reward)
 # Limite de recorrido de los flippers (por software)
-FLIPPER_MIN_RAD = -1.3
+FLIPPER_MIN_RAD = -1.1
 FLIPPER_MAX_RAD = 3.14159
 # La politica CONTROLA los flippers (fase 2: terreno). False = fase 1 (solo
 # base; action[2:6] se ignora, los flippers quedan en reposo). El checkpoint es
@@ -162,7 +162,28 @@ OBSTACLE_PENALTY = 1.0
 STUCK_MAX      = 1.0
 STUCK_ANGULAR_THRESH_RAD = 0.02
 ENERGY_W       = 1e-8
-FLIPPER_JERK_W = 0.5
+# Castigo por movimiento erratico de flippers, sobre la velocidad REAL medida
+# (mean(flip_qvel**2), ver base_env.compute_reward).
+#
+# MEDIDO con la politica entrenada (checkpoint iter 1350, 4800 pasos en
+# steps1m) contra el bonus de terreno, que es la conducta que queremos ENSENAR:
+#     JERK_W   castigo/paso   razon vs bonus   neto/paso
+#      0.50       0.2623          16.5x         -0.2465   <- valor anterior
+#      0.10       0.0525           3.3x         -0.0366
+#      0.05       0.0262           1.7x         -0.0103
+#      0.02       0.0105           0.7x         +0.0054
+# Con 0.5, MOVER los flippers costaba 13-16x mas de lo que pagaba dejarlos bien
+# puestos, y el castigo superaba al bonus en el 99% de los pasos (-84 de retorno
+# por episodio). La politica hacia lo racional: no tocarlos -- de ahi que solo
+# ~3% de los flippers quedaran en la pose correcta al tener un borde delante.
+#
+# Se elige 0.02, NO el punto de equilibrio justo (~0.03): para SALIR del optimo
+# local actual el balance tiene que ser positivo con el bonus de HOY (0.016, bajo
+# justamente porque no los usa). Si aprende a posicionarlos, el bonus sube hacia
+# 1.25 y el margen crece solo. Sigue habiendo amortiguacion: agitarlos a fondo
+# cuesta ~0.34/paso contra un bonus maximo de 1.25.
+# VIGILAR: si aparecen oscilaciones de flipper o mas WARNINGs de QACC, subirlo.
+FLIPPER_JERK_W = 0.02
 # (La inclinacion NO tiene castigo graduado propio: es una condicion de caida,
 #  ver FALL_UPRIGHT_MIN arriba -- un solo umbral, castigo + terminacion.)
 FLIPPER_COLLISION_W = 10.0
@@ -343,6 +364,24 @@ LR            = 3e-4     # learning rate (Adam)
 SAVE_EVERY    = 50       # iters entre checkpoints numerados
 DEVICE        = "auto"   # "auto" -> cuda si hay, si no cpu
 WANDB_PROJECT = "AIDL-PPO-AESIR-BASE-FAST"
+
+# ── SAC (train_sac.py) — pipeline PARALELO a PPO, mismo env y mismo config ──
+SAC_BUFFER_SIZE   = 1_000_000 
+SAC_BATCH_SIZE    = 512
+SAC_LR            = 3e-4
+SAC_TAU           = 0.005    # soft-update de los criticos objetivo
+SAC_GAMMA         = 0.99
+SAC_START_STEPS   = 5_000    # pasos con accion ALEATORIA antes de usar la red
+SAC_LEARN_STARTS  = 10_000   # transiciones en buffer antes del primer update
+SAC_UTD           = 1.0     # updates por paso de entorno (update-to-data).
+                             # 1.0 es el canonico; 0.5 por el costo de la CNN.
+SAC_LOG_STD_MIN   = -5.0
+SAC_LOG_STD_MAX   = 2.0
+
+SAC_ACT_DIM = 6
+SAC_REWARD_SCALE = 0.01
+SAC_TARGET_ENTROPY = -2.0
+WANDB_PROJECT_SAC = "AIDL-SAC-AESIR-BASE-FAST"
 
 # Entrenamiento sobre el backend ROS (train_base.py): la recoleccion es ~50x
 # mas lenta (bridge en tiempo semi-real), por eso iteraciones/batches menores.

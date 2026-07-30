@@ -34,19 +34,32 @@ for _p in (_ROOT, _HERE):                            # _HERE: para importar plot
 from rl_ws.base_training.base_ros_env import BaseRosEnv, NAV_JSON      # noqa: E402
 import rl_ws.base_training.config as C                                 # noqa: E402
 from rl_ws.base_training.ppo_cnn_extractor import CNNActorCritic       # noqa: E402
+from rl_ws.base_training.sac import Actor as SacActor, to_env_action   # noqa: E402
 
 DEFAULT_CKPT = os.path.join(_ROOT, "checkpoints_base", "fast_best.pt")
 
 
-def load_policy(path: str, obs_dim: int, act_dim: int, device) -> CNNActorCritic:
+def load_policy(path: str, obs_dim: int, act_dim: int, device, algo: str = "ppo"):
+    """Devuelve (policy, algo). PPO -> CNNActorCritic (checkpoints fast_*.pt),
+    SAC -> Actor de sac.py (checkpoints sac_*.pt). NO son intercambiables: son
+    arquitecturas distintas, por eso se detecta y se avisa en vez de reventar
+    con un KeyError."""
     ckpt = torch.load(path, map_location=device)
-    saved = ckpt["policy"]
+    if algo == "auto":
+        algo = "sac" if "actor" in ckpt else "ppo"
+    want = "actor" if algo == "sac" else "policy"
+    if want not in ckpt:
+        raise SystemExit(
+            f"'{os.path.basename(path)}' no parece un checkpoint de {algo.upper()} "
+            f"(falta la clave '{want}'; tiene {sorted(ckpt)[:4]}...). "
+            f"Los sac_*.pt son de SAC y los fast_*.pt de PPO.")
 
-    # Chequeo de compatibilidad: el .pt debe tener el mismo state_dim que el env
-    # actual (si cambio N_LOOKAHEAD o HEATMAP_PIXELS, el .pt no sirve aqui).
-    # act_dim ya lo valida el constructor de la politica (accion hibrida = 7
-    # exacto, ver CNNActorCritic), asi que no hace falta sondearlo del .pt.
-    ckpt_state_dim = int(saved["state_encoder.0.weight"].shape[1])
+    saved = ckpt[want]
+    # El .pt debe tener el mismo state_dim que el env actual (si cambio
+    # N_LOOKAHEAD o HEATMAP_PIXELS, no sirve). act_dim ya lo validan los
+    # constructores. La clave del encoder difiere entre las dos redes.
+    k = "enc.state_encoder.0.weight" if algo == "sac" else "state_encoder.0.weight"
+    ckpt_state_dim = int(saved[k].shape[1])
     state_dim = obs_dim - C.HEATMAP_PIXELS ** 2
     if ckpt_state_dim != state_dim:
         raise SystemExit(
@@ -54,16 +67,30 @@ def load_policy(path: str, obs_dim: int, act_dim: int, device) -> CNNActorCritic
             f"vs env(state={state_dim}). "
             f"Usa un .pt entrenado con esta misma configuracion.")
 
-    policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS).to(device)
+    if algo == "sac":
+        # El actor de SAC tiene SAC_ACT_DIM (6, sin gate), no el ACT_DIM=7 del
+        # env; to_env_action rellena el gate. Ver el docstring de sac.py.
+        policy = SacActor(obs_dim, C.SAC_ACT_DIM, map_pixels=C.HEATMAP_PIXELS).to(device)
+    else:
+        policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS).to(device)
     policy.load_state_dict(saved)
     policy.eval()
-    avg = ckpt.get("avg_ep_r", float("nan"))
-    print(f"Modelo cargado: {path}  (iter={ckpt.get('iter', '?')}, avg_ep_r={avg:.2f})")
-    return policy
+    extra = (f"success={ckpt['success_rate']:.1%}" if "success_rate" in ckpt
+             else f"avg_ep_r={ckpt.get('avg_ep_r', float('nan')):.2f}")
+    print(f"Modelo {algo.upper()} cargado: {path}  (iter={ckpt.get('iter', '?')}, {extra})")
+    return policy, algo
 
 
 @torch.no_grad()
-def pick_action(policy: CNNActorCritic, obs: np.ndarray, device, stochastic: bool) -> np.ndarray:
+def pick_action(policy, obs: np.ndarray, device, stochastic: bool,
+                algo: str = "ppo") -> np.ndarray:
+    if algo == "sac":
+        # El actor de SAC vive en [-1,1]; to_env_action lo pasa a la convencion
+        # del env (flippers a [0,1], gate a {0,1}) -- ver sac.to_env_action.
+        obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
+        a, _ = policy(obs_t, deterministic=not stochastic, with_logp=False)
+        return to_env_action(a.squeeze(0).cpu().numpy())
+
     if stochastic:
         action, _raw, _logp, _val = policy.act(obs, device)   # muestrea de la distribucion
         return action
@@ -246,6 +273,8 @@ class LiveTrajectoryPlot:
 def main():
     ap = argparse.ArgumentParser(description="Test de una politica base entrenada (.pt)")
     ap.add_argument("--checkpoint", default=DEFAULT_CKPT)
+    ap.add_argument("--algo", choices=("auto", "ppo", "sac"), default="auto",
+                    help="auto = deducirlo del contenido del .pt")
     ap.add_argument("--episodes", type=int, default=3)
     ap.add_argument("--stochastic", action="store_true",
                     help="muestrea de la distribucion (default: deterministico = media)")
@@ -272,7 +301,7 @@ def main():
     print(f"Dispositivo: {device}")
 
     env = BaseRosEnv()   # se conecta al bridge (espera su feedback); el bridge abre el viewer
-    policy = load_policy(args.checkpoint, env.obs_dim, env.act_len, device)
+    policy, algo = load_policy(args.checkpoint, env.obs_dim, env.act_len, device, args.algo)
 
     live = None
     if args.plot:
@@ -296,7 +325,7 @@ def main():
                 live.set_scene(env.waypoints, env.goal_xy, env.virtual_obstacle)
                 live.start_episode(ep + 1)
             while not done:
-                action = pick_action(policy, obs, device, args.stochastic)
+                action = pick_action(policy, obs, device, args.stochastic, algo)
 
                 #if len(action) > 2:
                 #    action[2:] = 0.0

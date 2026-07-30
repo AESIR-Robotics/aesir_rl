@@ -460,6 +460,9 @@ class VecMujocoEnv:
                     print(f"[vec] env{i}[{inf.get('track','?')}] {tag} {inf['reason']}  "
                           f"ret={self._ep_return[i]:.1f}  wp={inf.get('wp')}")
                 self._ep_return[i] = 0.0
+                inf["terminal_obs"] = o
+                reason = inf.get("reason") or ""
+                inf["truncated"] = reason.startswith("limite") or reason.startswith("atascado")
                 o = self.envs[i].reset()      # auto-reset
             obs[i]  = o
             rews[i] = r
