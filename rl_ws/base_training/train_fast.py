@@ -44,7 +44,8 @@ except ImportError:
 
 C.CHECKPOINT_DIR.mkdir(exist_ok=True)
 
-from rl_ws.base_training.ppo import ppo_update, compute_gae   # sin MLPActorCritic
+from rl_ws.base_training.ppo import (ppo_update, compute_gae,  # sin MLPActorCritic
+                                     RunningMeanStd)
 from rl_ws.base_training.ppo_cnn_extractor import CNNActorCritic
 
 
@@ -64,15 +65,27 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
 
     policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS).to(device)
     opt = torch.optim.Adam(policy.parameters(), lr=lr)
+    # El critico predice en espacio NORMALIZADO (ver RunningMeanStd en ppo.py).
+    ret_rms = RunningMeanStd()
     start_iter, best_avg = 0, -1e9
     if resume_from and Path(resume_from).is_file():
         ckpt = torch.load(resume_from, map_location=device)
         saved, msd = ckpt["policy"], policy.state_dict()
+        if "ret_rms" in ckpt:
+            ret_rms.load_state_dict(ckpt["ret_rms"])
+        else:
+            # Checkpoint PRE-normalizacion: su cabeza de critico esta entrenada
+            # para escupir retornos crudos (|W|~61 medido, 100x el actor). Con
+            # objetivo normalizado esos pesos son basura y volverian a ahogar
+            # el gradiente de la politica -> se descartan y se reinicializan.
+            saved = {k: v for k, v in saved.items() if not k.startswith("critic.")}
+            print("[resume] checkpoint sin ret_rms: descarto la cabeza del "
+                  "critico (estaba en escala cruda) y la reinicializo.")
         compat = {k: v for k, v in saved.items() if k in msd and v.shape == msd[k].shape}
-        skipped = [k for k in saved if k not in compat]
+        skipped = [k for k in msd if k not in compat]
         msd.update(compat); policy.load_state_dict(msd)
         if skipped:
-            print(f"[resume] arquitectura distinta: transferidos {len(compat)}, "
+            print(f"[resume] transferidos {len(compat)}, "
                   f"reinicializados {skipped}; optimizer/contadores de cero.")
         else:
             opt.load_state_dict(ckpt["optimizer"])
@@ -119,13 +132,18 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
                 _, lv = policy(torch.as_tensor(obs, dtype=torch.float32, device=device))
             last_val = lv.squeeze(-1).cpu().numpy()
 
-            adv, ret = compute_gae(b_rew, b_val, b_done, last_val, gamma, gae_lambda)
+            # El critico predice normalizado; GAE trabaja en la escala real del
+            # reward -> desnormalizar los valores ANTES, y volver a normalizar
+            # el retorno DESPUES para usarlo como objetivo (ver ppo.py).
+            adv, ret = compute_gae(b_rew, ret_rms.denormalize(b_val), b_done,
+                                   ret_rms.denormalize(last_val), gamma, gae_lambda)
+            ret_rms.update(ret)
             # aplanar (T*N, ...) y normalizar ventaja
             fobs = b_obs.reshape(T * N, obs_dim)
             fact = b_act.reshape(T * N, act_dim)
             flogp = b_logp.reshape(T * N)
             fadv = adv.reshape(T * N); fadv = (fadv - fadv.mean()) / (fadv.std() + 1e-8)
-            fret = ret.reshape(T * N)
+            fret = ret_rms.normalize(ret).reshape(T * N).astype(np.float32)
             m = ppo_update(policy, opt, fobs, fact, flogp, fadv, fret,
                            ppo_epochs, batch_size, clip, vf_coef, ent_coef, device)
 
@@ -150,16 +168,20 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
                 log.update({f"success_rate/{t}": r for t, r in sr_track.items() if r == r})
                 wandb.log(log)
 
+            # ret_rms va SIEMPRE con el checkpoint: sin el, el critico guardado
+            # (que predice normalizado) se leeria en la escala equivocada.
+            def _ckpt():
+                return {"iter": it + 1, "policy": policy.state_dict(),
+                        "optimizer": opt.state_dict(), "avg_ep_r": avg,
+                        "ret_rms": ret_rms.state_dict()}
+
             if (it + 1) % save_every == 0:
                 p = C.CHECKPOINT_DIR / f"fast_iter{it+1:05d}.pt"
-                torch.save({"iter": it + 1, "policy": policy.state_dict(),
-                            "optimizer": opt.state_dict(), "avg_ep_r": avg}, p)
+                torch.save(_ckpt(), p)
                 print(f"  ↳ checkpoint: {p}")
             if not np.isnan(avg) and avg > best_avg:
                 best_avg = avg
-                torch.save({"iter": it + 1, "policy": policy.state_dict(),
-                            "optimizer": opt.state_dict(), "avg_ep_r": avg},
-                           C.CHECKPOINT_DIR / "fast_best.pt")
+                torch.save(_ckpt(), C.CHECKPOINT_DIR / "fast_best.pt")
     finally:
         venv.close()
         if use_wandb:
@@ -174,7 +196,7 @@ if __name__ == "__main__":
     ap.add_argument("--batch", type=int, default=C.BATCH_SIZE)
     ap.add_argument("--lr", type=float, default=C.LR)
     ap.add_argument("--wandb", action="store_true")
-    ap.add_argument("--resume", default=str(C.CHECKPOINT_DIR / "fast_iter01050.pt"))
+    ap.add_argument("--resume", default=str(C.CHECKPOINT_DIR / "fast_best.pt"))
     #ap.add_argument("--resume", default=None)
     args = ap.parse_args()
     train(n_envs=args.n_envs, steps_per_env=args.steps, iters=args.iters,

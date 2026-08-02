@@ -40,7 +40,7 @@ from .config import (
     FLIPPER_MIN_RAD, FLIPPER_MAX_RAD, CONTROL_FLIPPERS, FLIPPER_HOME_RAD,
     FINISH_DIST,
     STUCK_TIMEOUT_STEPS, STUCK_NO_PROGRESS_M,
-    W_DIRECTION, W_VELOCITY, WP_BONUS, TIME_PENALTY, FALL_PENALTY,
+    W_DIRECTION, W_VELOCITY, WP_BONUS, GOAL_BONUS, TIME_PENALTY, FALL_PENALTY,
     FALL_UPRIGHT_MIN, FALL_Z_MIN,
     STUCK_MAX, STUCK_ANGULAR_THRESH_RAD, ENERGY_W, FLIPPER_JERK_W, FLIPPER_COLLISION_W,
     FLIPPER_TERRAIN_W,
@@ -240,7 +240,8 @@ def flipper_terrain_bonus(fb: dict, flip_qpos: np.ndarray) -> float:
         # los no-atacables tienen d/h = nan -> se anulan aqui (nan no se propaga)
         score = np.where(actionable & (q_rest < 1.0 - 1e-6),
                          np.maximum(0.0, (q - q_rest) / (1.0 - q_rest)), 0.0)
-    return FLIPPER_TERRAIN_W * float(np.sum(score) / 4.0)
+    n_act = int(np.count_nonzero(actionable))
+    return FLIPPER_TERRAIN_W * float(np.sum(score) / max(n_act, 2))
 
 
 # ── Caida (condicion UNICA, compartida por reward y terminacion) ─────────────
@@ -256,12 +257,21 @@ def is_fallen(fb: dict) -> bool:
 
 
 # ── Reward ───────────────────────────────────────────────────────────────────
-def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState) -> float:
+def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState,
+                   goal_xy: np.ndarray) -> float:
     """Caida letal (volcado/muy bajo/piso) o choque con el obstaculo (retorno
     temprano, termina el episodio) -> castigos (stuck, energia, jerk flippers,
     auto-colision flippers) -> bonus al cruzar waypoint (retorno temprano) ->
     progreso (delta_dist * boost exponencial de proximidad) + seguir
-    velocidad/direccion de la guia del vortex (solo si avanza)."""
+    velocidad/direccion de la guia del vortex (solo si avanza), y GOAL_BONUS
+    si se completo la mision.
+
+    `goal_xy` debe ser EL MISMO que recibe terminated(): el bonus terminal usa
+    su misma condicion (dist_goal < FINISH_DIST) para que reward y metrica de
+    exito coincidan exactamente. No vale usar guidance["goal"] en su lugar --
+    en las pistas de pallets la ruta A* redondea a una grilla de 5 cm
+    (GRID_RESOLUTION), asi que el ultimo waypoint puede no ser el goal exacto y
+    el bonus se cobraria en un paso distinto al que cuenta como exito."""
     xy = fb["xy"]
     dist_norm, sin_t, cos_t = guidance["obs"]
     target_xy = np.asarray(guidance["target"], dtype=np.float64)
@@ -323,11 +333,20 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     #     de flipper_terrain_bonus). Se suma siempre, no es una "penalizacion".
     terrain_bonus = flipper_terrain_bonus(fb, fb["flip_qpos"])
 
+    # 7c. Mision completada -> bonus TERMINAL. Condicion identica a la de
+    #     terminated() para que el cobro caiga en el MISMO paso que cuenta como
+    #     exito. Se suma a las dos salidas de abajo porque el paso en que se
+    #     llega es tambien, casi siempre, el paso en que se cruza el ultimo
+    #     waypoint (la meta ES ese waypoint), que retorna antes.
+    goal_bonus = (GOAL_BONUS
+                  if float(np.linalg.norm(xy - np.asarray(goal_xy, dtype=np.float64))) < FINISH_DIST
+                  else 0.0)
+
     # 8. Waypoint cruzado -> solo bonus + penalizaciones ese paso
     if guidance["wp"] > rs.last_wp:
         rs.last_wp = guidance["wp"]
         rs.last_dist_to_target = float(np.linalg.norm(xy - target_xy))
-        return WP_BONUS - penalties + terrain_bonus
+        return WP_BONUS - penalties + terrain_bonus + goal_bonus
 
     # 9. Progreso hacia el waypoint actual
     dist_to_target = float(np.linalg.norm(xy - target_xy))
@@ -351,7 +370,7 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     backward_pen = BACKWARD_W * max(0.0, -v_fwd) / V_REF_MPS
 
     return (progress_reward + direction_reward + speed_reward + terrain_bonus
-            - backward_pen - penalties - TIME_PENALTY)
+            + goal_bonus - backward_pen - penalties - TIME_PENALTY)
 
 
 # ── Terminacion ──────────────────────────────────────────────────────────────

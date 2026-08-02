@@ -68,7 +68,7 @@ from rl_ws.base_training.config import (
     V_MAX_MPS, W_MAX_RADPS, V_REF_MPS, W_REF_RADPS,
     FLIPPER_MIN_RAD, FLIPPER_MAX_RAD, FLIPPER_HOME_RAD,
     START_XY, GOAL_XY, FINISH_DIST, EPISODE_MAX_STEPS,
-    W_DIRECTION, W_VELOCITY, WP_BONUS, TIME_PENALTY, FALL_PENALTY,
+    W_DIRECTION, W_VELOCITY, WP_BONUS, GOAL_BONUS, TIME_PENALTY, FALL_PENALTY,
     FALL_UPRIGHT_MIN, FALL_Z_MIN,
     STUCK_MAX, STUCK_ANGULAR_THRESH_RAD, ENERGY_W, FLIPPER_JERK_W,
     ACCEL_W, ACCEL_DEADZONE, GUIDE_SPEED_SCALE, BACKWARD_W,
@@ -275,7 +275,8 @@ class _RewardState:
 
 
 
-def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardState) -> float:
+def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardState,
+                    goal_xy: np.ndarray) -> float:
     """Igual estructura que BaseMuJoCoEnv._reward (version directa-MuJoCo):
     caida letal -> castigos conservados (stuck, energia, jerk de flippers,
     inclinacion) -> progreso hacia el objetivo actual (misma formula con
@@ -360,6 +361,15 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     terrain_bonus = flipper_terrain_bonus(fb, fb["flip_qpos"])
     terms["flipper_terrain"] = terrain_bonus
 
+    # 7c. Mision completada -> bonus TERMINAL (ver GOAL_BONUS en config.py y el
+    #     docstring de base_env.compute_reward). MISMA condicion que
+    #     _terminated() y MISMO goal_xy, para que el cobro caiga en el paso que
+    #     cuenta como exito.
+    goal_bonus = (GOAL_BONUS
+                  if float(np.linalg.norm(xy - np.asarray(goal_xy, dtype=np.float64))) < FINISH_DIST
+                  else 0.0)
+    terms["goal_bonus"] = goal_bonus
+
     # 8. Waypoint cruzado — al cruzarlo
     #    se devuelve solo el bonus mas las penalizaciones (sin progreso ni
     #    direccion/velocidad ese paso).
@@ -368,7 +378,7 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
         rs.last_dist_to_target = float(np.linalg.norm(xy - target_xy))
         terms["wp_bonus"] = WP_BONUS
         rs.last_terms = terms
-        return WP_BONUS - penalties + terrain_bonus
+        return WP_BONUS - penalties + terrain_bonus + goal_bonus
 
     # 9. Progreso hacia el waypoint actual (delta_dist * boost
     #    exponencial de proximidad, misma formula que la version pallet)
@@ -400,7 +410,7 @@ def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardSta
     rs.last_terms = terms
 
     return (progress_reward + direction_reward + speed_reward + terrain_bonus
-            - backward_pen - penalties - TIME_PENALTY)
+            + goal_bonus - backward_pen - penalties - TIME_PENALTY)
 
 
 def _terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int, max_steps: int) -> Tuple[bool, bool]:
@@ -606,7 +616,7 @@ class BaseRosEnv:
         fb = self._node.feedback()
         fb["flipper_edge"] = flipper_edge(self.map_ctx, fb)
         guidance = self.nav.step(fb["xy"], fb["yaw"])
-        reward = _compute_reward(fb, guidance, action, self._rs)
+        reward = _compute_reward(fb, guidance, action, self._rs, self.goal_xy)
 
         self._ep_steps += 1
         done, reached = _terminated(fb, self.goal_xy, self._ep_steps, self.max_steps)

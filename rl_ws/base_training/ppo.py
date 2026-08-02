@@ -149,8 +149,74 @@ def ppo_update(policy, opt, obs, actions, old_logp, adv, ret,
     return m
 
 
+class RunningMeanStd:
+    """Media/desviacion corrientes de los retornos (Chan et al., paralelo y
+    numericamente estable) para NORMALIZAR el objetivo del critico.
+
+    Por que hace falta: el critico sale de un tronco con tanh, asi que su
+    salida esta acotada por sum|W_critic|. Con los retornos de esta tarea
+    (WP_BONUS=200 por waypoint -> avg_ret ~4150) el objetivo queda FUERA de
+    lo que la cabeza puede representar, y eso dispara un bucle:
+
+      el critico nunca acierta -> smooth_l1 se queda en su tramo lineal ->
+      gradiente maximo permanente -> |W_critic| se infla (medido: 61.2 vs
+      0.86 del actor) -> ese |W| amplifica el gradiente de valor hacia el
+      tronco compartido -> |grad| total 137-2409 contra 0.42-0.75 de la
+      politica (326x-3220x); con MAX_GRAD_NORM=0.5 la direccion que
+      sobrevive al clip es ~99.7% del critico.
+
+    Ademas GAE usa `val`: con el critico saturado las VENTAJAS tambien salen
+    mal, y por eso el gradiente de la politica medido tiene coseno ~0 entre
+    semillas incluso en `flat`. Normalizar el objetivo rompe el bucle en el
+    origen. Es la "value normalization" de MAPPO, no un truco ad-hoc.
+
+    Uso (ver train_fast.py): el critico predice en espacio NORMALIZADO, asi
+    que hay que `denormalize()` antes de GAE (que trabaja en la escala real
+    del reward) y `normalize()` el retorno antes de usarlo como objetivo.
+    """
+
+    def __init__(self, eps: float = 1e-4):
+        self.mean = 0.0
+        self.var = 1.0
+        self.count = eps
+
+    def update(self, x: np.ndarray) -> None:
+        x = np.asarray(x, dtype=np.float64).ravel()
+        if x.size == 0:
+            return
+        b_mean, b_var, b_count = x.mean(), x.var(), x.size
+        delta = b_mean - self.mean
+        tot = self.count + b_count
+        self.mean += delta * b_count / tot
+        m_a = self.var * self.count
+        m_b = b_var * b_count
+        self.var = (m_a + m_b + delta * delta * self.count * b_count / tot) / tot
+        self.count = tot
+
+    @property
+    def std(self) -> float:
+        return float(np.sqrt(self.var) + 1e-8)
+
+    def normalize(self, x):
+        return (x - self.mean) / self.std
+
+    def denormalize(self, x):
+        return x * self.std + self.mean
+
+    def state_dict(self) -> dict:
+        return {"mean": float(self.mean), "var": float(self.var),
+                "count": float(self.count)}
+
+    def load_state_dict(self, d: dict) -> None:
+        self.mean, self.var, self.count = d["mean"], d["var"], d["count"]
+
+
 def compute_gae(rew, val, done, last_val, gamma, lam):
-    """GAE por env (columnas). rew/val/done son (T, N); last_val es (N,)."""
+    """GAE por env (columnas). rew/val/done son (T, N); last_val es (N,).
+
+    OJO: `val`/`last_val` deben venir en la ESCALA REAL del reward (mismas
+    unidades que `rew`). Si el critico predice normalizado, hay que pasarlos
+    por RunningMeanStd.denormalize() antes de llamar aqui."""
     T, N = rew.shape
     adv = np.zeros((T, N), dtype=np.float32)
     lastgae = np.zeros(N, dtype=np.float32)

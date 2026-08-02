@@ -76,7 +76,7 @@ TRACK_DEFS = {
 }
 # Pistas ACTIVAS para entrenar: una o varias — VecMujocoEnv las reparte entre
 # los envs (round-robin). Ej: ["flat"], ["steps"], ["flat","steps","ramps"].
-ACTIVE_TRACKS = ["steps1m"]
+ACTIVE_TRACKS = ["flat"]
 
 # Compatibilidad: el "mundo por default" (bridge ROS, scripts single-track) es
 # la PRIMERA pista activa. Para probar otra pista por ROS, cambia el orden.
@@ -123,14 +123,11 @@ V_REF_MPS   = 0.48     # REAL: velocidad lineal maxima medida  (referencia del r
 W_REF_RADPS = 0.76     # REAL: velocidad angular maxima medida (referencia del reward)
 # Limite de recorrido de los flippers (por software)
 FLIPPER_MIN_RAD = -1.1
-FLIPPER_MAX_RAD = 3.14159
-# La politica CONTROLA los flippers (fase 2: terreno). False = fase 1 (solo
-# base; action[2:6] se ignora, los flippers quedan en reposo). El checkpoint es
-# compatible en ambos sentidos: ACT_DIM=7 siempre incluye los flippers.
+FLIPPER_MAX_RAD = 2.64159
 CONTROL_FLIPPERS = True
 
 # ── Mision (frame de aesir_complete.xml == frame de obstacles.json) ──────────
-START_XY: Tuple[float, float] = (-2.0, 4.0)
+START_XY: Tuple[float, float] = (-1.5, 3.5)
 GOAL_XY:  Optional[Tuple[float, float]] = None   # None -> ultimo pallet del JSON
 SPAWN_Z   = 0.20
 FINISH_DIST       = 0.10
@@ -154,72 +151,38 @@ PLATFORM_SURFACE_Z            = 0.12
 W_DIRECTION    = 0.7     # encarar al objetivo (cos Δθ)
 W_VELOCITY     = 0.7     # igualar la velocidad forward objetivo
 WP_BONUS       = 200.0   # bonus al cruzar un waypoint
+GOAL_BONUS     = 1000.0
 TIME_PENALTY   = 0.1
 FALL_PENALTY   = 250.0
 FALL_UPRIGHT_MIN = 0.20   # R[2,2]=cos(inclinacion); <0.20 -> volcado (~78°)
 FALL_Z_MIN       = 0.10   # altura del chasis (m) por debajo de la cual se cayo
+# Castigo por tocar un obstaculo: la caja del obstaculo virtual (plataform.xml)
+# o un poste "fatal_stick" de pallets. Es POR PASO y a proposito: compute_reward
+# hace return temprano con -OBSTACLE_PENALTY, asi que el contacto SOSTENIDO se
+# acumula (y encima se pierde el ~+1.3/paso de progreso+direccion+velocidad).
+# Se prefiere esto a terminar el episodio: castigar por TIEMPO de contacto
+# distingue el roce leve del quedarse encajado, cosa que una terminacion no hace.
+#
+# Estaba en 1.0, o sea nada frente a WP_BONUS=200. Dimensionado por derivacion,
+# contando la DURACION del contacto (medido con la politica iter500 en pallets:
+# 341 de 9600 pasos-env = 3.55%, ~34 pasos por episodio):
+#   (a) un roce tipico de ~3 pasos debe superar el atajo que evita -- rodear el
+#       poste cuesta ~1 m extra ~= 40 pasos a ~1.3/paso ~= 52 de reward -> >=18;
+#   (b) un encuentro de ~10 pasos debe superar WP_BONUS=200, si no sale rentable
+#       EMPUJAR a traves del poste para cobrar el siguiente waypoint -> >=20.
+# 50 cumple ambas con margen y deja el coste tipico en ~1700/episodio, un 13%
+# del retorno de pallets (~13000). Con 250 (una version anterior de esta cuenta,
+# que trataba el contacto como UN paso) se iba al 65% del retorno y dominaba la
+# tarea entera; por eso NO se usa ese valor.
 OBSTACLE_PENALTY = 1.0
 STUCK_MAX      = 1.0
 STUCK_ANGULAR_THRESH_RAD = 0.02
 ENERGY_W       = 1e-8
-# Castigo por movimiento erratico de flippers, sobre la velocidad REAL medida
-# (mean(flip_qvel**2), ver base_env.compute_reward).
-#
-# MEDIDO con la politica entrenada (checkpoint iter 1350, 4800 pasos en
-# steps1m) contra el bonus de terreno, que es la conducta que queremos ENSENAR:
-#     JERK_W   castigo/paso   razon vs bonus   neto/paso
-#      0.50       0.2623          16.5x         -0.2465   <- valor anterior
-#      0.10       0.0525           3.3x         -0.0366
-#      0.05       0.0262           1.7x         -0.0103
-#      0.02       0.0105           0.7x         +0.0054
-# Con 0.5, MOVER los flippers costaba 13-16x mas de lo que pagaba dejarlos bien
-# puestos, y el castigo superaba al bonus en el 99% de los pasos (-84 de retorno
-# por episodio). La politica hacia lo racional: no tocarlos -- de ahi que solo
-# ~3% de los flippers quedaran en la pose correcta al tener un borde delante.
-#
-# Se elige 0.02, NO el punto de equilibrio justo (~0.03): para SALIR del optimo
-# local actual el balance tiene que ser positivo con el bonus de HOY (0.016, bajo
-# justamente porque no los usa). Si aprende a posicionarlos, el bonus sube hacia
-# 1.25 y el margen crece solo. Sigue habiendo amortiguacion: agitarlos a fondo
-# cuesta ~0.34/paso contra un bonus maximo de 1.25.
-# VIGILAR: si aparecen oscilaciones de flipper o mas WARNINGs de QACC, subirlo.
 FLIPPER_JERK_W = 0.02
-# (La inclinacion NO tiene castigo graduado propio: es una condicion de caida,
-#  ver FALL_UPRIGHT_MIN arriba -- un solo umbral, castigo + terminacion.)
 FLIPPER_COLLISION_W = 10.0
-# Bonus por que la PUNTA de un flipper quede ADELANTE y ARRIBA del borde real
-# de un escalon/rampa cercano (terreno real, ver elevation_map.flipper_terrain_edge).
-# NO reclama saber el "angulo optimo de contacto" (no hay forma de justificar
-# eso sin datos de expertos o un modelo de contacto real) -- solo verifica una
-# relacion geometrica concreta y comprobable:
-#   1) Escanea la direccion de extension de cada flipper buscando el PRIMER
-#      borde real: el primer punto donde el desnivel sobre el mount cruza
-#      FLIPPER_TERRAIN_MIN_STEP_M (filtra ruido de piso/rasterizado -- NO
-#      cualquier micro-irregularidad cuenta como "obstaculo").
-#   2) Si ese borde es mas alto que FLIPPER_TERRAIN_MAX_CLIMB_M, es una PARED
-#      (no trepable) -- se ignora, no empuja a extender el flipper hacia ella.
-#   3) Si es trepable (entre los dos umbrales), compara la punta del flipper
-#      (usando SOLO su angulo flip_qpos=theta, en el propio marco del mount:
-#      alcance = FLIPPER_L*sin(theta), altura_sobre_mount = FLIPPER_L*cos(theta)
-#      -- ver derivacion en base_env.flipper_terrain_bonus) contra (d_edge,
-#      h_edge): bonus si alcance >= d_edge Y altura >= h_edge (la punta ya
-#      libro el borde, no se quedo corta ni lo intento "por debajo").
-FLIPPER_TERRAIN_W           = 5.0    # medido contra flipper_jerk_pen (flip_qvel real) en
-                                      # rollout de 800 steps random: con W=0.3 el bonus medio
-                                      # (0.0033) era ~150x menor que el castigo de jerk medio
-                                      # (0.50) -- con W=5.0 el bonus max (1.25) queda en el
-                                      # mismo orden que el pico de jerk (2.25), y el bonus SI
-                                      # puede compensar el costo transitorio de extender el
-                                      # flipper una vez que la politica aprenda a MANTENER la
-                                      # posicion (qvel->0 en reposo, jerk cae a ~0 sostenido).
+FLIPPER_TERRAIN_W           = 5.0    # medido contra flipper_jerk_pen (flip_qvel real)
 FLIPPER_TERRAIN_MIN_STEP_M  = 0.10   # |desnivel| bajo esto = ruido de piso, no un borde real
 FLIPPER_TERRAIN_MAX_CLIMB_M = 0.45   # techo heuristico de lo "trepable" (pared arriba)
-# BAJADA (h_edge < 0): mismo criterio espejado -- la punta debe pasar el borde
-# Y alcanzar HACIA ABAJO el suelo inferior (height <= h_edge), lo que exige
-# |theta| > 90 grados (permitido: FLIPPER_MAX_RAD = 180 grados). Techo de lo
-# alcanzable, acotado por la geometria: con caida `drop` a distancia d_edge hace
-# falta cos(th) <= -drop/L Y sin(th) >= d_edge/L a la vez; para el rango util de
-# d_edge (0.04-0.18 m) eso topa cerca de 0.30 m, no en FLIPPER_L=0.35.
 FLIPPER_TERRAIN_MAX_DESCENT_M = 0.35
 FLIPPER_TERRAIN_SAMPLES     = 8      # puntos escaneados hasta FLIPPER_L buscando el borde
 # Castigo por aceleraciones fuertes del chasis (cuidar la integridad del robot
@@ -336,16 +299,6 @@ ARM_JOINT_LIMITS = {
 HIDDEN        = 256      # neuronas por capa del trunk (2 capas Tanh)
 LOG_STD_INIT  = -0.5     # log-std inicial de la gaussiana de la politica
 LOG_STD_MIN   = -5.0     # clamp del log-std aprendible
-# Techo del log-std de v/w. IMPORTANTE: de las 7 dimensiones de accion, estas
-# dos son las UNICAS que pueden inflar la entropia sin limite -- los flippers
-# usan Beta (entropia diferencial sobre [0,1] acotada por 0) y el gate usa
-# Bernoulli (acotada por log 2). Con LOG_STD_MAX=1.0 (sigma<=2.72) el bono de
-# entropia ganaba: medido en los checkpoints, sigma_v subio 1.70 -> 1.98 entre
-# iter 1250 y 1500 y seguia. Como la accion se recorta a [-1,1], sigma=1.98
-# satura ~61% de las muestras en +-1 -> el comando lineal se vuelve bang-bang
-# aleatorio (de ahi los QACC inestables). Con 0.0 el tope es sigma=1.0, que
-# para una accion en [-1,1] sigue siendo mucha exploracion.
-# El clamp se aplica en forward(), asi que baja tambien al reanudar un .pt viejo.
 LOG_STD_MAX   = 0.0
 MAX_GRAD_NORM = 0.5      # clip de norma de gradiente en el update
 

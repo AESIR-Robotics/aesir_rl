@@ -113,9 +113,20 @@ class BaseMujocoEnv:
         self._robot_gids = {g for g in range(m.ngeom)
                             if int(m.body_rootid[m.geom_bodyid[g]]) == root}
 
-        # Geom del obstaculo virtual FISICO (plataform.xml) 
+        # Geom del obstaculo virtual FISICO (plataform.xml)
         self._obstacle_gid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "virtual_obstacle")
         self._obstacle_gids = {self._obstacle_gid} if self._obstacle_gid >= 0 else set()
+        # + los postes "fatal_stick N" de la pista de pallets (18 cajas finas de
+        # 4.8x10x90 cm que hay que esquivar). ANTES no estaban aqui: como
+        # `virtual_obstacle` solo existe en plataform.xml, en pallets el set
+        # quedaba VACIO y chocar con un poste costaba CERO -- ni penalizacion ni
+        # terminacion, solo el atasco indirecto a los 300 pasos. Con WP_BONUS=200
+        # y GOAL_BONUS=1000 en juego, eso hacia rentable rozarlos en vez de
+        # rodearlos. Solo existen en aesir_pallets.xml, asi que no hace falta
+        # condicionar por pista: en las demas el conjunto sale vacio igual.
+        self._obstacle_gids |= {
+            g for g in range(m.ngeom)
+            if (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "").startswith("fatal_stick")}
 
         # Mision + navegador segun el tipo de pista.
         if self._kind == "pallets":
@@ -346,7 +357,7 @@ class BaseMujocoEnv:
         fb = self._feedback()
         fb["flipper_edge"] = W.flipper_edge(self.map_ctx, fb)
         guidance = self.nav.step(fb["xy"], fb["yaw"])
-        reward = W.compute_reward(fb, guidance, a_exec, self._rs)
+        reward = W.compute_reward(fb, guidance, a_exec, self._rs, self.goal_xy)
         done, reached, reason = W.terminated(fb, self.goal_xy, self._ep_steps, self.max_steps, self._rs)
         heatmap = self._get_heatmap(fb)
         if C.SAVE_HEATMAP_DEBUG:
@@ -381,7 +392,7 @@ class VecMujocoEnv:
             if t not in C.TRACK_DEFS:
                 raise ValueError(f"pista desconocida '{t}' (validas: {sorted(C.TRACK_DEFS)})")
 
-        # Recursos POR PISTA, compartidos (read-only) entre los envs de esa
+        # Recursos por pista, compartidos (read-only) entre los envs de esa
         # pista: MjModel base (cada env recibe su copia), MapContext (heatmap)
         # y zona segura de plataforma.
         self._track_res: Dict[str, dict] = {}
@@ -415,7 +426,7 @@ class VecMujocoEnv:
         self._ep_return = np.zeros(n_envs, dtype=np.float64)
         self._ep_history: List[float] = []
         self._success_history: List[bool] = []
-        # Success rate POR PISTA: con varias pistas activas la tasa global
+        # Success rate por pista: con varias pistas activas la tasa global
         # esconde que una pista facil compense a una dificil (o al reves).
         # Ventana propia por pista, no compartida.
         self._success_by_track: Dict[str, List[bool]] = {t: [] for t in self.tracks}
