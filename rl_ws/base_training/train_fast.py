@@ -54,11 +54,33 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
           gamma=C.GAMMA, gae_lambda=C.GAE_LAMBDA, clip=C.CLIP,
           vf_coef=C.VF_COEF, ent_coef=C.ENT_COEF, lr=C.LR,
           save_every=C.SAVE_EVERY, use_wandb=False, resume_from=None,
-          device_str=C.DEVICE):
+          device_str=C.DEVICE, seed=None, ckpt_dir=None, run_name=None):
 
     device = torch.device("cuda" if (device_str == "auto" and torch.cuda.is_available())
                           else device_str if device_str != "auto" else "cpu")
     print(f"Dispositivo: {device}")
+
+    # Semilla ANTES de crear env y red: los spawns/metas usan np.random y la
+    # inicializacion de pesos usa torch. Con varias semillas cada corrida
+    # arranca de una red distinta y ve misiones distintas, que es lo que hace
+    # falta para reportar media +- desviacion entre corridas.
+    #
+    # OJO: esto NO da reproducibilidad bit a bit. VecMujocoEnv corre los envs en
+    # THREADS y np.random es estado global compartido, asi que el orden de las
+    # llamadas entre hilos varia. Sirve para separar corridas, no para repetirlas
+    # identicas.
+    if seed is not None:
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        print(f"Semilla: {seed}  (separa corridas; no reproducible bit a bit "
+              f"por el paralelismo en threads)")
+
+    # Directorio propio por corrida para que las semillas no se pisen los
+    # checkpoints (todas escriben fast_iterNNNNN.pt / fast_best.pt).
+    ckpt_dir = Path(ckpt_dir) if ckpt_dir else C.CHECKPOINT_DIR
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Checkpoints: {ckpt_dir}")
 
     venv = VecMujocoEnv(n_envs=n_envs)
     obs_dim, act_dim = venv.obs_dim, venv.act_dim
@@ -94,7 +116,8 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
 
     use_wandb = use_wandb and _HAS_WANDB
     if use_wandb:
-        wandb.init(project=C.WANDB_PROJECT, config=dict(
+        wandb.init(project=C.WANDB_PROJECT, name=run_name, config=dict(
+            seed=seed, tracks=list(C.ACTIVE_TRACKS),
             n_envs=n_envs, steps_per_env=steps_per_env, ppo_epochs=ppo_epochs,
             batch_size=batch_size, gamma=gamma, gae_lambda=gae_lambda, clip=clip,
             vf_coef=vf_coef, ent_coef=ent_coef, lr=lr, obs_dim=obs_dim, act_dim=act_dim))
@@ -176,12 +199,12 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
                         "ret_rms": ret_rms.state_dict()}
 
             if (it + 1) % save_every == 0:
-                p = C.CHECKPOINT_DIR / f"fast_iter{it+1:05d}.pt"
+                p = ckpt_dir / f"fast_iter{it+1:05d}.pt"
                 torch.save(_ckpt(), p)
                 print(f"  ↳ checkpoint: {p}")
             if not np.isnan(avg) and avg > best_avg:
                 best_avg = avg
-                torch.save(_ckpt(), C.CHECKPOINT_DIR / "fast_best.pt")
+                torch.save(_ckpt(), ckpt_dir / "fast_best.pt")
     finally:
         venv.close()
         if use_wandb:
@@ -196,8 +219,20 @@ if __name__ == "__main__":
     ap.add_argument("--batch", type=int, default=C.BATCH_SIZE)
     ap.add_argument("--lr", type=float, default=C.LR)
     ap.add_argument("--wandb", action="store_true")
-    ap.add_argument("--resume", default=str(C.CHECKPOINT_DIR / "fast_best.pt"))
-    #ap.add_argument("--resume", default=None)
+    ap.add_argument("--resume", default=str(C.CHECKPOINT_DIR / "fast_best.pt"),
+                    help='Checkpoint del que reanudar. Para entrenar DESDE CERO '
+                         '(lo que hace falta para un barrido de semillas '
+                         'independientes) hay que pasar --resume "" -- el default '
+                         'NO es vacio, reanuda de fast_best.pt.')
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Semilla de numpy/torch. Separa corridas; no da "
+                         "reproducibilidad bit a bit (envs en threads).")
+    ap.add_argument("--ckpt-dir", default=None,
+                    help="Directorio de checkpoints propio de esta corrida. "
+                         "Sin esto, varias semillas se pisan fast_best.pt.")
+    ap.add_argument("--name", default=None, help="Nombre de la corrida en wandb.")
     args = ap.parse_args()
     train(n_envs=args.n_envs, steps_per_env=args.steps, iters=args.iters,
-          batch_size=args.batch, lr=args.lr, use_wandb=args.wandb, resume_from=args.resume)
+          batch_size=args.batch, lr=args.lr, use_wandb=args.wandb,
+          resume_from=args.resume, seed=args.seed, ckpt_dir=args.ckpt_dir,
+          run_name=args.name)
