@@ -31,22 +31,34 @@ RE_TRACK = re.compile(r"(\w+)=(\d+)%")
 
 
 def parse(path: Path):
-    """-> (iters, success_global, avg_ret, {pista: [success por iter]})"""
-    its, sr, ret, per = [], [], [], {}
-    pending = False
+    """-> (iters, success_global, avg_ret, {pista: [success por iter]})
+
+    Indexa por NUMERO DE ITERACION y se queda con la ULTIMA aparicion de cada
+    una. Es lo correcto cuando el log tiene un arranque abortado o un `tee -a`
+    tras reanudar: si no, las repetidas se cuentan dos veces y el recorte a
+    longitud comun acaba descartando iteraciones reales del final.
+    (Pasa de verdad: seed1.log traia 0,1,2 duplicadas -> 503 lineas, 500 iters.)
+    """
+    reg = {}          # iter -> [success, avg_ret, {pista: success}]
+    cur = None
     for line in path.read_text(errors="ignore").splitlines():
         m = RE_ITER.search(line)
         if m:
-            its.append(int(m.group(1)))
-            sr.append(float(m.group(2)) / 100.0)
-            ret.append(float(m.group(3)))
-            pending = True
+            cur = int(m.group(1))
+            reg[cur] = [float(m.group(2)) / 100.0, float(m.group(3)), {}]
             continue
-        if pending and "por pista:" in line:
-            for t, v in RE_TRACK.findall(line.split("por pista:")[1]):
-                per.setdefault(t, []).append(float(v) / 100.0)
-            pending = False
-    return np.array(its), np.array(sr), np.array(ret), {k: np.array(v) for k, v in per.items()}
+        if cur is not None and "por pista:" in line:
+            reg[cur][2] = {t: float(v) / 100.0
+                           for t, v in RE_TRACK.findall(line.split("por pista:")[1])}
+            cur = None
+    if not reg:
+        return np.array([]), np.array([]), np.array([]), {}
+    its = np.array(sorted(reg))
+    sr = np.array([reg[i][0] for i in its])
+    ret = np.array([reg[i][1] for i in its])
+    tracks = sorted({t for i in its for t in reg[i][2]})
+    per = {t: np.array([reg[i][2].get(t, np.nan) for i in its]) for t in tracks}
+    return its, sr, ret, per
 
 
 def main():
@@ -58,21 +70,34 @@ def main():
     ap.add_argument("--fig", type=Path, default=None, help="figura de curvas de aprendizaje")
     a = ap.parse_args()
 
-    runs = []
+    raw = []
     for p in a.logs:
         its, sr, ret, per = parse(p)
         if len(its) == 0:
             print(f"  AVISO: {p} no tiene lineas [Iter ...], se omite")
             continue
-        runs.append((p.stem, its, sr, ret, per))
-        print(f"  {p.stem}: {len(its)} iteraciones (hasta {its[-1]})")
-    if not runs:
+        raw.append((p.stem, its, sr, ret, per))
+        print(f"  {p.stem}: {len(its)} iteraciones ({its[0]}-{its[-1]})")
+    if not raw:
         raise SystemExit("Ningun log valido.")
 
-    n = min(len(r[1]) for r in runs)
-    if len({len(r[1]) for r in runs}) > 1:
-        print(f"\n  AVISO: las corridas tienen distinta longitud; se recortan a {n} "
-              f"iteraciones para que la media entre semillas sea comparable.")
+    # Alinear por NUMERO DE ITERACION, no por posicion. Si un log empieza en otra
+    # iteracion (p.ej. una reanudacion cuyo `tee` sin -a se comio el principio),
+    # recortar por posicion compararia iteraciones DISTINTAS entre semillas y
+    # daria numeros sin sentido sin avisar.
+    common = sorted(set(raw[0][1]).intersection(*(set(r[1]) for r in raw[1:])))
+    if not common:
+        raise SystemExit("Los logs no comparten ninguna iteracion.")
+    if any(len(r[1]) != len(common) for r in raw):
+        print(f"\n  AVISO: los logs no cubren el mismo rango. Se usa la "
+              f"INTERSECCION: iteraciones {common[0]}-{common[-1]} ({len(common)}).")
+    runs = []
+    for name, its, sr, ret, per in raw:
+        idx = np.searchsorted(its, common)
+        runs.append((name, np.array(common), sr[idx], ret[idx],
+                     {t: v[idx] for t, v in per.items()}))
+
+    n = len(common)
     K = min(a.last, n)
     tracks = sorted({t for r in runs for t in r[4]})
 

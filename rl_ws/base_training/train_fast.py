@@ -60,15 +60,6 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
                           else device_str if device_str != "auto" else "cpu")
     print(f"Dispositivo: {device}")
 
-    # Semilla ANTES de crear env y red: los spawns/metas usan np.random y la
-    # inicializacion de pesos usa torch. Con varias semillas cada corrida
-    # arranca de una red distinta y ve misiones distintas, que es lo que hace
-    # falta para reportar media +- desviacion entre corridas.
-    #
-    # OJO: esto NO da reproducibilidad bit a bit. VecMujocoEnv corre los envs en
-    # THREADS y np.random es estado global compartido, asi que el orden de las
-    # llamadas entre hilos varia. Sirve para separar corridas, no para repetirlas
-    # identicas.
     if seed is not None:
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -219,17 +210,15 @@ if __name__ == "__main__":
     ap.add_argument("--batch", type=int, default=C.BATCH_SIZE)
     ap.add_argument("--lr", type=float, default=C.LR)
     ap.add_argument("--wandb", action="store_true")
-    ap.add_argument("--resume", default=str(C.CHECKPOINT_DIR / "fast_best.pt"),
+    ap.add_argument("--resume", default=str(C.CHECKPOINT_DIR / "fast_iter00150.pt"),
                     help='Checkpoint del que reanudar. Para entrenar DESDE CERO '
-                         '(lo que hace falta para un barrido de semillas '
-                         'independientes) hay que pasar --resume "" -- el default '
+                         'hay que pasar --resume "" -- el default '
                          'NO es vacio, reanuda de fast_best.pt.')
     ap.add_argument("--seed", type=int, default=None,
                     help="Semilla de numpy/torch. Separa corridas; no da "
                          "reproducibilidad bit a bit (envs en threads).")
     ap.add_argument("--ckpt-dir", default=None,
-                    help="Directorio de checkpoints propio de esta corrida. "
-                         "Sin esto, varias semillas se pisan fast_best.pt.")
+                    help="Directorio de checkpoints propio de esta corrida. ")
     ap.add_argument("--name", default=None, help="Nombre de la corrida en wandb.")
     args = ap.parse_args()
     train(n_envs=args.n_envs, steps_per_env=args.steps, iters=args.iters,
