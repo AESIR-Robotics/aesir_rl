@@ -76,7 +76,7 @@ TRACK_DEFS = {
 }
 # Pistas ACTIVAS para entrenar: una o varias — VecMujocoEnv las reparte entre
 # los envs (round-robin). Ej: ["flat"], ["steps"], ["flat","steps","ramps"].
-ACTIVE_TRACKS = ["steps1m"]
+ACTIVE_TRACKS = ["flat", "ramps", "steps1m", "pallets"]
 
 # Compatibilidad: el "mundo por default" (bridge ROS, scripts single-track) es
 # la PRIMERA pista activa. Para probar otra pista por ROS, cambia el orden.
@@ -130,7 +130,7 @@ CONTROL_FLIPPERS = True
 START_XY: Tuple[float, float] = (-1.5, 3.5)
 GOAL_XY:  Optional[Tuple[float, float]] = None   # None -> ultimo pallet del JSON
 SPAWN_Z   = 0.20
-FINISH_DIST       = 0.10
+FINISH_DIST       = 0.20
 EPISODE_MAX_STEPS = 10000
 SPAWN_XY_RANGE = 8.0
 GOAL_XY_RANGE  = 9.0
@@ -222,19 +222,18 @@ LOOKAHEAD_STEP = 0.25   # avance (m) del muestreo de la ruta por punto
 # Nota: se quito v_lat (diferencial no strafea) y upright(1) se cambio por la
 # gravedad en cuerpo(3) para captar pitch/roll en pendientes.
 OBS_DIM = 19 + 3*N_LOOKAHEAD + HEATMAP_PIXELS**2
-# Accion (7): v, ω, flipper×4, gate. Distribucion HIBRIDA (ver CNNActorCritic/
+# Accion (6): v, ω, flipper×4. Distribucion HIBRIDA (ver CNNActorCritic/
 # MLPActorCritic): v,ω Gaussiana (recortada a [-1,1]); flipper×4 Beta (soporte
-# YA en [0,1], sin recorte); gate Bernoulli (0.0/1.0 exacto, sin recorte).
+# YA en [0,1], sin recorte).
 #   [0] v      linear.x  (escala V_MAX)
 #   [1] ω      angular.z (escala W_MAX)
 #   [2:6] flipper×4  muestra Beta en [0,1], reescalada afin a
 #         [FLIPPER_MIN_RAD, FLIPPER_MAX_RAD] (ver base_env.flipper_targets)
-#   [6] gate   1.0 -> la politica CONTROLA los flippers (usa [2:6]);
-#              0.0 -> flippers a la pose de REPOSO (FLIPPER_HOME_RAD), [2:6] se
-#              ignora. Asi la politica "apaga" los flippers en plano (no estorban,
-#              como fase 1) y solo los "enciende" para trepar en terreno.
-ACT_DIM = 7
-FLIPPER_HOME_RAD = 0.0   # pose de reposo de los flippers cuando el gate esta OFF
+#
+# Los flippers se comandan SIEMPRE desde [2:6]. Hubo una 7a dimension (un gate
+# Bernoulli que los mandaba a reposo ignorando [2:6]), se elimino. Ver docs/gate_flippers.md.
+ACT_DIM = 6
+FLIPPER_HOME_RAD = 0.0   # pose de reposo de los flippers (fase 1 / referencia del reward de terreno)
 
 # ── Navegacion global: planeacion A* sobre la zona segura de pallets ─────────
 ROBOT_RADIUS         = 0.35   # radio con el que se erosiona la zona transitable

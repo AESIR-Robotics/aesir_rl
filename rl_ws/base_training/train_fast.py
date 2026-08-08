@@ -96,11 +96,16 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
                   "critico (estaba en escala cruda) y la reinicializo.")
         compat = {k: v for k, v in saved.items() if k in msd and v.shape == msd[k].shape}
         skipped = [k for k in msd if k not in compat]
+        dropped = [k for k in saved if k not in msd]
         msd.update(compat); policy.load_state_dict(msd)
+        if dropped:
+            print(f"[resume] el checkpoint trae {len(dropped)} tensores que esta "
+                  f"red ya no tiene ({dropped}); se ignoran y el optimizer va de "
+                  f"cero.")
         if skipped:
             print(f"[resume] transferidos {len(compat)}, "
                   f"reinicializados {skipped}; optimizer/contadores de cero.")
-        else:
+        elif not dropped:
             opt.load_state_dict(ckpt["optimizer"])
             start_iter = ckpt.get("iter", 0); best_avg = ckpt.get("avg_ep_r", -1e9)
             print(f"Resumiendo desde iter {start_iter} (best={best_avg:.2f})")

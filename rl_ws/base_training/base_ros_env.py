@@ -186,9 +186,9 @@ class _BridgeInterface(Node):
 
     # ── Publicar accion ──────────────────────────────────────────────────────
     def publish_action(self, v_norm: float, w_norm: float, flip_rad: np.ndarray):
-        """flip_rad = angulo objetivo (rad) de los 4 flippers, YA resuelto por el
-        gate (ver base_env.flipper_targets). El caller lo calcula; aqui solo se
-        recorta al limite por software y se convierte a convencion hardware."""
+        """flip_rad = angulo objetivo (rad) de los 4 flippers, YA resuelto por
+        base_env.flipper_targets. El caller lo calcula; aqui solo se recorta al
+        limite por software y se convierte a convencion hardware."""
         tw = Twist()
         tw.linear.x  = float(np.clip(v_norm, -1.0, 1.0)) * V_MAX_MPS
         tw.angular.z = float(np.clip(w_norm, -1.0, 1.0)) * W_MAX_RADPS
@@ -425,9 +425,9 @@ def _terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int, max_steps: int) ->
     if fb["z"] < FALL_Z_MIN:
         print("[base_env] 🛑 Episodio terminado por caida (base demasiado bajo)")
         return True, False
-    #if fb.get("floor_contact", 0) > 0:
-    #    print("[base_env] 🛑 Episodio terminado: una parte del robot toco el piso")
-    #    return True, False
+    if fb.get("floor_contact", 0) > 0:
+        print("[base_env] 🛑 Episodio terminado: una parte del robot toco el piso")
+        return True, False
     if fb.get("obstacle_contact", 0) > 0:
         print("[base_env] 🛑 Episodio terminado: choco con el obstaculo")
         return True, False
@@ -604,9 +604,8 @@ class BaseRosEnv:
 
     # ── Step ─────────────────────────────────────────────────────────────────
     def step(self, action: np.ndarray):
-        # accion = [v, ω, flipper×4, gate]. El gate (action[6]) decide si la
-        # politica controla los flippers o van a reposo (base_env.flipper_targets,
-        # MISMA logica que el backend directo).
+        # accion = [v, ω, flipper×4]; los angulos salen de base_env.flipper_targets
+        # (MISMA logica que el backend directo).
         flip_rad = flipper_targets(action)
         if flip_rad is None:                         # CONTROL_FLIPPERS=False -> reposo
             flip_rad = np.full(4, FLIPPER_HOME_RAD)

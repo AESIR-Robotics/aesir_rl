@@ -52,24 +52,20 @@ from .config import (
 )
 
 
-# ── Gate de flippers (compartido por los dos backends) ───────────────────────
+# ── Comando de flippers (compartido por los dos backends) ────────────────────
 def flipper_targets(action) -> Optional[np.ndarray]:
     """Angulo objetivo (rad) de los 4 flippers segun la accion, o None si NO se
     deben comandar (quedan como esten).
       - CONTROL_FLIPPERS=False -> None (fase 1: flippers en reposo, no controlados).
-      - action[6] = gate DISCRETO (Bernoulli, 0.0 o 1.0 exacto -- ver
-        CNNActorCritic/MLPActorCritic): 0 -> reposo (FLIPPER_HOME_RAD),
-        1 -> la politica controla via action[2:6].
       - action[2:6] = muestra de una Beta por flipper, YA en [0,1] (soporte
         acotado, sin necesidad de clip) -- se reescala afin a
         [FLIPPER_MIN_RAD, FLIPPER_MAX_RAD]. Antes esto era una Gaussiana
         recortada con np.clip, lo que genera una inconsistencia entre la
         accion cruda que ve el log-prob y la accion recortada que ejecuta el
-        entorno; con Beta el soporte ya es exacto, no hace falta recortar."""
+        entorno; con Beta el soporte ya es exacto, no hace falta recortar.
+    Los flippers se comandan SIEMPRE: no hay gate (ver docs/gate_flippers.md)."""
     if not CONTROL_FLIPPERS:
         return None
-    if float(action[6]) < 0.5:
-        return np.full(4, FLIPPER_HOME_RAD, dtype=np.float32)
     # clip defensivo: la Beta ya garantiza [0,1], pero esta funcion tambien la
     # llaman scripts/tests con acciones a mano, y de aqui sale el comando real.
     u = np.clip(np.asarray(action[2:6], dtype=np.float32), 0.0, 1.0)
@@ -302,11 +298,7 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     action_cost = ENERGY_W * float(np.square(action).mean())
 
     # 4. Movimiento erratico de flippers: velocidad angular REAL medida
-    #    (fb["flip_qvel"], ya limitada por la rampa FLIPPER_MAX_VEL/ACCEL), no
-    #    el delta del target comandado -- ese delta es ruido de muestreo de la
-    #    politica estocastica (target resampleado cada step) y no refleja
-    #    movimiento fisico real, lo que antes inflaba este castigo muy por
-    #    encima de flipper_terrain_bonus incluso con el flipper quieto.
+    #    (fb["flip_qvel"], ya limitada por la rampa FLIPPER_MAX_VEL/ACCEL).
     flipper_pen = FLIPPER_JERK_W * float(np.square(fb["flip_qvel"]).mean())
 
     # 5. (La inclinacion ya no tiene castigo graduado: pasar FALL_UPRIGHT_MIN es
@@ -315,7 +307,7 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     # 6. Auto-colision de flippers (angulos REALES medidos)
     flipper_collision_pen = flipper_collision_penalty(fb["flip_qpos"])
 
-    # 7. Aceleraciones FUERTES del chasis (cuidar la integridad del robot):
+    # 7. Aceleraciones fuertes del chasis (cuidar la integridad del robot):
     #    cambio del twist base entre pasos, normalizado por la velocidad REAL
     #    [V_REF, V_REF, W_REF] (twist es medido, no comando -> ref real, no escala).
     #    Zona muerta -> deja pasar la aceleracion normal (ir rapido); solo se
@@ -329,33 +321,31 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     penalties = (penalty_stuck + action_cost + flipper_pen
                  + flipper_collision_pen + accel_pen)
 
-    # 7b. Bonus por extender flippers cerca de terreno trepable (ver docstring
+    # 8. Bonus por extender flippers cerca de terreno trepable (ver docstring
     #     de flipper_terrain_bonus). Se suma siempre, no es una "penalizacion".
     terrain_bonus = flipper_terrain_bonus(fb, fb["flip_qpos"])
 
-    # 7c. Mision completada -> bonus TERMINAL. Condicion identica a la de
-    #     terminated() para que el cobro caiga en el MISMO paso que cuenta como
-    #     exito. Se suma a las dos salidas de abajo porque el paso en que se
-    #     llega es tambien, casi siempre, el paso en que se cruza el ultimo
-    #     waypoint (la meta ES ese waypoint), que retorna antes.
+    # 9. Mision completada -> bonus terminal. Condicion identica a la de
+    #     terminated() para que el cobro caiga en el mismo paso que cuenta como
+    #     exito.
     goal_bonus = (GOAL_BONUS
                   if float(np.linalg.norm(xy - np.asarray(goal_xy, dtype=np.float64))) < FINISH_DIST
                   else 0.0)
 
-    # 8. Waypoint cruzado -> solo bonus + penalizaciones ese paso
+    # 10. Waypoint cruzado -> solo bonus + penalizaciones ese paso
     if guidance["wp"] > rs.last_wp:
         rs.last_wp = guidance["wp"]
         rs.last_dist_to_target = float(np.linalg.norm(xy - target_xy))
         return WP_BONUS - penalties + terrain_bonus + goal_bonus
 
-    # 9. Progreso hacia el waypoint actual
+    # 11. Progreso hacia el waypoint actual
     dist_to_target = float(np.linalg.norm(xy - target_xy))
     delta_dist = rs.last_dist_to_target - dist_to_target
     proximity_multiplier = float(np.exp(-dist_to_target))
     progress_reward = delta_dist * (50.0 + 100.0 * proximity_multiplier)
     rs.last_dist_to_target = dist_to_target
 
-    # 10. Alcanzar la velocidad y orientacion que pide el vortex + castigo por
+    # 12. Alcanzar la velocidad y orientacion que pide el vortex + castigo por
     #    retroceder. La DISTANCIA al punto-guia es la velocidad deseada (lejos ->
     #    rapido, cerca -> lento, p.ej. al llegar) y cos_t la orientacion. Se premia
     #    acercarse a esa velocidad encarando la guia; retroceder (v_fwd<0) se
@@ -389,8 +379,6 @@ def terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int,
         return True, False, "caida (demasiado bajo)"
     if fb.get("floor_contact", 0) > 0:
         return True, False, "toco el piso"
-    #if fb.get("obstacle_contact", 0) > 0:
-    #    return True, False, "choco con el obstaculo"
     dist_goal = float(np.linalg.norm(fb["xy"] - goal_xy))
     if dist_goal < FINISH_DIST:
         return True, True, "META alcanzada"

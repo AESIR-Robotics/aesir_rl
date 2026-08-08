@@ -53,7 +53,7 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
 
     venv = VecMujocoEnv(n_envs=n_envs)
     obs_dim = venv.obs_dim
-    # El actor tiene 6 dims (sin gate); el env sigue recibiendo 7 via
+    # El actor vive en [-1,1]; a la convencion del env se pasa via
     # to_env_action -- ver el docstring de sac.py.
     act_dim = C.SAC_ACT_DIM
     state_dim = obs_dim - C.HEATMAP_PIXELS ** 2
@@ -127,7 +127,7 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
                             buf_done[i] = 0.0
                         n_done += 1
                         n_ok += int(bool(inf.get("reached")))
-                # Escala SOLO para el critico: las metricas y avg_ret que se
+                # Escala solo para el critico: las metricas y avg_ret que se
                 # reportan siguen en la escala original del env.
                 buf.add(obs, raw, rew * C.SAC_REWARD_SCALE, buf_next, buf_done)
                 obs = nobs

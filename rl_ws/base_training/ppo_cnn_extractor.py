@@ -18,11 +18,11 @@ Distribucion de accion HIBRIDA (ver config.ACT_DIM), no una Gaussiana unica:
                          inconsistencia entre la accion cruda que ve el
                          log-prob y la accion recortada que ejecuta el
                          entorno; con Beta el soporte ya es exacto)
-    [6]   gate        -- Bernoulli, 0.0/1.0 exacto (antes era un escalar
-                         continuo umbralizado en 0, cuya entropia no esta
-                         acotada y puede crecer sin limite si el reward no
-                         la contrarresta -- Bernoulli tiene entropia maxima
-                         log(2), acotada por diseño)
+
+Hubo una 7a dimension (gate Bernoulli: mandaba los flippers a reposo ignorando
+[2:6]). Medido que costaba 18 pp de exito en steps1m -> eliminada.
+Ver docs/gate_flippers.md.
+
 forward() ya NO regresa (mu,std,value) -- regresa (params: dict, value); el
 unico llamador externo (train_fast.py, bootstrap del ultimo value para GAE)
 solo necesita `value`, ver el `_, lv = policy(obs)` ahi.
@@ -32,7 +32,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Normal, Beta, Bernoulli
+from torch.distributions import Normal, Beta
 
 from . import config as C
 
@@ -63,7 +63,7 @@ class HeightmapCNN(nn.Module):
 
 
 # ----------------------------------------------------------------------
-# 2. Actor-Critic completo -- accion hibrida (Normal + Beta + Bernoulli)
+# 2. Actor-Critic completo -- accion hibrida (Normal + Beta)
 # ----------------------------------------------------------------------
 class CNNActorCritic(nn.Module):
     def __init__(self, obs_dim: int, act_dim: int,
@@ -80,10 +80,10 @@ class CNNActorCritic(nn.Module):
                 f"obs_dim={obs_dim} <= map_pixels^2={self.map_len}. "
                 f"OBS_DIM en config.py debe ser state_dim + H*W, no solo H*W."
             )
-        if act_dim != 7:
+        if act_dim != 6:
             raise ValueError(
-                f"act_dim={act_dim} -- la accion hibrida asume EXACTO 7: "
-                f"[v, ω, flipper×4, gate] (ver config.ACT_DIM)."
+                f"act_dim={act_dim} -- se esperan 6: [v, ω, flipper×4]. "
+                f"Ver config.ACT_DIM."
             )
         self.act_dim = act_dim
 
@@ -99,7 +99,6 @@ class CNNActorCritic(nn.Module):
         self.actor_vw = nn.Linear(hidden, 2)               # mu de [v, ω]
         self.log_std_vw = nn.Parameter(torch.full((2,), log_std_init))
         self.actor_flip = nn.Linear(hidden, 8)              # (alpha_raw,beta_raw) x 4 flippers
-        self.actor_gate = nn.Linear(hidden, 1)               # logit del gate (Bernoulli)
         self.critic = nn.Linear(hidden, 1)
 
     def _split(self, obs: torch.Tensor):
@@ -110,7 +109,7 @@ class CNNActorCritic(nn.Module):
 
     def forward(self, obs):
         """(batch, obs_dim) -> (params: dict, value (batch,1)).
-        params = {mu_vw, std_vw, alpha, beta, gate_logit} -- ver _dists()."""
+        params = {mu_vw, std_vw, alpha, beta} -- ver _dists()."""
         state, map_img = self._split(obs)
         feat = torch.cat([self.map_encoder(map_img), self.state_encoder(state)], dim=1)
         z = self.shared(feat)
@@ -123,36 +122,28 @@ class CNNActorCritic(nn.Module):
         alpha = F.softplus(raw_flip[:, 0::2]) + 1.0                     # (batch,4)
         beta_ = F.softplus(raw_flip[:, 1::2]) + 1.0                     # (batch,4)
 
-        gate_logit = self.actor_gate(z).squeeze(-1)                     # (batch,)
         value = self.critic(z)                                          # (batch,1)
 
-        return dict(mu_vw=mu_vw, std_vw=std_vw, alpha=alpha, beta=beta_,
-                    gate_logit=gate_logit), value
+        return dict(mu_vw=mu_vw, std_vw=std_vw, alpha=alpha, beta=beta_), value
 
     def _dists(self, obs):
         params, value = self(obs)
         d_vw = Normal(params["mu_vw"], params["std_vw"])
         d_flip = Beta(params["alpha"], params["beta"])
-        d_gate = Bernoulli(logits=params["gate_logit"])
-        return d_vw, d_flip, d_gate, value
+        return d_vw, d_flip, value
 
     @torch.no_grad()
     def act_batch(self, obs_np: np.ndarray, device):
         """Rollout vectorizado (VecMujocoEnv, N envs)."""
         obs = torch.as_tensor(obs_np, dtype=torch.float32, device=device)
-        d_vw, d_flip, d_gate, value = self._dists(obs)
+        d_vw, d_flip, value = self._dists(obs)
 
         raw_vw = d_vw.sample()                                          # (batch,2)
         raw_flip = d_flip.sample().clamp(_BETA_EPS, 1.0 - _BETA_EPS)     # (batch,4)
-        raw_gate = d_gate.sample()                                      # (batch,)
 
-        logp = (d_vw.log_prob(raw_vw).sum(-1)
-                + d_flip.log_prob(raw_flip).sum(-1)
-                + d_gate.log_prob(raw_gate))
-
-        action_vw = raw_vw.clamp(-1.0, 1.0)
-        raw = torch.cat([raw_vw, raw_flip, raw_gate.unsqueeze(-1)], dim=-1)
-        action = torch.cat([action_vw, raw_flip, raw_gate.unsqueeze(-1)], dim=-1)
+        logp = d_vw.log_prob(raw_vw).sum(-1) + d_flip.log_prob(raw_flip).sum(-1)
+        raw = torch.cat([raw_vw, raw_flip], dim=-1)
+        action = torch.cat([raw_vw.clamp(-1.0, 1.0), raw_flip], dim=-1)
 
         return (action.cpu().numpy(), raw.cpu().numpy(), logp.cpu().numpy(),
                 value.squeeze(-1).cpu().numpy())
@@ -161,19 +152,14 @@ class CNNActorCritic(nn.Module):
     def act(self, obs_np: np.ndarray, device):
         """Version de UNA obs (envs no vectorizados: train_base/test_base)."""
         obs = torch.as_tensor(obs_np, dtype=torch.float32, device=device).unsqueeze(0)
-        d_vw, d_flip, d_gate, value = self._dists(obs)
+        d_vw, d_flip, value = self._dists(obs)
 
         raw_vw = d_vw.sample()
         raw_flip = d_flip.sample().clamp(_BETA_EPS, 1.0 - _BETA_EPS)
-        raw_gate = d_gate.sample()
 
-        logp = (d_vw.log_prob(raw_vw).sum(-1)
-                + d_flip.log_prob(raw_flip).sum(-1)
-                + d_gate.log_prob(raw_gate))
-
-        action_vw = raw_vw.clamp(-1.0, 1.0)
-        raw = torch.cat([raw_vw, raw_flip, raw_gate.unsqueeze(-1)], dim=-1)
-        action = torch.cat([action_vw, raw_flip, raw_gate.unsqueeze(-1)], dim=-1)
+        logp = d_vw.log_prob(raw_vw).sum(-1) + d_flip.log_prob(raw_flip).sum(-1)
+        raw = torch.cat([raw_vw, raw_flip], dim=-1)
+        action = torch.cat([raw_vw.clamp(-1.0, 1.0), raw_flip], dim=-1)
 
         return (action.squeeze(0).cpu().numpy(), raw.squeeze(0).cpu().numpy(),
                 float(logp.item()), float(value.item()))
@@ -182,20 +168,15 @@ class CNNActorCritic(nn.Module):
         """(logp, value, entropy) -- MISMAS formas que antes, ver ppo_update():
             logp    (batch,1)
             value   (batch,1)
-            entropy escalar (mean ya aplicado, suma de las 3 distribuciones)
-        `actions` = el tensor `raw` guardado por act_batch/act (7 columnas)."""
-        d_vw, d_flip, d_gate, value = self._dists(obs)
+            entropy escalar (mean ya aplicado, suma de las 2 distribuciones)
+        `actions` = el tensor `raw` guardado por act_batch/act (6 columnas)."""
+        d_vw, d_flip, value = self._dists(obs)
 
         raw_vw = actions[:, 0:2]
         raw_flip = actions[:, 2:6].clamp(_BETA_EPS, 1.0 - _BETA_EPS)
-        raw_gate = actions[:, 6]
 
         logp = (d_vw.log_prob(raw_vw).sum(-1, keepdim=True)
-                + d_flip.log_prob(raw_flip).sum(-1, keepdim=True)
-                + d_gate.log_prob(raw_gate).unsqueeze(-1))
-
-        entropy = (d_vw.entropy().sum(-1)
-                   + d_flip.entropy().sum(-1)
-                   + d_gate.entropy()).mean()
+                + d_flip.log_prob(raw_flip).sum(-1, keepdim=True))
+        entropy = (d_vw.entropy().sum(-1) + d_flip.entropy().sum(-1)).mean()
 
         return logp, value, entropy

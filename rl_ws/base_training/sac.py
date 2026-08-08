@@ -12,22 +12,18 @@ ventaja: reusa las transiciones buenas en vez de tirarlas cada rollout.
 ACCION -- la diferencia importante con ppo_cnn_extractor.py:
     SAC necesita muestreo REPARAMETRIZABLE para propagar gradiente del critico
     al actor, asi que se usa la formulacion canonica (gaussiana aplastada con
-    tanh). El actor tiene SAC_ACT_DIM=6 dims y `to_env_action` las lleva a las
-    7 que espera el env:
+    tanh). El actor tiene SAC_ACT_DIM=6 dims y `to_env_action` las lleva a la
+    convencion del env:
         [0:2] v,w      tanh -> [-1,1]              tal cual
         [2:6] flippers tanh -> (a+1)/2 -> [0,1]    (lo que espera flipper_targets)
-        [6]   gate     SIEMPRE 1                   (no lo controla la politica)
     Asi base_env NO se toca y los dos algoritmos comparten la misma tarea.
     El buffer guarda la accion CRUDA de 6 dims (tanh, en [-1,1]), que es sobre
     la que el critico y el log-prob estan definidos.
 
-    POR QUE SIN GATE (primer intento: 1.54% de exito vs 37.5% de PPO): con el
-    gate umbralizado, cuando valia 0 flipper_targets ignoraba action[2:6] por
-    completo -> 5 de las 7 dimensiones no afectaban la transicion. SAC actualiza
-    el actor con dQ/da, asi que ese gradiente era ruido puro (el 71% de las
-    dims). PPO lo tolera porque nunca deriva respecto a la accion; SAC no.
-    La politica no pierde capacidad: "flippers recogidos" se expresa comandando
-    theta~0 directamente.
+    Nota historica: el env tuvo una 7a dimension (gate). SAC nunca la controlo
+    -- fue el primer sintoma de que el gate hacia daño (1.54% de exito vs 37.5%
+    de PPO), porque con el gate a 0 cinco de las siete dims no afectaban la
+    transicion y SAC deriva dQ/da. Ver docs/gate_flippers.md.
 """
 from __future__ import annotations
 
@@ -45,13 +41,16 @@ _EPS = 1e-6
 
 # ── Conversion accion cruda (tanh) -> convencion del env ────────────────────
 def to_env_action(a: np.ndarray) -> np.ndarray:
-    """(...,6) en [-1,1] -> (...,7) en la convencion que espera base_env.
-    Ver el docstring del modulo. No modifica el array de entrada."""
+    """(...,6) en [-1,1] -> (...,6) en la convencion que espera base_env.
+    Ver el docstring del modulo. No modifica el array de entrada.
+
+    Solo cambia el rango de los flippers: v,w viven en [-1,1] en ambas
+    convenciones, pero flipper_targets espera [0,1] (es donde vive la Beta de
+    PPO)."""
     a = np.asarray(a, dtype=np.float32)
-    out = np.empty(a.shape[:-1] + (7,), dtype=np.float32)
+    out = np.empty(a.shape[:-1] + (C.ACT_DIM,), dtype=np.float32)
     out[..., 0:2] = a[..., 0:2]                      # v, w tal cual
     out[..., 2:6] = (a[..., 2:6] + 1.0) * 0.5        # -> [0,1] (flippers)
-    out[..., 6] = 1.0                                # gate SIEMPRE ON
     return out
 
 

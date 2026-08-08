@@ -68,10 +68,12 @@ def load_policy(path: str, obs_dim: int, act_dim: int, device, algo: str = "ppo"
             f"Usa un .pt entrenado con esta misma configuracion.")
 
     if algo == "sac":
-        # El actor de SAC tiene SAC_ACT_DIM (6, sin gate), no el ACT_DIM=7 del
-        # env; to_env_action rellena el gate. Ver el docstring de sac.py.
         policy = SacActor(obs_dim, C.SAC_ACT_DIM, map_pixels=C.HEATMAP_PIXELS).to(device)
     else:
+        if "actor_gate.weight" in saved:
+            raise SystemExit(
+                f"'{os.path.basename(path)}' es un checkpoint de la variante con "
+                f"gate (7 dims), que ya no existe. Ver docs/gate_flippers.md.")
         policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS).to(device)
     policy.load_state_dict(saved)
     policy.eval()
@@ -86,7 +88,7 @@ def pick_action(policy, obs: np.ndarray, device, stochastic: bool,
                 algo: str = "ppo") -> np.ndarray:
     if algo == "sac":
         # El actor de SAC vive en [-1,1]; to_env_action lo pasa a la convencion
-        # del env (flippers a [0,1], gate a {0,1}) -- ver sac.to_env_action.
+        # del env (flippers a [0,1]) -- ver sac.to_env_action.
         obs_t = torch.as_tensor(obs, dtype=torch.float32, device=device).unsqueeze(0)
         a, _ = policy(obs_t, deterministic=not stochastic, with_logp=False)
         return to_env_action(a.squeeze(0).cpu().numpy())
@@ -99,8 +101,7 @@ def pick_action(policy, obs: np.ndarray, device, stochastic: bool,
     vw = p["mu_vw"].clamp(-1.0, 1.0)                                        # (1,2)
     a, b = p["alpha"], p["beta"]
     flip = (a - 1.0) / (a + b - 2.0).clamp(min=1e-6)      # moda de la Beta (alpha,beta>=1)
-    gate = (p["gate_logit"] > 0.0).float().unsqueeze(-1)  # Bernoulli mas probable
-    return torch.cat([vw, flip, gate], dim=-1).squeeze(0).cpu().numpy()
+    return torch.cat([vw, flip], dim=-1).squeeze(0).cpu().numpy()
 
 _TERM_LABELS = [
     ("progress",          "Progreso (acercarse al wp)"),
