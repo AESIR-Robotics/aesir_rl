@@ -69,7 +69,7 @@ def cartesian_twist_to_joint_vel(model, data, ee_id: int, arm_dof_adr,
     base_id) a velocidades articulares del brazo, vía Jacobiano + pseudo-inversa
     amortiguada (damped least squares). Mismo cálculo que hace MoveIt Servo.
 
-    Usado por ArmMuJoCoEnv y por combined_env.py — para no duplicar la IK.
+    Usado por ArmMuJoCoEnv — para no duplicar la IK.
     """
     jacp = np.zeros((3, model.nv))
     jacr = np.zeros((3, model.nv))

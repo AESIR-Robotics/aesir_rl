@@ -326,7 +326,7 @@ def main():
         print(f"   -> meshes por raycast: +{n_mesh_vox} voxeles")
     print(f"   -> grilla shape={grid.shape}, ocupados={grid.sum()} voxeles")
 
-    print(f"🌳 Construyendo OctoMap base...")
+    print("🌳 Construyendo OctoMap base...")
     tree = grid_to_octree(grid, origin, args.resolution)
     tree.writeBinary(args.out_raw)
     print(f"   -> guardado en: {args.out_raw}")

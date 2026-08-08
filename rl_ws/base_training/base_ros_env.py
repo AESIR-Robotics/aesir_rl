@@ -51,31 +51,31 @@ from rl_ws.global_navigator import (
     build_platform_zone, plan_platform_route, plan_platform_route_with_obstacle,
 )
 from rl_ws.base_training.map_context import MapContext
-# Logica de tarea COMPARTIDA con el backend directo-MuJoCo: funciones puras de
-# (fb, flip_qpos)/config, sin ROS ni MuJoCo -- se importan en vez de espejarlas
-# para que no puedan divergir (el reward de flippers vive solo en base_env).
+# Logica de tarea COMPARTIDA con el backend directo-MuJoCo (funciones puras de
+# (fb, guidance)/config, sin ROS ni MuJoCo). Se importan en vez de espejarlas:
+# antes este modulo tenia su propia copia de la observacion y el reward
+# (_build_obs/_RewardState/_compute_reward) y habia que replicar a mano cada
+# cambio, con el riesgo de que divergieran en silencio. El desglose por termino
+# que imprime test_base.py lo publica la version compartida en rs.last_terms.
 from rl_ws.base_training.base_env import (
-    flipper_targets, flipper_collision_penalty, flipper_terrain_bonus, flipper_edge,
-    is_fallen,
+    flipper_targets, flipper_edge,
+    build_obs, RewardState, compute_reward, terminated,
 )
 
-# TODOS los parametros (escalas de comando, mision, pesos de reward, geometria
-# de flippers, lookahead, OBS/ACT y la seccion ROS2) viven en base_training/
-# config.py — el MISMO archivo que usa el pipeline de entrenamiento rapido, asi
-# la politica ve identica tarea aqui que en train_fast.
+# TODOS los parametros (escalas de comando, mision, geometria de flippers,
+# lookahead, OBS/ACT y la seccion ROS2) viven en base_training/config.py — el
+# MISMO archivo que usa el pipeline de entrenamiento rapido, asi la politica ve
+# identica tarea aqui que en train_fast. Los PESOS del reward ya no se importan
+# aqui: los consume base_env.compute_reward, que es quien calcula el reward.
 from rl_ws.base_training.config import (
     NAV_JSON,
-    V_MAX_MPS, W_MAX_RADPS, V_REF_MPS, W_REF_RADPS,
+    V_MAX_MPS, W_MAX_RADPS,
     FLIPPER_MIN_RAD, FLIPPER_MAX_RAD, FLIPPER_HOME_RAD,
-    START_XY, GOAL_XY, FINISH_DIST, EPISODE_MAX_STEPS,
-    W_DIRECTION, W_VELOCITY, WP_BONUS, GOAL_BONUS, TIME_PENALTY, FALL_PENALTY,
-    FALL_UPRIGHT_MIN, FALL_Z_MIN,
-    STUCK_MAX, STUCK_ANGULAR_THRESH_RAD, ENERGY_W, FLIPPER_JERK_W,
-    ACCEL_W, ACCEL_DEADZONE, GUIDE_SPEED_SCALE, BACKWARD_W,
+    START_XY, GOAL_XY, EPISODE_MAX_STEPS,
     N_LOOKAHEAD, LOOKAHEAD_STEP, OBS_DIM, ACT_DIM,
     FLIPPER_JOINTS, CONTROL_HZ, SIM_SPEEDUP,
     USE_HEATMAP, OCTOMAP_BT_PATH, OCTOMAP_RESOLUTION, HEATMAP_RADIUS_M, HEATMAP_PIXELS,
-    USE_VIRTUAL_OBSTACLE, GOAL_XY_RANGE, OBSTACLE_PENALTY,
+    USE_VIRTUAL_OBSTACLE, GOAL_XY_RANGE,
     TRACK_DEFS, ACTIVE_TRACKS,
 )
 # Pista ACTIVA (primera de ACTIVE_TRACKS): define el mundo que ve el env ROS.
@@ -235,207 +235,6 @@ class _BridgeInterface(Node):
         return resp is not None and resp.success
 
 
-# ──────────────────────────── Observacion y reward ─────────────────────────
-def _build_obs(guidance: dict, fb: dict, heatmap: Optional[np.ndarray] = None) -> np.ndarray:
-    twist = np.asarray(fb["twist"], dtype=np.float32)
-    state = np.concatenate([
-        guidance["obs"],                                    # 3   guia inmediata (vortex)
-        guidance["lookahead"],                              # 3*N puntos futuros de la ruta
-        guidance["target_obs"],                             # 3   waypoint-objetivo crudo (relativo)
-        [twist[0], twist[2]],                               # 2   [v_fwd, omega_z] (sin v_lat)
-        fb["flip_qpos"],                                    # 4
-        fb["flip_qvel"],                                    # 4
-        fb["grav_body"],                                    # 3   gravedad en cuerpo (pitch/roll/vert)
-    ]).astype(np.float32)
-    if heatmap is None:
-        return state
-    
-    return np.concatenate([state, heatmap.astype(np.float32).ravel()])
-
-
-class _RewardState:
-    """Estado entre pasos para el calculo de reward (progreso, stuck, jerk)."""
-    def __init__(self):
-        self.last_xy = None
-        self.last_yaw = 0.0
-        self.last_dist_to_target = 0.0
-        self.last_wp = 0
-        self.last_twist = np.zeros(3, dtype=np.float32)
-        self.stuck = 0
-        self.last_terms = {}          # desglose firmado del ultimo reward
-
-    def reset(self, xy: np.ndarray, dist_to_target: float, yaw: float = 0.0):
-        self.last_xy = xy.copy()
-        self.last_yaw = float(yaw)
-        self.last_dist_to_target = dist_to_target
-        self.last_wp = 0
-        self.last_twist = np.zeros(3, dtype=np.float32)
-        self.stuck = 0
-        self.last_terms = {}
-
-
-
-def _compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: _RewardState,
-                    goal_xy: np.ndarray) -> float:
-    """Igual estructura que BaseMuJoCoEnv._reward (version directa-MuJoCo):
-    caida letal -> castigos conservados (stuck, energia, jerk de flippers,
-    inclinacion) -> progreso hacia el objetivo actual (misma formula con
-    boost exponencial de proximidad) -> bonus al cruzar el objetivo (retorno
-    temprano, igual que el pallet_bonus original). El objetivo ahora es el
-    waypoint de la ruta A* en vez del pallet, y se suma ademas la recompensa
-    NUEVA de encarar + igualar la velocidad que pide la guia del vortex."""
-    xy = fb["xy"]
-    dist_norm, sin_t, cos_t = guidance["obs"]
-    target_xy = np.asarray(guidance["target"], dtype=np.float64)
-    v_fwd = float(fb["twist"][0])
-
-    # Desglose FIRMADO del reward (la suma de todos los terminos == reward total).
-    terms = {k: 0.0 for k in ("fall", "obstacle", "stuck", "energy", "flipper_jerk",
-                              "flipper_collision", "accel", "flipper_terrain",
-                              "wp_bonus", "progress",
-                              "direction", "velocity", "backward", "time")}
-
-    # 1. Caida letal: volcado, chasis muy bajo o tocar piso -- MISMAS condiciones
-    #    que corta _terminated(), asi caerse SIEMPRE cuesta FALL_PENALTY.
-    if is_fallen(fb):
-        terms["fall"] = -FALL_PENALTY
-        rs.last_terms = terms
-        return -FALL_PENALTY
-
-    # 1b. Choque con el obstaculo virtual fisico (mismo castigo que train_fast).
-    if fb.get("obstacle_contact", 0) > 0:
-        terms["obstacle"] = -OBSTACLE_PENALTY
-        rs.last_terms = terms
-        return -OBSTACLE_PENALTY
-
-    # 2. Inactividad: SOLO cuenta "atascado" si NI se traslada NI gira
-    move_dist = float(np.linalg.norm(xy - rs.last_xy))
-    yaw = float(fb["yaw"])
-    dyaw = abs((yaw - rs.last_yaw + np.pi) % (2.0 * np.pi) - np.pi)
-    rs.last_xy = xy.copy()
-    rs.last_yaw = yaw
-    if move_dist < 0.005 and dyaw < STUCK_ANGULAR_THRESH_RAD:
-        rs.stuck += 1
-        penalty_stuck = min(STUCK_MAX, 0.01 * rs.stuck)
-    else:
-        rs.stuck = 0
-        penalty_stuck = 0.0
-
-    # 3. Costo de energia (conservado; antes 1e-9 * ctrl_crudo^2, ahora sobre
-    #    la accion normalizada — mismo espiritu de penalizacion casi nula)
-    action_cost = ENERGY_W * float(np.square(action).mean())
-
-    # 4. Movimiento erratico de flippers: velocidad angular REAL medida
-    #    (fb["flip_qvel"], ya limitada por la rampa) -- MISMO cambio que
-    #    base_env.compute_reward, ver ese comentario para el razonamiento.
-    flipper_pen = FLIPPER_JERK_W * float(np.square(fb["flip_qvel"]).mean())
-
-    # 5. (La inclinacion ya no tiene castigo graduado: pasar FALL_UPRIGHT_MIN es
-    #    caida letal -- FALL_PENALTY + fin de episodio, ver base_env.is_fallen.
-    #    MISMO que base_env.compute_reward (train_fast).)
-
-    # 6. Auto-colision de flippers (dos flippers cuyas puntas se tocan) — se
-    #    evalua sobre los angulos REALES medidos (fb["flip_qpos"]).
-    flipper_collision_pen = flipper_collision_penalty(fb["flip_qpos"])
-
-    # 7. Aceleraciones FUERTES del chasis (cuidar la integridad del robot):
-    #    cambio del twist base entre pasos, normalizado por [V_MAX, V_MAX, W_MAX].
-    #    Zona muerta -> deja pasar la aceleracion normal; solo se castiga el
-    #    exceso al cuadrado (jolts que dan;an el robot).
-    twist = np.asarray(fb["twist"], dtype=np.float32)
-    accel = (twist - rs.last_twist) / np.array([V_REF_MPS, V_REF_MPS, W_REF_RADPS],
-                                                dtype=np.float32)
-    rs.last_twist = twist.copy()
-    accel_pen = ACCEL_W * max(0.0, float(np.linalg.norm(accel)) - ACCEL_DEADZONE) ** 2
-
-    penalties = (penalty_stuck + action_cost + flipper_pen
-                 + flipper_collision_pen + accel_pen)
-    terms["stuck"]             = -penalty_stuck
-    terms["energy"]            = -action_cost
-    terms["flipper_jerk"]      = -flipper_pen
-    terms["flipper_collision"] = -flipper_collision_pen
-    terms["accel"]             = -accel_pen
-
-    # 7b. Bonus por extender flippers cerca de terreno trepable (ver docstring
-    #     de base_env.flipper_terrain_bonus). Se suma SIEMPRE, no es un castigo.
-    terrain_bonus = flipper_terrain_bonus(fb, fb["flip_qpos"])
-    terms["flipper_terrain"] = terrain_bonus
-
-    # 7c. Mision completada -> bonus TERMINAL (ver GOAL_BONUS en config.py y el
-    #     docstring de base_env.compute_reward). MISMA condicion que
-    #     _terminated() y MISMO goal_xy, para que el cobro caiga en el paso que
-    #     cuenta como exito.
-    goal_bonus = (GOAL_BONUS
-                  if float(np.linalg.norm(xy - np.asarray(goal_xy, dtype=np.float64))) < FINISH_DIST
-                  else 0.0)
-    terms["goal_bonus"] = goal_bonus
-
-    # 8. Waypoint cruzado — al cruzarlo
-    #    se devuelve solo el bonus mas las penalizaciones (sin progreso ni
-    #    direccion/velocidad ese paso).
-    if guidance["wp"] > rs.last_wp:
-        rs.last_wp = guidance["wp"]
-        rs.last_dist_to_target = float(np.linalg.norm(xy - target_xy))
-        terms["wp_bonus"] = WP_BONUS
-        rs.last_terms = terms
-        return WP_BONUS - penalties + terrain_bonus + goal_bonus
-
-    # 9. Progreso hacia el waypoint actual (delta_dist * boost
-    #    exponencial de proximidad, misma formula que la version pallet)
-    dist_to_target = float(np.linalg.norm(xy - target_xy))
-    delta_dist = rs.last_dist_to_target - dist_to_target
-    proximity_multiplier = float(np.exp(-dist_to_target))
-    progress_reward = delta_dist * (50.0 + 100.0 * proximity_multiplier)
-    rs.last_dist_to_target = dist_to_target
-
-    # 10. Alcanzar la velocidad y orientacion que pide el vortex + castigo por
-    #    retroceder. La DISTANCIA al punto-guia es la velocidad deseada (lejos ->
-    #    rapido, cerca -> lento, p.ej. al llegar) y cos_t la orientacion. Se premia
-    #    acercarse a esa velocidad encarando la guia; retroceder (v_fwd<0) se
-    #    castiga -> evita la oscilacion.
-    d_guide = float(np.linalg.norm(np.asarray(guidance["vortex"], dtype=float) - xy))
-    v_des = V_REF_MPS * min(d_guide / GUIDE_SPEED_SCALE, 1.0)
-    speed_reward = W_VELOCITY * (1.0 - abs(v_fwd - v_des) / V_REF_MPS) * max(0.0, float(cos_t))
-    # Encarar la guia: cos_t>0 premia ir de frente, cos_t<0 (de espaldas) castiga
-    # -> rompe la simetria adelante/reversa del chasis y evita que aprenda a ir
-    # en reversa hacia la meta cobrando el progreso (que es ciego a la orientacion).
-    direction_reward = W_DIRECTION * float(cos_t)
-    backward_pen = BACKWARD_W * max(0.0, -v_fwd) / V_REF_MPS
-
-    terms["progress"]  = progress_reward
-    terms["direction"] = direction_reward
-    terms["velocity"]  = speed_reward
-    terms["backward"]  = -backward_pen
-    terms["time"]      = -TIME_PENALTY
-    rs.last_terms = terms
-
-    return (progress_reward + direction_reward + speed_reward + terrain_bonus
-            + goal_bonus - backward_pen - penalties - TIME_PENALTY)
-
-
-def _terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int, max_steps: int) -> Tuple[bool, bool]:
-    """Igual estructura que BaseMuJoCoEnv._terminated. Devuelve (done, reached_goal)."""
-    if ep_steps >= max_steps:
-        print("[base_env] ⏰ Episodio terminado por limite de pasos")
-        return True, False
-    # Mismos umbrales que base_env.is_fallen (que cobra FALL_PENALTY).
-    if fb["upright"] < FALL_UPRIGHT_MIN:
-        print("[base_env] 🛑 Episodio terminado por caida (base demasiado inclinado)")
-        return True, False
-    if fb["z"] < FALL_Z_MIN:
-        print("[base_env] 🛑 Episodio terminado por caida (base demasiado bajo)")
-        return True, False
-    if fb.get("floor_contact", 0) > 0:
-        print("[base_env] 🛑 Episodio terminado: una parte del robot toco el piso")
-        return True, False
-    if fb.get("obstacle_contact", 0) > 0:
-        print("[base_env] 🛑 Episodio terminado: choco con el obstaculo")
-        return True, False
-    if float(np.linalg.norm(fb["xy"] - goal_xy)) < FINISH_DIST:
-        print("[base_env] 🏆 ¡Meta alcanzada!")
-        return True, True
-    return False, False
-
 
 # ──────────────────────────── Env Gym-like ──────────────────────────────────
 class BaseRosEnv:
@@ -532,7 +331,7 @@ class BaseRosEnv:
             time.sleep(0.05)
         print("[base_env] Bridge conectado.")
 
-        self._rs = _RewardState()
+        self._rs = RewardState()
         self._ep_steps = 0
         self._fb: Optional[dict] = None
 
@@ -600,7 +399,7 @@ class BaseRosEnv:
         self._rs.reset(fb["xy"], float(np.linalg.norm(fb["xy"] - np.asarray(guidance["target"]))), fb["yaw"])
         self._ep_steps = 0
         self._fb = fb
-        return _build_obs(guidance, fb, self._get_heatmap(fb))
+        return build_obs(guidance, fb, self._get_heatmap(fb))
 
     # ── Step ─────────────────────────────────────────────────────────────────
     def step(self, action: np.ndarray):
@@ -615,12 +414,21 @@ class BaseRosEnv:
         fb = self._node.feedback()
         fb["flipper_edge"] = flipper_edge(self.map_ctx, fb)
         guidance = self.nav.step(fb["xy"], fb["yaw"])
-        reward = _compute_reward(fb, guidance, action, self._rs, self.goal_xy)
+        reward = compute_reward(fb, guidance, action, self._rs, self.goal_xy)
 
         self._ep_steps += 1
-        done, reached = _terminated(fb, self.goal_xy, self._ep_steps, self.max_steps)
+        # MISMA terminacion que el entrenamiento (base_env.terminated): tocar el
+        # obstaculo virtual NO corta el episodio -- solo cuesta OBSTACLE_PENALTY
+        # en el reward (ver _count_obstacle_contacts) -- y aplica el timeout por
+        # no-progreso. Antes esto era una copia local que si cortaba por
+        # obstaculo y no tenia timeout, asi que el test media otra tarea que la
+        # entrenada y hundia el success rate.
+        done, reached, reason = terminated(
+            fb, self.goal_xy, self._ep_steps, self.max_steps, self._rs)
+        if reason:
+            print(f"[base_ros_env] {'🏆' if reached else '🛑'} {reason}")
 
-        obs = _build_obs(guidance, fb, self._get_heatmap(fb))
+        obs = build_obs(guidance, fb, self._get_heatmap(fb))
         info = {"wp": guidance["wp"], "reached": reached,
                 "dist_goal": float(np.linalg.norm(fb["xy"] - self.goal_xy)),
                 "reward_terms": dict(self._rs.last_terms),

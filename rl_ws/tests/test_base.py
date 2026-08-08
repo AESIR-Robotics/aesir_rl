@@ -108,6 +108,7 @@ _TERM_LABELS = [
     ("direction",         "Direccion (encarar guia)"),
     ("velocity",          "Velocidad (igualar v objetivo)"),
     ("wp_bonus",          "Bonus por waypoint"),
+    ("goal_bonus",        "Bonus por llegar a meta"),
     ("time",              "Castigo de tiempo"),
     ("backward",          "Castigo por retroceder"),
     ("stuck",             "Castigo por atascarse"),
@@ -129,7 +130,13 @@ def print_reward_breakdown(title: str, sums: dict, steps: int):
     neg = sum(v for v in sums.values() if v < 0) or -1e-9
     print(f"\n  ── {title} ({steps} pasos) ──")
     print(f"    {'componente':<34}{'total':>11}{'/paso':>11}{'% +/-':>9}")
-    for key, label in _TERM_LABELS:
+    # Cualquier termino nuevo del reward que aun no tenga etiqueta se lista
+    # igual: si no, desaparece de la tabla pero SI cuenta en REWARD TOTAL y las
+    # filas dejan de sumar el total (paso justo con goal_bonus).
+    labeled = [(k, lbl) for k, lbl in _TERM_LABELS]
+    labeled += [(k, f"{k} (sin etiqueta)") for k in sorted(sums)
+                if k not in dict(_TERM_LABELS)]
+    for key, label in labeled:
         v = sums.get(key, 0.0)
         if abs(v) < 1e-9:
             continue

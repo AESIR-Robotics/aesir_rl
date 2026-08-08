@@ -29,7 +29,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List
 
 import numpy as np
 import torch
@@ -203,7 +203,7 @@ def train(num_iterations: int   = 200,
     env = ArmServoEnv()
     print(f"act_len   = {env.act_len}  (3 lin + 3 ang del EE, dedo_izq, dedo_der)")
     print(f"joint_dim = {env.joint_len}")
-    print(f"CONTROL_DT real por step — entrenamiento NO acelerado vs. tiempo real")
+    print("CONTROL_DT real por step — entrenamiento NO acelerado vs. tiempo real")
 
     policy = MlpActorCritic(joint_dim=env.joint_len, act_dim=env.act_len).to(device)
     opt = torch.optim.Adam(policy.parameters(), lr=lr)

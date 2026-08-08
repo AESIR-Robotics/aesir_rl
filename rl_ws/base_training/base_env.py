@@ -120,6 +120,11 @@ class RewardState:
         self.stuck = 0
         self.best_dist_goal = np.inf
         self.no_progress_steps = 0
+        # Desglose FIRMADO del ultimo reward (la suma de sus valores == el reward
+        # devuelto). Lo consume test_base.py via info["reward_terms"]; poblarlo
+        # cuesta ~1 us/paso (0.02% de un mj_step), asi que se hace siempre en vez
+        # de duplicar compute_reward solo para tenerlo.
+        self.last_terms = {}
 
     def reset(self, xy: np.ndarray, dist_to_target: float, yaw: float = 0.0):
         self.last_xy = xy.copy()
@@ -130,6 +135,7 @@ class RewardState:
         self.stuck = 0
         self.best_dist_goal = np.inf
         self.no_progress_steps = 0
+        self.last_terms = {}
 
 
 # ── Auto-colision de flippers ────────────────────────────────────────────────
@@ -255,8 +261,11 @@ def is_fallen(fb: dict) -> bool:
 # ── Reward ───────────────────────────────────────────────────────────────────
 def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState,
                    goal_xy: np.ndarray) -> float:
-    """Caida letal (volcado/muy bajo/piso) o choque con el obstaculo (retorno
-    temprano, termina el episodio) -> castigos (stuck, energia, jerk flippers,
+    """Caida letal (volcado/muy bajo/piso) -> retorno temprano, y ademas corta
+    el episodio en terminated(). Chocar con el obstaculo virtual TAMBIEN hace
+    retorno temprano (cuesta OBSTACLE_PENALTY y anula el resto del reward de ese
+    paso) pero NO es letal: el episodio sigue, igual en entrenamiento que en el
+    backend ROS -> castigos (stuck, energia, jerk flippers,
     auto-colision flippers) -> bonus al cruzar waypoint (retorno temprano) ->
     progreso (delta_dist * boost exponencial de proximidad) + seguir
     velocidad/direccion de la guia del vortex (solo si avanza), y GOAL_BONUS
@@ -273,12 +282,22 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     target_xy = np.asarray(guidance["target"], dtype=np.float64)
     v_fwd = float(fb["twist"][0])
 
+    # Desglose firmado: cada termino con su signo, de modo que la suma de
+    # terms.values() == el reward devuelto por CUALQUIERA de las 4 salidas.
+    terms = {k: 0.0 for k in (
+        "fall", "obstacle", "stuck", "energy", "flipper_jerk", "flipper_collision",
+        "accel", "flipper_terrain", "wp_bonus", "goal_bonus", "progress",
+        "direction", "velocity", "backward", "time")}
+    rs.last_terms = terms
+
     # 1. Caida letal: volcado, chasis muy bajo o tocar piso -- MISMAS condiciones
     #    que corta terminated(), asi caerse SIEMPRE cuesta FALL_PENALTY.
     if is_fallen(fb):
+        terms["fall"] = -FALL_PENALTY
         return -FALL_PENALTY
 
     if fb.get("obstacle_contact", 0) > 0:
+        terms["obstacle"] = -OBSTACLE_PENALTY
         return -OBSTACLE_PENALTY
 
     # 2. Inactividad: SOLO cuenta "atascado" si NI se traslada NI gira 
@@ -320,10 +339,16 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
 
     penalties = (penalty_stuck + action_cost + flipper_pen
                  + flipper_collision_pen + accel_pen)
+    terms["stuck"]             = -penalty_stuck
+    terms["energy"]            = -action_cost
+    terms["flipper_jerk"]      = -flipper_pen
+    terms["flipper_collision"] = -flipper_collision_pen
+    terms["accel"]             = -accel_pen
 
     # 8. Bonus por extender flippers cerca de terreno trepable (ver docstring
     #     de flipper_terrain_bonus). Se suma siempre, no es una "penalizacion".
     terrain_bonus = flipper_terrain_bonus(fb, fb["flip_qpos"])
+    terms["flipper_terrain"] = terrain_bonus
 
     # 9. Mision completada -> bonus terminal. Condicion identica a la de
     #     terminated() para que el cobro caiga en el mismo paso que cuenta como
@@ -331,11 +356,13 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     goal_bonus = (GOAL_BONUS
                   if float(np.linalg.norm(xy - np.asarray(goal_xy, dtype=np.float64))) < FINISH_DIST
                   else 0.0)
+    terms["goal_bonus"] = goal_bonus
 
     # 10. Waypoint cruzado -> solo bonus + penalizaciones ese paso
     if guidance["wp"] > rs.last_wp:
         rs.last_wp = guidance["wp"]
         rs.last_dist_to_target = float(np.linalg.norm(xy - target_xy))
+        terms["wp_bonus"] = WP_BONUS
         return WP_BONUS - penalties + terrain_bonus + goal_bonus
 
     # 11. Progreso hacia el waypoint actual
@@ -358,6 +385,12 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     # en reversa hacia la meta cobrando el progreso (que es ciego a la orientacion).
     direction_reward = W_DIRECTION * float(cos_t)
     backward_pen = BACKWARD_W * max(0.0, -v_fwd) / V_REF_MPS
+
+    terms["progress"]  = progress_reward
+    terms["direction"] = direction_reward
+    terms["velocity"]  = speed_reward
+    terms["backward"]  = -backward_pen
+    terms["time"]      = -TIME_PENALTY
 
     return (progress_reward + direction_reward + speed_reward + terrain_bonus
             + goal_bonus - backward_pen - penalties - TIME_PENALTY)

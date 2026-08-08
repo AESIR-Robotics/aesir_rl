@@ -38,7 +38,7 @@ if _RL_WS_ROOT not in sys.path:
     sys.path.insert(0, _RL_WS_ROOT)
 
 from global_navigator import (
-    plan_route, box_corners_2d, GlobalNavigator, vortex_apf, REACH_DIST,
+    plan_route, box_corners_2d, GlobalNavigator, vortex_apf,
 )
 # TODOS los parametros compartidos (inicio/meta de la mision, escalas de
 # comando, geometria de la zona segura) salen de base_training/config.py — la
