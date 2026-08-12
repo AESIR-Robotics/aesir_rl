@@ -75,6 +75,7 @@ from rl_ws.base_training.config import (
     N_LOOKAHEAD, LOOKAHEAD_STEP, OBS_DIM, ACT_DIM,
     FLIPPER_JOINTS, CONTROL_HZ, SIM_SPEEDUP,
     USE_HEATMAP, OCTOMAP_BT_PATH, OCTOMAP_RESOLUTION, HEATMAP_RADIUS_M, HEATMAP_PIXELS,
+    HEATMAP_Z_RANGE_M,
     USE_VIRTUAL_OBSTACLE, GOAL_XY_RANGE,
     TRACK_DEFS, ACTIVE_TRACKS,
 )
@@ -315,6 +316,7 @@ class BaseRosEnv:
                 resolution=OCTOMAP_RESOLUTION,
                 radius_m=HEATMAP_RADIUS_M,
                 patch_pixels=HEATMAP_PIXELS,
+                z_range_m=HEATMAP_Z_RANGE_M,
             )
 
         # ── ROS2 ───────────────────────────────────────────────────────────
@@ -417,12 +419,6 @@ class BaseRosEnv:
         reward = compute_reward(fb, guidance, action, self._rs, self.goal_xy)
 
         self._ep_steps += 1
-        # MISMA terminacion que el entrenamiento (base_env.terminated): tocar el
-        # obstaculo virtual NO corta el episodio -- solo cuesta OBSTACLE_PENALTY
-        # en el reward (ver _count_obstacle_contacts) -- y aplica el timeout por
-        # no-progreso. Antes esto era una copia local que si cortaba por
-        # obstaculo y no tenia timeout, asi que el test media otra tarea que la
-        # entrenada y hundia el success rate.
         done, reached, reason = terminated(
             fb, self.goal_xy, self._ep_steps, self.max_steps, self._rs)
         if reason:

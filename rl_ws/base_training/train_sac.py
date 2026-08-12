@@ -115,7 +115,7 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
                 env_steps += N
 
                 # La obs terminal la pisa el auto-reset: para el buffer hay que
-                # usar la ORIGINAL (ver VecMujocoEnv.step). Y `done` solo marca
+                # usar la original (ver VecMujocoEnv.step). Y `done` solo marca
                 # terminal REAL -- en truncaciones (limite de pasos, atascado)
                 # el bootstrap debe seguir, si no se sesga el critico.
                 buf_next = nobs.copy()

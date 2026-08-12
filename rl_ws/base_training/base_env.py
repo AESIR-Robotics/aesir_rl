@@ -120,10 +120,6 @@ class RewardState:
         self.stuck = 0
         self.best_dist_goal = np.inf
         self.no_progress_steps = 0
-        # Desglose FIRMADO del ultimo reward (la suma de sus valores == el reward
-        # devuelto). Lo consume test_base.py via info["reward_terms"]; poblarlo
-        # cuesta ~1 us/paso (0.02% de un mj_step), asi que se hace siempre en vez
-        # de duplicar compute_reward solo para tenerlo.
         self.last_terms = {}
 
     def reset(self, xy: np.ndarray, dist_to_target: float, yaw: float = 0.0):

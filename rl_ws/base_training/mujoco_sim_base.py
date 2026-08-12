@@ -404,7 +404,8 @@ class VecMujocoEnv:
             if getattr(C, "USE_HEATMAP", False):
                 res["map_ctx"] = MapContext(
                     bt_path=td["bt"], resolution=C.OCTOMAP_RESOLUTION,
-                    radius_m=C.HEATMAP_RADIUS_M, patch_pixels=C.HEATMAP_PIXELS)
+                    radius_m=C.HEATMAP_RADIUS_M, patch_pixels=C.HEATMAP_PIXELS,
+                    z_range_m=C.HEATMAP_Z_RANGE_M)
             res["platform_zone"] = build_platform_zone() if td["kind"] == "platform" else None
             self._track_res[t] = res
 

@@ -74,6 +74,11 @@ def load_policy(path: str, obs_dim: int, act_dim: int, device, algo: str = "ppo"
             raise SystemExit(
                 f"'{os.path.basename(path)}' es un checkpoint de la variante con "
                 f"gate (7 dims), que ya no existe. Ver docs/gate_flippers.md.")
+        if "actor_logstd.weight" in saved:
+            raise SystemExit(
+                f"'{os.path.basename(path)}' tiene sigma dependiente del estado "
+                f"(actor_logstd), variante rechazada; esta red usa sigma global. "
+                f"Ver docs/sigma_estado.md.")
         policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS).to(device)
     policy.load_state_dict(saved)
     policy.eval()

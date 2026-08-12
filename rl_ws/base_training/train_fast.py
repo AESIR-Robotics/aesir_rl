@@ -215,10 +215,12 @@ if __name__ == "__main__":
     ap.add_argument("--batch", type=int, default=C.BATCH_SIZE)
     ap.add_argument("--lr", type=float, default=C.LR)
     ap.add_argument("--wandb", action="store_true")
-    ap.add_argument("--resume", default=str(C.CHECKPOINT_DIR / "fast_iter00150.pt"),
-                    help='Checkpoint del que reanudar. Para entrenar DESDE CERO '
-                         'hay que pasar --resume "" -- el default '
-                         'NO es vacio, reanuda de fast_best.pt.')
+    ap.add_argument("--resume", default="",
+                    help='Checkpoint del que reanudar; por default DESDE CERO. '
+                         'Antes el default apuntaba a checkpoints_base/'
+                         'fast_iter00150.pt, lo que arrancaba en caliente sin '
+                         'avisar -- veneno para un barrido de semillas, donde '
+                         'cada corrida tiene que ser independiente.')
     ap.add_argument("--seed", type=int, default=None,
                     help="Semilla de numpy/torch. Separa corridas; no da "
                          "reproducibilidad bit a bit (envs en threads).")

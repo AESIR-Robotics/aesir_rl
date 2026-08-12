@@ -90,6 +90,7 @@ OCTOMAP_RESOLUTION = 0.05
 HEATMAP_RADIUS_M = 1.0
 HEATMAP_PIXELS = 64
 SAVE_HEATMAP_DEBUG = False
+HEATMAP_Z_RANGE_M = 1.0
 
 # ── Velocidad de la base: DOS pares, no confundir ────────────────────────────
 # Hay dos conceptos distintos porque la oruga DESLIZA (skid-steer): lo que se
@@ -137,9 +138,6 @@ GOAL_XY_RANGE  = 9.0
 
 PLATFORM_HALF_EXTENT = 10.0
 USE_VIRTUAL_OBSTACLE = True
-# plan_platform_route_with_obstacle elige PRIMERO donde va el obstaculo y
-# arma la ruta alrededor (nunca al reves) -- el tamano sale de la distancia
-# real entre los dos waypoints que terminan bordeando el hueco abierto.
 VIRTUAL_OBSTACLE_HALF_SIZE     = 0.3    # media-arista MAXIMA (m); se achica si el hueco es mas chico
 VIRTUAL_OBSTACLE_MIN_HALF_SIZE = 0.10   # media-arista MINIMA; por debajo de esto se descarta el obstaculo
 VIRTUAL_OBSTACLE_OFFSET_FRAC   = (0.2, 0.6)   # offset lateral, como fraccion del half_size del obstaculo

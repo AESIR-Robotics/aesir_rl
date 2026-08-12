@@ -255,60 +255,67 @@ def get_circular_heatmap(global_semantic_map, origin_xy, resolution,
 # ----------------------------------------------------------------------
 # 5. Escala de grises por ALTURA REAL (diferencia pallets de sticks)
 # ----------------------------------------------------------------------
-def height_to_grayscale(height_patch, z_min, z_max, robot_z, eps=1e-6):
+def height_to_grayscale(height_patch, robot_z, z_range_m, eps=1e-6):
     """
-    Convierte alturas Z reales a escala de grises [0,1], usando robot_z
-    como PUNTO MEDIO del umbral (0.5), no el punto medio de z_min/z_max.
+    Convierte alturas Z reales a escala de grises [0,1] en una VENTANA FIJA
+    RELATIVA AL ROBOT de +-z_range_m:
 
-    Esto es justo el diseño que pediste:
-        - z_min global -> 1.0 (blanco)  = lo más bajo del mapa
-        - robot_z       -> 0.5 (gris medio) = referencia = el robot
-        - z_max global -> 0.0 (negro)   = lo más alto (el fatal_stick más alto)
+        robot_z - z_range_m  -> 1.0 (blanco) = z_range_m por DEBAJO del robot
+        robot_z              -> 0.5 (gris medio) = el robot
+        robot_z + z_range_m  -> 0.0 (negro)  = z_range_m por ENCIMA del robot
 
-    Como un pallet normalmente queda un poco MÁS BAJO que la altura actual
-    del robot (el robot está parado ENCIMA de él), su gris sale un poco
-    MÁS CLARO que 0.5. Un fatal_stick, al ser más alto que el robot, sale
-    MÁS OSCURO que 0.5. Así diferencias pallets de sticks sin necesitar
-    sus nombres -- la altura real ya los distingue.
+    Lo que quede fuera de la ventana se recorta (satura), que es el
+    comportamiento deseado: un poste de 2.4 m es "obstaculo intransitable",
+    no hace falta resolver CUANTO mide.
 
-    Se normaliza en dos tramos (por debajo y por encima de robot_z) para
-    que robot_z caiga EXACTO en 0.5 sin importar si z_min/z_max son
-    simétricos respecto al robot o no.
+    POR QUE RELATIVA AL ROBOT Y NO A LOS EXTREMOS DE LA PISTA: antes se
+    normalizaba con el z_min/z_max GLOBALES del octomap de cada pista, lo que
+    tenia dos defectos medidos:
+
+      1) OUTLIERS. En pallets, 37 celdas de 10103 (0.37%) -- los fatal_stick a
+         2.45 m -- fijaban z_max y aplastaban TODO el terreno transitable
+         (0.08..0.15 m, 8 cm de relieve) a 4 niveles de gris de 255. En
+         steps1m el relieve equivalente recibia 212. O sea: el MISMO
+         obstaculo fisico se veia 53x mas contrastado segun la pista, lo que
+         rompe la transferencia entre pistas de una sola politica.
+
+      2) COLAPSO AL SUBIR. El divisor de arriba era (z_max - robot_z), asi que
+         se encogia a medida que el robot trepaba. En steps1m (z_max=0.375,
+         escalones hasta 0.38) al llegar arriba valia ~0 y TODO lo que
+         estuviera por encima del robot saturaba a negro puro: el robot se
+         quedaba ciego hacia arriba justo mientras trepaba.
+
+    Con una ventana fija y simetrica el mapa altura->gris es el MISMO en toda
+    pista y en todo instante, y no hay divisor que colapse.
     """
-    height_patch = np.asarray(height_patch, dtype=np.float32)
-    norm = np.empty_like(height_patch)
-
-    below = height_patch <= robot_z
-    denom_low = max(robot_z - z_min, eps)
-    denom_high = max(z_max - robot_z, eps)
-
-    norm[below] = 0.5 * (height_patch[below] - z_min) / denom_low
-    norm[~below] = 0.5 + 0.5 * (height_patch[~below] - robot_z) / denom_high
-    norm = np.clip(norm, 0.0, 1.0)
-
-    gray = 1.0 - norm  # invertido: bajo=blanco, alto=negro
+    h = np.asarray(height_patch, dtype=np.float32)
+    norm = 0.5 + 0.5 * (h - robot_z) / max(float(z_range_m), eps)
+    gray = 1.0 - np.clip(norm, 0.0, 1.0)   # invertido: bajo=blanco, alto=negro
     return gray.astype(np.float32)
 
 
 def get_circular_height_heatmap(global_elevation, origin_xy, resolution,
                                  robot_xy, robot_z, robot_yaw,
-                                 z_min, z_max,
+                                 z_min, z_range_m,
                                  radius_m=1.0, patch_pixels=64,
                                  unknown_value=0.5, shape="square"):
     """
-    Versión que SÍ diferencia pallets de sticks por altura real. Esta es
-    la función que quieres llamar EN CADA STEP del entorno RL (reemplaza
-    a get_circular_heatmap si necesitas la distinción de altura).
+    Heatmap egocentrico de altura real. Esta es la funcion que se llama EN
+    CADA STEP del entorno RL.
 
     shape: "square" (default, ventana completa 2*radius_m x 2*radius_m)
            o "circle" (recorta a un círculo de radio radius_m).
 
     global_elevation: el array crudo con NaN que devuelve
                        octree_to_global_elevation() (NO el clasificado).
-    robot_z: altura ACTUAL del robot (cambia si sube/baja de un pallet,
+    robot_z: altura ACTUAL del robot (cambia si sube/baja de un escalon,
              así que se lo pasas de nuevo en cada step).
-    z_min, z_max: los devuelve octree_to_global_elevation(), son fijos
-                  para todo el mapa (no cambian con la posición del robot).
+    z_min: SOLO se usa como valor de relleno (NaN dentro del mapa y area
+           fuera del mapa = "sin obstaculo" = lo mas bajo). NO interviene ya
+           en la normalizacion a grises.
+    z_range_m: media-ventana de la normalizacion, RELATIVA a robot_z
+               (config.HEATMAP_Z_RANGE_M). Ver height_to_grayscale para el
+               porque de que sea relativa y no los extremos de la pista.
     """
     # Columnas sin dato (NaN) = no hay obstáculo ahí = tratamos como el
     # punto más bajo del mapa (blanco, igual que "piso").
@@ -322,7 +329,7 @@ def get_circular_height_heatmap(global_elevation, origin_xy, resolution,
         fill_value=z_min,  # fuera del área mapeada = igual que "sin obstáculo"
     )
 
-    gray = height_to_grayscale(height_patch, z_min, z_max, robot_z)
+    gray = height_to_grayscale(height_patch, robot_z, z_range_m)
     if shape == "circle":
         gray = apply_circular_mask(gray, radius_m, patch_size_m, out_value=unknown_value)
     return gray

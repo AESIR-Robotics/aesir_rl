@@ -41,6 +41,7 @@ class MapContext:
             resolution=C.OCTOMAP_RESOLUTION,
             radius_m=C.HEATMAP_RADIUS_M,
             patch_pixels=C.HEATMAP_PIXELS,
+            z_range_m=C.HEATMAP_Z_RANGE_M,
         )
         # ... se pasa el MISMO map_ctx a todos los BaseMujocoEnv (solo lectura) ...
 
@@ -49,11 +50,13 @@ class MapContext:
 
     def __init__(self, bt_path: str, resolution: float,
                  radius_m: float = 1.0, patch_pixels: int = 64,
-                 shape: str = "square", margin: float = 0.5):
+                 shape: str = "square", margin: float = 0.5,
+                 z_range_m: float = 1.0):
         self.resolution = resolution
         self.radius_m = radius_m
         self.patch_pixels = patch_pixels
         self.shape = shape
+        self.z_range_m = z_range_m
 
         # Carga pesada -- UNA sola vez para todos los envs.
         (self.elevation, self.origin, self.res,
@@ -76,7 +79,7 @@ class MapContext:
         return get_circular_height_heatmap(
             self.elevation, self.origin, self.res,
             robot_xy=robot_xy, robot_z=robot_z, robot_yaw=robot_yaw,
-            z_min=self.z_min, z_max=self.z_max,
+            z_min=self.z_min, z_range_m=self.z_range_m,
             radius_m=self.radius_m, patch_pixels=self.patch_pixels,
             shape=self.shape,
         )
