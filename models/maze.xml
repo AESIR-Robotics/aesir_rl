@@ -1,0 +1,343 @@
+<mujoco model="aesir_maze">
+
+  <default>
+    <geom condim="4" friction="0.2 0.005 0.0001"/>
+  </default>
+
+  <asset>
+    <texture name="texplane" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512"/>
+    <material name="matplane" reflectance="0.3" texture="texplane" texrepeat="4 4" texuniform="true"/>
+    <material name="maze_visual" rgba="0.55 0.55 0.6 1"/>
+    <material name="obs_hall" rgba="0.8 0.3 0.15 1"/>
+    <material name="obs_door" rgba="0.2 0.6 0.85 1"/>
+
+    <mesh name="base_link_mesh" file="meshes/maze/base_link.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_2" file="meshes/maze/B2__1___1__2.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_3" file="meshes/maze/B2__1___1__3.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_4" file="meshes/maze/B2__1___1__4.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_5" file="meshes/maze/B2__1___1__5.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_6" file="meshes/maze/B2__1___1__6.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_7" file="meshes/maze/B2__1___1__7.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_8" file="meshes/maze/B2__1___1__8.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_9" file="meshes/maze/B2__1___1__9.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_10" file="meshes/maze/B2__1___1__10.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_11" file="meshes/maze/B2__1___1__11.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_2" file="meshes/maze/B2__1__2.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_3" file="meshes/maze/B2__1__3.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_4" file="meshes/maze/B2__1__4.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_5" file="meshes/maze/B2__1__5.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_6" file="meshes/maze/B2__1__6.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_7" file="meshes/maze/B2__1__7.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_8" file="meshes/maze/B2__1__8.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_9" file="meshes/maze/B2__1__9.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_10" file="meshes/maze/B2__1__10.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_11" file="meshes/maze/B2__1__11.stl" scale="0.001 0.001 0.001"/>
+  </asset>
+
+  <worldbody>
+    <light directional="true" pos="3 5 8" dir="-0.5 -0.5 -1"/>
+    <light directional="true" pos="-1 2 6" dir="0.5 -0.3 -1"/>
+
+    <geom name="maze_floor" type="plane" size="50 50 0.1" pos="0 0 -.002" material="matplane"/>
+
+    <!-- Piso fatal: red de seguridad por debajo de maze_floor y por encima del
+         piso invisible del mundo (__mjv_default_floor en aesir_mujoco_robot.xml,
+         z=-1). Si el robot cae por un hueco del maze y toca esto, cuenta como
+         floor_contact -> is_fallen()/terminated() en base_env.py -> reset. -->
+    <geom name="fatal_floor" type="plane" size="50 50 0.1" pos="0 0 -.5" rgba="0.6 0.05 0.05 1"/>
+
+    <!-- MAZE visual (mesh vertices ya estan en world coords) -->
+    <body name="maze_base">
+      <geom name="maze_visual" type="mesh" mesh="base_link_mesh"
+            contype="0" conaffinity="0" material="maze_visual"/>
+    </body>
+
+    <!-- ===== HUBS + PUERTAS ===== -->
+    <!-- Los meshes tienen vertices en world coords, todo en (0,0,0) -->
+    <!-- Box colliders en las posiciones de los mesh centers -->
+
+    <!-- Hub 2: mesh center (0.1043, 4.897, 0.6656) -->
+    <body name="hub_2">
+      <geom name="hub_2_vis" type="mesh" mesh="hub_2"
+            contype="0" conaffinity="0" material="obs_hall"/>
+      <geom name="hub_2_col" type="box" size="0.0475 0.0452 0.0475"
+            pos="0.1043 4.897 0.6656" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+    <body name="door_2">
+      <geom name="door_2_vis" type="mesh" mesh="door_2"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_2_col" type="box" size="0.0255 0.0200 0.0255"
+            pos="0.1225 4.897 0.6838" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+    <!-- Hub 3: mesh center (-0.0113, 5.0125, 0.6656) -->
+    <body name="hub_3">
+      <geom name="hub_3_vis" type="mesh" mesh="hub_3"
+            contype="0" conaffinity="0" material="obs_hall"/>
+      <geom name="hub_3_col" type="box" size="0.0452 0.0475 0.0475"
+            pos="-0.0113 5.0125 0.6656" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+    <body name="door_3">
+      <geom name="door_3_vis" type="mesh" mesh="door_3"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_3_col" type="box" size="0.0200 0.0255 0.0255"
+            pos="-0.0113 5.0272 0.6802" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+    <!-- Hub 4: mesh center (-0.0113, 4.7814, 0.6656) -->
+    <body name="hub_4">
+      <geom name="hub_4_vis" type="mesh" mesh="hub_4"
+            contype="0" conaffinity="0" material="obs_hall"/>
+      <geom name="hub_4_col" type="box" size="0.0452 0.0475 0.0475"
+            pos="-0.0113 4.7814 0.6656" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+    <body name="door_4">
+      <geom name="door_4_vis" type="mesh" mesh="door_4"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_4_col" type="box" size="0.0200 0.0255 0.0255"
+            pos="-0.0113 4.7667 0.6802" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+    <!-- Hub 5: mesh center (-0.0113, 4.897, 0.722) -->
+    <body name="hub_5">
+      <geom name="hub_5_vis" type="mesh" mesh="hub_5"
+            contype="0" conaffinity="0" material="obs_hall"/>
+      <geom name="hub_5_col" type="box" size="0.0452 0.0452 0.022"
+            pos="-0.0113 4.897 0.722" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+    <body name="door_5">
+      <geom name="door_5_vis" type="mesh" mesh="door_5"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_5_col" type="box" size="0.0200 0.0200 0.021"
+            pos="-0.0113 4.8969 0.744" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+    <!-- Hub 6: mesh center (-0.1268, 4.897, 0.6656) -->
+    <body name="hub_6">
+      <geom name="hub_6_vis" type="mesh" mesh="hub_6"
+            contype="0" conaffinity="0" material="obs_hall"/>
+      <geom name="hub_6_col" type="box" size="0.0475 0.0452 0.0475"
+            pos="-0.1268 4.897 0.6656" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+    <body name="door_6">
+      <geom name="door_6_vis" type="mesh" mesh="door_6"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_6_col" type="box" size="0.0255 0.0200 0.0255"
+            pos="-0.1431 4.8969 0.6818" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+    <!-- Hub 7: mesh center (2.4655, 6.2624, 0.722) -->
+    <body name="hub_7">
+      <geom name="hub_7_vis" type="mesh" mesh="hub_7"
+            contype="0" conaffinity="0" material="obs_hall"/>
+      <geom name="hub_7_col" type="box" size="0.0452 0.0452 0.022"
+            pos="2.4655 6.2624 0.722" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+    <body name="door_7">
+      <geom name="door_7_vis" type="mesh" mesh="door_7"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_7_col" type="box" size="0.0200 0.0200 0.021"
+            pos="2.4655 6.2623 0.739" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+    <!-- Hub 8: mesh center (2.3499, 6.2624, 0.6656) -->
+    <body name="hub_8">
+      <geom name="hub_8_vis" type="mesh" mesh="hub_8"
+            contype="0" conaffinity="0" material="obs_hall"/>
+      <geom name="hub_8_col" type="box" size="0.0475 0.0452 0.0475"
+            pos="2.3499 6.2624 0.6656" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+    <body name="door_8">
+      <geom name="door_8_vis" type="mesh" mesh="door_8"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_8_col" type="box" size="0.0255 0.0200 0.0255"
+            pos="2.3317 6.2624 0.6838" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+    <!-- Hub 9: mesh center (2.4655, 6.1468, 0.6656) -->
+    <body name="hub_9">
+      <geom name="hub_9_vis" type="mesh" mesh="hub_9"
+            contype="0" conaffinity="0" material="obs_hall"/>
+      <geom name="hub_9_col" type="box" size="0.0452 0.0475 0.0475"
+            pos="2.4655 6.1468 0.6656" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+    <body name="door_9">
+      <geom name="door_9_vis" type="mesh" mesh="door_9"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_9_col" type="box" size="0.0200 0.0255 0.0255"
+            pos="2.4655 6.1286 0.6838" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+    <!-- Hub 10: mesh center (2.5811, 6.2624, 0.6656) -->
+    <body name="hub_10">
+      <geom name="hub_10_vis" type="mesh" mesh="hub_10"
+            contype="0" conaffinity="0" material="obs_hall"/>
+      <geom name="hub_10_col" type="box" size="0.0475 0.0452 0.0475"
+            pos="2.5811 6.2624 0.6656" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+    <body name="door_10">
+      <geom name="door_10_vis" type="mesh" mesh="door_10"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_10_col" type="box" size="0.0255 0.0200 0.0255"
+            pos="2.5993 6.2624 0.6838" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+    <!-- Hub 11: mesh center (2.4655, 6.3779, 0.6656) -->
+    <body name="hub_11">
+      <geom name="hub_11_vis" type="mesh" mesh="hub_11"
+            contype="0" conaffinity="0" material="obs_hall"/>
+      <geom name="hub_11_col" type="box" size="0.0452 0.0475 0.0475"
+            pos="2.4655 6.3779 0.6656" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+    <body name="door_11">
+      <geom name="door_11_vis" type="mesh" mesh="door_11"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_11_col" type="box" size="0.0200 0.0255 0.0255"
+            pos="2.4655 6.3961 0.6838" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+  <body name="maze_collision">
+    <geom name="maze_collision_0" type="box" pos="-1.2000 1.8500 1.2000" size="0.0500 0.6000 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_4" type="box" pos="-1.2000 4.3000 1.2000" size="0.0500 1.8000 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_7" type="box" pos="-1.2000 7.3250 1.2000" size="0.0500 1.1750 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_19" type="box" pos="-0.6000 1.2250 1.1500" size="0.6500 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_20" type="box" pos="-0.6000 2.4750 1.2000" size="0.6500 0.0250 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_21" type="box" pos="-0.6000 6.1250 1.1500" size="0.6500 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_22" type="box" pos="-0.6000 8.5500 1.1500" size="0.6500 0.0500 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_60" type="box" pos="-0.7250 2.4250 1.6250" size="0.0250 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_61" type="box" pos="-0.7250 6.0750 0.6500" size="0.0250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_62" type="box" pos="-0.7250 6.1750 0.6500" size="0.0250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_63" type="box" pos="-0.7000 2.3750 1.6250" size="0.0500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_64" type="box" pos="-0.7000 2.5250 1.6250" size="0.0500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_65" type="box" pos="-0.7000 6.0250 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_66" type="box" pos="-0.6750 6.2250 0.6500" size="0.0750 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_71" type="box" pos="-0.6000 2.5750 1.6250" size="0.1500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_72" type="box" pos="-0.6000 6.2750 0.6500" size="0.1000 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_76" type="box" pos="-0.5750 2.3250 1.6250" size="0.1250 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_78" type="box" pos="-0.5750 5.9750 0.6500" size="0.1250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_79" type="box" pos="-0.5750 2.6250 1.6250" size="0.0750 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_89" type="box" pos="-0.5000 6.0250 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_90" type="box" pos="-0.5000 6.2250 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_95" type="box" pos="-0.4500 2.4000 1.6250" size="0.0500 0.0500 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_96" type="box" pos="-0.4500 2.5250 1.6250" size="0.0500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_97" type="box" pos="-0.4500 6.0750 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_98" type="box" pos="-0.4500 6.1750 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_132" type="box" pos="0.0250 4.9250 0.4000" size="0.1750 0.1750 0.2500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_143" type="box" pos="0.0250 0.6250 1.2000" size="0.0250 0.5750 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_145" type="box" pos="0.0250 7.9250 1.2000" size="0.0250 0.5750 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_147" type="box" pos="0.0250 9.1750 1.1500" size="0.0250 0.5750 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_148" type="box" pos="0.0250 10.0750 1.1500" size="0.0250 0.2750 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_152" type="box" pos="0.6250 10.3750 1.1500" size="0.6250 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_153" type="box" pos="0.6500 0.0250 1.1500" size="0.6500 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_154" type="box" pos="0.6500 7.3250 1.2000" size="0.6500 0.0250 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_155" type="box" pos="0.6500 9.7750 1.2000" size="0.6500 0.0250 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_158" type="box" pos="1.2500 3.6750 1.1500" size="1.2500 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_195" type="box" pos="0.5000 7.3750 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_200" type="box" pos="0.5250 7.2750 0.6500" size="0.0250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_201" type="box" pos="0.5500 7.4250 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_206" type="box" pos="0.6250 7.4750 0.6500" size="0.1250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_207" type="box" pos="0.6500 7.2250 0.6500" size="0.1500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_211" type="box" pos="0.6500 7.1750 0.6500" size="0.1000 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_221" type="box" pos="0.7500 7.4250 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_226" type="box" pos="0.7750 7.2750 0.6500" size="0.0250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_227" type="box" pos="0.7750 7.3750 0.6500" size="0.0250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_253" type="box" pos="1.1250 2.4750 1.6250" size="0.0250 0.0750 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_254" type="box" pos="1.1250 5.5250 1.6250" size="0.0250 0.0750 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_256" type="box" pos="1.1500 2.3750 1.6250" size="0.0500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_258" type="box" pos="1.1500 5.4250 1.6250" size="0.0500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_261" type="box" pos="1.2500 2.5750 1.6250" size="0.1500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_262" type="box" pos="1.2500 5.6250 1.6250" size="0.1500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_264" type="box" pos="1.2500 2.6250 1.6250" size="0.1000 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_265" type="box" pos="1.2500 5.6750 1.6250" size="0.1000 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_266" type="box" pos="1.2750 2.3250 1.6250" size="0.1250 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_267" type="box" pos="1.2750 5.3750 1.6250" size="0.1250 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_269" type="box" pos="1.8500 -0.7750 1.1500" size="0.6500 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_271" type="box" pos="1.2750 1.8000 1.6250" size="0.0250 0.5000 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_272" type="box" pos="1.2750 2.4750 0.5750" size="0.0250 1.1750 0.4250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_273" type="box" pos="1.2750 2.4750 1.6250" size="0.0250 0.0750 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_275" type="box" pos="1.2750 3.1500 1.6250" size="0.0250 0.5000 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_276" type="box" pos="1.2750 5.1500 1.6250" size="0.0250 0.2000 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_278" type="box" pos="1.2750 5.5500 0.5750" size="0.0250 0.6000 0.4250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_279" type="box" pos="1.2750 5.5250 1.6250" size="0.0250 0.0750 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_280" type="box" pos="1.2750 5.9250 1.6250" size="0.0250 0.2250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_283" type="box" pos="1.2750 9.1750 1.2000" size="0.0250 0.5750 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_284" type="box" pos="1.3250 2.3750 1.6250" size="0.0750 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_286" type="box" pos="1.3250 5.4250 1.6250" size="0.0750 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_292" type="box" pos="1.8750 1.2750 1.1500" size="0.6250 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_293" type="box" pos="1.8750 8.5750 1.2000" size="0.6250 0.0250 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_294" type="box" pos="1.8750 11.1250 1.1500" size="0.6250 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_297" type="box" pos="2.5000 4.9250 1.1500" size="1.2500 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_299" type="box" pos="1.4000 2.4750 1.6250" size="0.0500 0.0750 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_300" type="box" pos="1.4000 5.5250 1.6250" size="0.0500 0.0750 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_401" type="box" pos="2.4750 6.2750 0.4000" size="0.1750 0.1750 0.2500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_410" type="box" pos="2.4750 -0.3750 1.1500" size="0.0250 0.3750 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_411" type="box" pos="2.4750 0.2500 1.1500" size="0.0250 0.2000 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_413" type="box" pos="2.4750 3.0750 1.2000" size="0.0250 0.5750 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_414" type="box" pos="2.4750 10.5000 1.1500" size="0.0250 0.6000 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_421" type="box" pos="3.1000 0.0250 1.1500" size="0.6500 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_422" type="box" pos="3.1000 2.4750 1.2000" size="0.6500 0.0250 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_423" type="box" pos="3.1000 7.4750 1.1500" size="0.6500 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_424" type="box" pos="3.1000 9.8750 1.1500" size="0.6500 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_479" type="box" pos="2.9500 4.8750 1.6250" size="0.0500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_487" type="box" pos="2.9750 2.4250 0.6500" size="0.0250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_488" type="box" pos="2.9750 2.5250 0.6500" size="0.0250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_489" type="box" pos="2.9750 4.9750 1.6250" size="0.0250 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_490" type="box" pos="2.9750 7.4250 0.6500" size="0.0250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_491" type="box" pos="2.9750 7.5250 0.6500" size="0.0250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_492" type="box" pos="2.9750 9.8250 0.6500" size="0.0250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_493" type="box" pos="2.9750 9.9250 0.6250" size="0.0250 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_494" type="box" pos="3.0000 2.3750 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_495" type="box" pos="3.0000 2.5750 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_496" type="box" pos="3.0000 4.8250 1.6250" size="0.0500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_497" type="box" pos="3.0000 7.3750 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_498" type="box" pos="3.0000 9.9750 0.6250" size="0.0500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_503" type="box" pos="3.0750 4.7750 1.6250" size="0.1250 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_506" type="box" pos="3.1000 5.0250 1.6250" size="0.1500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_507" type="box" pos="3.1000 7.5750 0.6500" size="0.1500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_508" type="box" pos="3.1000 9.7750 0.6500" size="0.1500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_510" type="box" pos="3.1000 2.3250 0.6500" size="0.1000 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_511" type="box" pos="3.1000 2.6250 0.6500" size="0.1000 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_513" type="box" pos="3.1000 5.0750 1.6250" size="0.1000 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_514" type="box" pos="3.1000 7.6250 0.6500" size="0.1000 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_515" type="box" pos="3.1000 9.7250 0.6500" size="0.1000 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_518" type="box" pos="3.1250 7.3250 0.6500" size="0.1250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_521" type="box" pos="3.1250 10.0250 0.6250" size="0.1250 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_535" type="box" pos="3.2000 2.3750 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_536" type="box" pos="3.2000 2.5750 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_537" type="box" pos="3.2000 4.8250 1.6250" size="0.0500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_538" type="box" pos="3.2000 7.3750 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_539" type="box" pos="3.2000 9.9750 0.6250" size="0.0500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_546" type="box" pos="3.2250 2.4250 0.6500" size="0.0250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_547" type="box" pos="3.2250 4.8750 1.6250" size="0.0250 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_548" type="box" pos="3.2250 4.9750 1.6250" size="0.0250 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_549" type="box" pos="3.2250 7.5250 0.6500" size="0.0250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_550" type="box" pos="3.2250 9.8250 0.6500" size="0.0250 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_551" type="box" pos="3.2500 2.5250 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_552" type="box" pos="3.2500 7.4250 0.6500" size="0.0500 0.0250 0.6000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_553" type="box" pos="3.2500 9.9250 0.6250" size="0.0500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_594" type="box" pos="3.5750 8.6750 1.6250" size="0.0250 0.0750 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_595" type="box" pos="3.6000 8.5750 1.6250" size="0.0500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_596" type="box" pos="3.6000 8.7750 1.6250" size="0.0500 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_605" type="box" pos="3.7000 8.5250 1.6250" size="0.1000 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_606" type="box" pos="3.7000 8.8250 1.6250" size="0.1000 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_607" type="box" pos="3.7000 0.6250 1.2000" size="0.0500 0.5750 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_610" type="box" pos="4.3000 1.2250 1.1500" size="0.6500 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_612" type="box" pos="3.7250 4.3000 1.2000" size="0.0250 0.6000 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_613" type="box" pos="3.7250 6.8500 1.1500" size="0.0250 0.6000 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_614" type="box" pos="3.7250 8.0000 1.6250" size="0.0250 0.5000 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_615" type="box" pos="3.7250 8.6750 0.5750" size="0.0250 1.1750 0.4250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_617" type="box" pos="3.7250 8.6750 1.6250" size="0.0250 0.0750 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_618" type="box" pos="3.7250 9.3500 1.6250" size="0.0250 0.5000 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_620" type="box" pos="3.7750 8.5750 1.6250" size="0.0750 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_621" type="box" pos="3.7750 8.7750 1.6250" size="0.0750 0.0250 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_623" type="box" pos="4.3250 3.6750 1.1500" size="0.6250 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_624" type="box" pos="4.7500 6.2250 1.1500" size="1.0500 0.0250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_626" type="box" pos="3.8500 8.6750 1.6250" size="0.0500 0.0750 0.6250" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_671" type="box" pos="4.9250 2.4500 1.2000" size="0.0250 1.2000 1.0500" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_673" type="box" pos="4.9250 4.3250 1.1500" size="0.0250 0.6250 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+    <geom name="maze_collision_674" type="box" pos="5.7500 5.6000 1.1500" size="0.0500 0.6000 1.1000" rgba="0.55 0.55 0.6 0.25" contype="1" conaffinity="1"/>
+  </body>
+
+  </worldbody>
+
+</mujoco>

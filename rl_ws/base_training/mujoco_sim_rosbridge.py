@@ -35,14 +35,18 @@ import threading
 import numpy as np
 import mujoco
 import mujoco.viewer
+import pyoctomap
 
 import rclpy
 from rclpy.node import Node
-from sensor_msgs.msg import JointState
-from geometry_msgs.msg import Twist, PoseStamped
+from sensor_msgs.msg import JointState, PointCloud2, PointField
+from geometry_msgs.msg import TransformStamped, Twist, PoseStamped
 from hardware.msg import JointControl
+from std_msgs.msg import Float32MultiArray
 from std_srvs.srv import Trigger
-from std_msgs.msg import Int32, Float32MultiArray
+
+from tf2_ros import TransformBroadcaster
+from std_msgs.msg import Int32, Header
 
 # Raiz del proyecto (aesir_rl) al path para resolver `rl_ws.*` corriendo directo.
 # (base_training/ -> rl_ws/ -> aesir_rl/)
@@ -75,11 +79,15 @@ JOINT_TO_ACTUATOR = {
 PHYSICS_HZ  = C.PHYSICS_HZ    # debe igualar update_rate en ros2_controllers.yaml
 SIM_SPEEDUP = C.SIM_SPEEDUP   # mismo valor que duerme BaseRosEnv (dt/SIM_SPEEDUP)
 
-# Spawn del chasis para el reset de episodio RL: XY de la mision de config,
-# Z segun el TECHO del terreno de la pista activa (steps/ramps son mas altos)
-# — mismo spawn_z/settle que usa BaseMujocoEnv al entrenar en esa pista.
-SPAWN_POSE = (C.START_XY[0], C.START_XY[1],
-              float(_TRACK.get("spawn_z", C.SPAWN_Z)), C.SPAWN_YAW)
+# Spawn del chasis para el reset de episodio RL: XY/yaw de la pista activa (o la
+# mision de config si la pista no define el suyo), Z segun el TECHO de su terreno
+# (steps/ramps son mas altos) — mismo spawn que usa BaseMujocoEnv al entrenar en
+# esa pista. El maze SI trae el suyo: su entrada no coincide con START_XY, que es
+# el arranque de la mision de pallets (otra pista, otro frame).
+_SPAWN_XY = _TRACK.get("spawn_xy", C.START_XY)
+SPAWN_POSE = (float(_SPAWN_XY[0]), float(_SPAWN_XY[1]),
+              float(_TRACK.get("spawn_z", C.SPAWN_Z)),
+              float(_TRACK.get("spawn_yaw", C.SPAWN_YAW)))
 SPAWN_SETTLE_STEPS = int(_TRACK.get("settle_steps", C.SPAWN_SETTLE_STEPS))
 
 # ── Limites de movimiento tipo AVR446 (rampa trapezoidal), en radianes ──────
@@ -98,6 +106,38 @@ def hw_to_ros(rad: float) -> float:
 
 def ros_to_hw(rad: float) -> float:
     return rad + math.pi
+
+
+
+def duty_to_omega(duty: float, omega_max: float) -> float:
+    """Traduce una señal de potencia normalizada (-1..1, tipo PWM/duty de un
+    driver de motor) a velocidad angular (rad/s) para un actuador de
+    velocidad de MuJoCo. omega_max = velocidad sin carga nominal del motor,
+    en rad/s (RPM_datasheet * 2*pi/60, dividido por la relacion de reduccion
+    si el motor tiene caja reductora). No hace falta modelar la caida de
+    velocidad bajo carga a mano — el limite de fuerza del actuador
+    (forcerange/actuatorfrcrange) + kv ya reproduce ese efecto."""
+    return duty * omega_max
+
+
+def points_to_pointcloud2(points: np.ndarray, frame_id: str, stamp) -> PointCloud2:
+    """Arma un PointCloud2 (XYZ float32) a mano, sin depender de sensor_msgs_py
+    (no siempre disponible segun la distro/instalacion)."""
+    msg = PointCloud2()
+    msg.header = Header(frame_id=frame_id, stamp=stamp)
+    msg.height = 1
+    msg.width = int(points.shape[0])
+    msg.fields = [
+        PointField(name='x', offset=0, datatype=PointField.FLOAT32, count=1),
+        PointField(name='y', offset=4, datatype=PointField.FLOAT32, count=1),
+        PointField(name='z', offset=8, datatype=PointField.FLOAT32, count=1),
+    ]
+    msg.is_bigendian = False
+    msg.point_step = 12
+    msg.row_step = msg.point_step * msg.width
+    msg.is_dense = True
+    msg.data = points.astype(np.float32).tobytes()
+    return msg
 
 
 class MujocoHardwareBridge(Node):
@@ -141,9 +181,13 @@ class MujocoHardwareBridge(Node):
         self._base_dof_adr  = self.model.jnt_dofadr[base_jid]
 
         # Deteccion de contacto robot <-> PISO (el suelo a evitar, no los pallets).
+        # "maze_floor" es el piso CAMINABLE de la pista maze -- se excluye para
+        # que caminar sobre el maze no cuente como caida (ver mismo criterio en
+        # mujoco_sim_base.py). "fatal_floor", debajo de maze_floor, SI cuenta.
         self._floor_gids = {
             gid for gid in range(self.model.ngeom)
             if int(self.model.geom_type[gid]) == mujoco.mjtGeom.mjGEOM_PLANE
+            and (mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, gid) or "") != "maze_floor"
         }
         robot_root = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "footprint_link")
         self._robot_gids = {
@@ -181,6 +225,36 @@ class MujocoHardwareBridge(Node):
         self.pose_pub = self.create_publisher(
             PoseStamped, "hardware_node/pose", 10
         )
+
+
+        self.tf_broadcaster = TransformBroadcaster(self)
+
+        # ── Point cloud del octomap para MoveIt (brazo) ──────────────────────
+        # Carga UNA sola vez (mapa estatico, no se vuelve a leer el .bt). En
+        # cada tick de su propio timer (independiente de PHYSICS_HZ) se filtra
+        # por distancia XY al robot (sin Z, pediste circunferencia 2D) y se
+        # publica en frame_id="map" -- el MISMO frame fijo que ya usa pose_pub
+        # arriba, para que el robot se mueva DENTRO del pointcloud en vez de
+        # que el pointcloud se mueva con el robot.
+        self.get_logger().info(f"Cargando octomap para MoveIt: {C.OCTOMAP_BT_PATH}")
+        _tree = pyoctomap.OcTree(C.OCTOMAP_RESOLUTION)
+        if not _tree.readBinary(C.OCTOMAP_BT_PATH):
+            raise RuntimeError(f"No se pudo leer {C.OCTOMAP_BT_PATH}")
+        _map_points, _ = _tree.extractPointCloud()
+        self._map_points = np.asarray(_map_points, dtype=np.float32)
+        self.get_logger().info(
+            f"{len(self._map_points)} puntos cargados -- publicando en "
+            f"'{C.OCTOMAP_POINTCLOUD_TOPIC}' (frame='{C.OCTOMAP_POINTCLOUD_FRAME}', "
+            f"radio XY={C.POINTCLOUD_RADIUS_M}m, {C.POINTCLOUD_PUBLISH_HZ}Hz)"
+        )
+
+        self.pointcloud_pub = self.create_publisher(
+            PointCloud2, C.OCTOMAP_POINTCLOUD_TOPIC, 10
+        )
+        self._pointcloud_timer = self.create_timer(
+            1.0 / C.POINTCLOUD_PUBLISH_HZ, self._publish_pointcloud
+        )
+
         # Reset rapido para RL: teletransporta el brazo a C.ARM_REST_POSE
         self._reset_srv = self.create_service(
             Trigger, "/mujoco_ros_bridge/reset_arm", self._reset_arm_cb
@@ -364,6 +438,19 @@ class MujocoHardwareBridge(Node):
             pose_msg.pose.orientation.z = float(quat[3])
             self.pose_pub.publish(pose_msg)
 
+            t = TransformStamped()
+            t.header.stamp = state.header.stamp
+            t.header.frame_id = "map"
+            t.child_frame_id = "base_link"
+            t.transform.translation.x = float(pos[0])
+            t.transform.translation.y = float(pos[1])
+            t.transform.translation.z = float(pos[2])
+            t.transform.rotation.x = float(quat[1])
+            t.transform.rotation.y = float(quat[2])
+            t.transform.rotation.z = float(quat[3])
+            t.transform.rotation.w = float(quat[0])
+            self.tf_broadcaster.sendTransform(t)
+
             n_floor = 0
             n_obstacle = 0
             for i in range(self.data.ncon):
@@ -382,6 +469,23 @@ class MujocoHardwareBridge(Node):
             self.viewer.sync()
         else:
             rclpy.shutdown()
+
+    def _publish_pointcloud(self) -> None:
+        """Filtra el mapa por distancia XY (sin Z) al robot y publica. Timer
+        propio, independiente de _physics_step -- el mapa no cambia, no hace
+        falta recalcular a PHYSICS_HZ."""
+        with self._lock:
+            robot_xy = np.array(
+                [self.data.qpos[self._base_qpos_adr], self.data.qpos[self._base_qpos_adr + 1]],
+                dtype=np.float32,
+            )
+            stamp = self.get_clock().now().to_msg()
+
+        dist_xy = np.linalg.norm(self._map_points[:, :2] - robot_xy, axis=1)
+        nearby = self._map_points[dist_xy <= C.POINTCLOUD_RADIUS_M]
+
+        msg = points_to_pointcloud2(nearby, C.OCTOMAP_POINTCLOUD_FRAME, stamp)
+        self.pointcloud_pub.publish(msg)
 
     def destroy_node(self) -> None:
         try:

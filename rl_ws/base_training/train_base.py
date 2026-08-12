@@ -44,7 +44,9 @@ from rl_ws.base_training.ppo import MLPActorCritic, ppo_update
 
 try:
     import wandb
-    _HAS_WANDB = True
+    _HAS_WANDB = callable(getattr(wandb, "init", None))
+    if not _HAS_WANDB:
+        print("[train_base] WARNING: imported wandb module has no init(), disabling wandb logging.")
 except ImportError:
     _HAS_WANDB = False
 
@@ -200,7 +202,23 @@ def train(num_iterations: int = C.ROS_ITERS,
 
 
 if __name__ == "__main__":
-    train(
-        use_wandb=True,   # logea metricas a Weights & Biases (requiere `wandb login`)
-        resume_from=str(C.CHECKPOINT_DIR / "base_best.pt"),   # absoluto, no depende del CWD
-    )
+    import argparse
+
+    ap = argparse.ArgumentParser(description="Entrena la base con PPO sobre el bridge ROS2.")
+    # OJO con el default: entrenar DESDE CERO. Antes esto estaba fijo en
+    # base_best.pt, o sea que cada corrida reanudaba la anterior sin decirlo — y
+    # si esa anterior aprendio algo malo (p.ej. la que corrio con el maze roto,
+    # donde is_fallen() mataba el episodio en el paso 1: avg_ep_r=-240 y accion
+    # media ~0, "no moverse"), la corrida nueva HEREDA esa politica y el robot
+    # se queda quieto aunque la pista ya este arreglada. Reanudar ahora es
+    # explicito: --resume <ruta>.
+    ap.add_argument("--resume", default="",
+                    help="Checkpoint del que reanudar. Vacio (default) = desde cero. "
+                         "Ej: --resume ../checkpoints_base/base_best.pt")
+    ap.add_argument("--iters", type=int, default=C.ROS_ITERS)
+    ap.add_argument("--wandb", action="store_true",
+                    help="logea metricas a Weights & Biases (requiere `wandb login`)")
+    args = ap.parse_args()
+
+    train(num_iterations=args.iters, use_wandb=args.wandb,
+          resume_from=(args.resume or None))

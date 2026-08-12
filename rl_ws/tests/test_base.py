@@ -34,6 +34,7 @@ for _p in (_ROOT, _HERE):                            # _HERE: para importar plot
 from rl_ws.base_training.base_ros_env import BaseRosEnv, NAV_JSON      # noqa: E402
 import rl_ws.base_training.config as C                                 # noqa: E402
 from rl_ws.base_training.ppo_cnn_extractor import CNNActorCritic       # noqa: E402
+from rl_ws.base_training.ppo import MLPActorCritic                     # noqa: E402
 from rl_ws.base_training.sac import Actor as SacActor, to_env_action   # noqa: E402
 
 DEFAULT_CKPT = os.path.join(_ROOT, "checkpoints_base", "fast_best.pt")
@@ -55,20 +56,34 @@ def load_policy(path: str, obs_dim: int, act_dim: int, device, algo: str = "ppo"
             f"Los sac_*.pt son de SAC y los fast_*.pt de PPO.")
 
     saved = ckpt[want]
-    # El .pt debe tener el mismo state_dim que el env actual (si cambio
+    # PPO tiene DOS redes posibles y no son intercambiables: train_fast.py usa
+    # CNNActorCritic (el heatmap entra como imagen) y train_base.py usa
+    # MLPActorCritic (la obs entera, heatmap aplanado incluido, a un MLP). Se
+    # deduce del propio state_dict — el MLP tiene "trunk.*" y la CNN
+    # "state_encoder.*"/"map_encoder.*" — porque si no, cargar un base_*.pt
+    # aqui reventaba con un KeyError ilegible.
+    is_mlp = algo == "ppo" and "trunk.0.weight" in saved
+
+    # El .pt debe tener el mismo tamaño de entrada que el env actual (si cambio
     # N_LOOKAHEAD o HEATMAP_PIXELS, no sirve). act_dim ya lo validan los
-    # constructores. La clave del encoder difiere entre las dos redes.
-    k = "enc.state_encoder.0.weight" if algo == "sac" else "state_encoder.0.weight"
-    ckpt_state_dim = int(saved[k].shape[1])
-    state_dim = obs_dim - C.HEATMAP_PIXELS ** 2
-    if ckpt_state_dim != state_dim:
+    # constructores. La clave de entrada difiere entre las tres redes.
+    if algo == "sac":
+        k, expected = "enc.state_encoder.0.weight", obs_dim - C.HEATMAP_PIXELS ** 2
+    elif is_mlp:
+        k, expected = "trunk.0.weight", obs_dim
+    else:
+        k, expected = "state_encoder.0.weight", obs_dim - C.HEATMAP_PIXELS ** 2
+    ckpt_in = int(saved[k].shape[1])
+    if ckpt_in != expected:
         raise SystemExit(
-            f"El checkpoint no coincide con el env: checkpoint(state={ckpt_state_dim}) "
-            f"vs env(state={state_dim}). "
+            f"El checkpoint no coincide con el env: checkpoint(entrada={ckpt_in}) "
+            f"vs env(entrada={expected}). "
             f"Usa un .pt entrenado con esta misma configuracion.")
 
     if algo == "sac":
         policy = SacActor(obs_dim, C.SAC_ACT_DIM, map_pixels=C.HEATMAP_PIXELS).to(device)
+    elif is_mlp:
+        policy = MLPActorCritic(obs_dim, act_dim).to(device)
     else:
         if "actor_gate.weight" in saved:
             raise SystemExit(
@@ -84,7 +99,8 @@ def load_policy(path: str, obs_dim: int, act_dim: int, device, algo: str = "ppo"
     policy.eval()
     extra = (f"success={ckpt['success_rate']:.1%}" if "success_rate" in ckpt
              else f"avg_ep_r={ckpt.get('avg_ep_r', float('nan')):.2f}")
-    print(f"Modelo {algo.upper()} cargado: {path}  (iter={ckpt.get('iter', '?')}, {extra})")
+    arch = "SAC" if algo == "sac" else ("PPO/MLP" if is_mlp else "PPO/CNN")
+    print(f"Modelo {arch} cargado: {path}  (iter={ckpt.get('iter', '?')}, {extra})")
     return policy, algo
 
 
@@ -176,6 +192,7 @@ class LiveTrajectoryPlot:
         self.plt = plt
         self.Rectangle = Rectangle
         self.use_platform = bool(getattr(env, "use_platform", False))
+        self.kind = getattr(env, "kind", "platform" if self.use_platform else "pallets")
         self.every = max(1, int(every))
         self._n = 0
         self.live = not matplotlib.get_backend().lower().endswith("agg")
@@ -193,7 +210,20 @@ class LiveTrajectoryPlot:
         ax.set_xlabel("X [m]", color="#ffffff"); ax.set_ylabel("Y [m]", color="#ffffff")
 
         # ── Fondo estatico del mundo activo ─────────────────────────────────
-        if self.use_platform:
+        if self.kind == "maze":
+            # Paredes del laberinto: se pintan las MISMAS cajas que usa el
+            # planeador (MazeMap.walls, ya filtradas por altura), asi lo que ves
+            # es exactamente el mapa contra el que se planeo la ruta — no un
+            # dibujo aparte que pueda desincronizarse del XML.
+            from rl_ws.global_navigator import get_maze_map
+            mmap = get_maze_map()
+            for x0, y0, x1, y1 in mmap.walls:
+                ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0,
+                                       fc="#4b5566", ec="#8494a8", lw=0.4, zorder=1))
+            lo = mmap.origin
+            hi = lo + (mmap.dims - 1) * mmap.res
+            ax.set_xlim(lo[0] - 0.5, hi[0] + 0.5); ax.set_ylim(lo[1] - 0.5, hi[1] + 0.5)
+        elif self.use_platform:
             he = float(C.PLATFORM_HALF_EXTENT)
             ax.add_patch(Rectangle((-he, -he), 2 * he, 2 * he, fill=False,
                                    ec="#ffa502", lw=2.0, zorder=1))
@@ -245,7 +275,7 @@ class LiveTrajectoryPlot:
             self._obs_patch = self.ax.add_patch(self.Rectangle(
                 (o.x - o.hx, o.y - o.hy), 2 * o.hx, 2 * o.hy,
                 fc="#e17055", ec="#d63031", alpha=0.95, lw=1.4, zorder=3))
-        if not self.use_platform:                         # pallets: encuadrar a la ruta
+        if self.kind == "pallets":                        # pallets: encuadrar a la ruta
             pad = 1.0
             self.ax.set_xlim(wp[:, 0].min() - pad, wp[:, 0].max() + pad)
             self.ax.set_ylim(wp[:, 1].min() - pad, wp[:, 1].max() + pad)
@@ -320,8 +350,8 @@ def main():
     if args.plot:
         # Fondo del mapa viejo (pallets) solo si el env NO usa la plataforma nueva.
         map_data = None
-        if not env.use_platform:
-            with open(NAV_JSON, "r") as f:
+        if getattr(env, "kind", "pallets") == "pallets":   # el fondo de pallets
+            with open(NAV_JSON, "r") as f:                 # solo aplica a ESA pista
                 map_data = json.load(f)
         live = LiveTrajectoryPlot(env, map_data=map_data)
 

@@ -49,6 +49,7 @@ from std_msgs.msg import Int32, Float32MultiArray
 from rl_ws.global_navigator import (
     plan_route, GlobalNavigator, quat_to_yaw, quat_upright, quat_to_grav_body,
     build_platform_zone, plan_platform_route, plan_platform_route_with_obstacle,
+    plan_maze_route,
 )
 from rl_ws.base_training.map_context import MapContext
 # Logica de tarea COMPARTIDA con el backend directo-MuJoCo (funciones puras de
@@ -72,6 +73,10 @@ from rl_ws.base_training.config import (
     V_MAX_MPS, W_MAX_RADPS,
     FLIPPER_MIN_RAD, FLIPPER_MAX_RAD, FLIPPER_HOME_RAD,
     START_XY, GOAL_XY, EPISODE_MAX_STEPS,
+    # Defaults globales de caida/meta: aqui solo se usan como fallback al leer
+    # los umbrales POR PISTA de TRACK_DEFS (_FALL_Z_MIN/_FINISH_DIST abajo);
+    # quien los aplica es base_env.is_fallen/terminated via fb[...].
+    FALL_Z_MIN, FINISH_DIST,
     N_LOOKAHEAD, LOOKAHEAD_STEP, OBS_DIM, ACT_DIM,
     FLIPPER_JOINTS, CONTROL_HZ, SIM_SPEEDUP,
     USE_HEATMAP, OCTOMAP_BT_PATH, OCTOMAP_RESOLUTION, HEATMAP_RADIUS_M, HEATMAP_PIXELS,
@@ -83,6 +88,12 @@ from rl_ws.base_training.config import (
 # El bridge (mujoco_sim_rosbridge.py) simula esta MISMA pista. Para probar otra,
 # cambia el orden de ACTIVE_TRACKS en config.py.
 _ACTIVE_TRACK = TRACK_DEFS[ACTIVE_TRACKS[0]]
+_KIND = _ACTIVE_TRACK.get("kind", "platform")
+# Umbrales POR PISTA (ver el comentario de "maze" en config.TRACK_DEFS): la
+# altura de caida es ABSOLUTA, asi que depende de donde este el suelo de esta
+# pista. Se inyectan en `fb` para que base_env.is_fallen/_terminated los usen.
+_FALL_Z_MIN  = float(_ACTIVE_TRACK.get("fall_z_min", FALL_Z_MIN))
+_FINISH_DIST = float(_ACTIVE_TRACK.get("finish_dist", FINISH_DIST))
 
 
 # ── Convencion "hardware" (espejo de topic_bridge_hardware.cpp) ──────────────
@@ -172,6 +183,7 @@ class _BridgeInterface(Node):
                 flip_qpos=self._flip_qpos.copy(), flip_qvel=self._flip_qvel.copy(),
                 floor_contact=self._floor_contact,
                 obstacle_contact=self._obstacle_contact,
+                fall_z_min=_FALL_Z_MIN, finish_dist=_FINISH_DIST,
             )
 
     # ── Publicar el obstaculo virtual del episodio al bridge ────────────────
@@ -255,17 +267,26 @@ class BaseRosEnv:
                  control_hz: float = CONTROL_HZ,
                  max_steps: int = EPISODE_MAX_STEPS,
                  use_platform: Optional[bool] = None):
-        # use_platform: None (default) -> se DERIVA de la pista activa
-        #   (ACTIVE_TRACKS[0]): kind="platform" -> True, kind="pallets" -> False.
-        #   Asi el env ROS ve el MISMO mundo que el bridge y el entrenamiento.
-        #   True  -> plataforma: ruta directa + obstaculo virtual + zona segura.
-        #   False -> pallets: A* sobre los pallets/sticks del JSON (mision fija).
+        # Modo del env = kind de la pista activa (ACTIVE_TRACKS[0]), para que el
+        # env ROS vea el MISMO mundo que el bridge y que el entrenamiento rapido:
+        #   "platform" -> ruta directa + obstaculo virtual + zona segura.
+        #   "pallets"  -> A* sobre los pallets/sticks del JSON (mision fija).
+        #   "maze"     -> A* sobre el mapa de ocupacion del laberinto, con la meta
+        #                 sorteada en pasillo libre (ver global_navigator.MazeMap).
+        # OJO: antes solo existia el booleano use_platform, asi que el maze caia
+        # en la rama de pallets y acababa planeando sobre obstacles.json — otra
+        # pista, otro frame: waypoints y meta quedaban fuera del laberinto.
+        self.kind = _KIND
         if use_platform is None:
-            use_platform = (_ACTIVE_TRACK.get("kind", "platform") == "platform")
+            use_platform = (self.kind == "platform")
         # nav_json y octomap de la pista activa (config ya los resolvio arriba,
         # pero en modo pallets usamos el JSON de esa pista explicitamente).
-        if not use_platform:
+        if self.kind == "pallets":
             nav_json = _ACTIVE_TRACK.get("nav_json", nav_json)
+        if self.kind == "maze":
+            # El spawn del maze es el suyo (la entrada del laberinto), no el
+            # START_XY global, que es la mision de pallets en otro frame.
+            start_xy = _ACTIVE_TRACK.get("spawn_xy", start_xy)
 
         self.obs_dim = OBS_DIM
         self.act_len = ACT_DIM
@@ -275,7 +296,11 @@ class BaseRosEnv:
         self.nav_json = nav_json
         self.start_xy = np.array(start_xy, dtype=np.float64)
 
-        if use_platform:
+        if self.kind == "maze":
+            # La meta la sortea el planeador en cada reset() -> no hay meta fija.
+            self._fixed_goal = None if goal_xy is None else np.array(goal_xy, dtype=np.float64)
+            self.platform_zone = None
+        elif use_platform:
             # goal fijo si viene por config/arg; None -> random por episodio
             # (mismo rango que el entrenamiento, ±GOAL_XY_RANGE).
             self._fixed_goal = None if goal_xy is None else np.array(goal_xy, dtype=np.float64)
@@ -288,10 +313,22 @@ class BaseRosEnv:
             self.platform_zone = None
 
         # Ruta inicial (se replanifica en reset() desde el spawn real del bridge
-        # cuando use_platform=True). virtual_obstacle=None en modo pallets.
-        self.goal_xy = self._sample_goal()
-        self.waypoints, self.virtual_obstacle = self._plan_route(self.start_xy, self.goal_xy)
-        if use_platform:
+        # en platform y maze). virtual_obstacle=None en modo pallets/maze.
+        if self.kind == "maze":
+            self.waypoints, self.goal_xy = plan_maze_route(
+                self.start_xy, self._fixed_goal, track=_ACTIVE_TRACK)
+            self.virtual_obstacle = None
+        else:
+            self.goal_xy = self._sample_goal()
+            self.waypoints, self.virtual_obstacle = self._plan_route(self.start_xy, self.goal_xy)
+        if self.kind == "maze":
+            # Sin obstaculos ni bordes en el vortex: la ruta A* ya va inflada por
+            # ROBOT_RADIUS, o sea que seguir sus waypoints ya deja al robot dentro
+            # del pasillo. Meter las ~90 paredes como Obstacle2D costaria una
+            # pasada por todas ellas en CADA step sin comprar nada.
+            self.nav = GlobalNavigator(None, waypoints=self.waypoints,
+                                       n_lookahead=N_LOOKAHEAD, lookahead_step=LOOKAHEAD_STEP)
+        elif use_platform:
             self.nav = GlobalNavigator(
                 None, waypoints=self.waypoints,
                 n_lookahead=N_LOOKAHEAD, lookahead_step=LOOKAHEAD_STEP,
@@ -300,9 +337,8 @@ class BaseRosEnv:
         else:
             self.nav = GlobalNavigator(nav_json, waypoints=self.waypoints,
                                        n_lookahead=N_LOOKAHEAD, lookahead_step=LOOKAHEAD_STEP)
-        print(f"[base_env] pista={ACTIVE_TRACKS[0]} "
-              f"({'plataforma' if use_platform else 'pallets A*'}): "
-              f"{tuple(self.start_xy)} -> {tuple(self.goal_xy)}  "
+        print(f"[base_env] pista={ACTIVE_TRACKS[0]} ({self.kind}): "
+              f"{tuple(self.start_xy)} -> {tuple(np.round(self.goal_xy, 2))}  "
               f"({len(self.waypoints)} waypoints, "
               f"obstaculo={'si' if self.virtual_obstacle is not None else 'no'})")
 
@@ -382,10 +418,22 @@ class BaseRosEnv:
             time.sleep(0.02)
             fb = self._node.feedback()
 
+        # Modo maze: waypoint NUEVO cada episodio, sorteado en pasillo libre y
+        # alcanzable desde el spawn REAL que reporto el bridge, con ruta A*. Como
+        # _terminated() corta al llegar (dist < finish_dist), esto es justo lo que
+        # implementa "cada waypoint recogido -> reset -> waypoint nuevo".
+        # Guardar self.goal_xy es obligatorio: de el dependen la condicion de
+        # exito y GOAL_BONUS.
+        if self.kind == "maze":
+            self.waypoints, self.goal_xy = plan_maze_route(fb["xy"], track=_ACTIVE_TRACK)
+            self.nav.replan(self.waypoints, obstacles=[])
+            print(f"[base_env] maze: waypoint nuevo en "
+                  f"({self.goal_xy[0]:.2f}, {self.goal_xy[1]:.2f})  "
+                  f"({len(self.waypoints)} waypoints)")
         # Modo plataforma: nueva mision cada episodio (goal random + ruta directa
         # con obstaculo virtual) desde el spawn REAL que reporto el bridge, igual
         # que BaseMujocoEnv.reset(). Modo pallets: ruta fija de __init__.
-        if self.use_platform:
+        elif self.use_platform:
             self.goal_xy = self._sample_goal()
             self.waypoints, self.virtual_obstacle = self._plan_route(fb["xy"], self.goal_xy)
             self.nav.replan(

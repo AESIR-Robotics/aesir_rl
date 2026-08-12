@@ -5,7 +5,7 @@ import subprocess
 import sys
 import time
 
-DEFAULT_XML = "/home/aesir/aesir_rl/ros2_ws/src/aesir_robot_description/worlds/solo_pallets.xml"
+DEFAULT_XML = "/home/aesir/aesir_rl2/aesir_rl/models/aesir_complete.xml"
 DEFAULT_SIMULATE = ""  # deja vacío para que busque "simulate" en PATH
 
 

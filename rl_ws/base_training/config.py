@@ -73,10 +73,36 @@ TRACK_DEFS = {
         bt=os.path.join(TRACKS_DIR, "pallets", "occupied_map.bt"),
         nav_json=os.path.join(TRACKS_DIR, "pallets", "obstacles.json"),
         spawn_z=0.20, settle_steps=50),          # pista original de pallets
+    # Maze: laberinto de paredes (140 cajas "maze_collision_*" en maze.xml) sobre
+    # el plano "maze_floor" a z=0. OJO con las tres claves propias:
+    #   spawn_xy/spawn_yaw — la mision NO es procedural como en platform: el robot
+    #     SIEMPRE nace en la entrada del laberinto (medido libre, holgura 0.40 m)
+    #     mirando al corredor abierto. START_XY global no sirve: es la mision de
+    #     pallets, que en el frame del maze cae en otro lado.
+    #   fall_z_min — el piso caminable del maze es z=0, no una plataforma elevada
+    #     (flat/steps/ramps tienen el suyo a z>=0.12). Medido en sim, el chasis
+    #     REPOSA a z=0.036, o sea por DEBAJO del FALL_Z_MIN global de 0.10: con el
+    #     default el robot nace "caido" y is_fallen() mata el episodio en el paso
+    #     1, siempre. -0.20 queda debajo del piso caminable y encima del
+    #     "fatal_floor" (z=-0.5), que sigue siendo la red de seguridad real.
+    #   finish_dist — 0.10 m es inalcanzable de forma fiable para un skid-steer en
+    #     pasillos de ~0.9 m; 0.25 es "recoger el waypoint" sin pedir puntería.
+    "maze": dict(
+        kind="maze",
+        xml=os.path.join(_MODELS, "aesir_complete_maze.xml"),
+        bt=os.path.join(TRACKS_DIR, "maze", "occupied_map.bt"),
+        # spawn_yaw=0 (mirando a +x) NO es arbitrario: medido sobre 300 metas
+        # sorteadas, el 100% de las rutas sale de la entrada hacia +x (rumbo
+        # medio +3°). Con yaw=pi el robot arrancaba 177° girado en TODOS los
+        # episodios, y como el reward de progreso es ciego a la orientacion le
+        # salia mas barato conducir en REVERSA que girar -> aprendia al reves.
+        spawn_xy=(0.5, -0.4), spawn_yaw=0.0,
+        spawn_z=0.12, settle_steps=100,
+        fall_z_min=-0.20, finish_dist=0.25),
 }
 # Pistas ACTIVAS para entrenar: una o varias — VecMujocoEnv las reparte entre
 # los envs (round-robin). Ej: ["flat"], ["steps"], ["flat","steps","ramps"].
-ACTIVE_TRACKS = ["flat", "ramps", "steps1m", "pallets"]
+ACTIVE_TRACKS = ["flat", "ramps", "steps1m", "maze"]
 
 # Compatibilidad: el "mundo por default" (bridge ROS, scripts single-track) es
 # la PRIMERA pista activa. Para probar otra pista por ROS, cambia el orden.
@@ -92,6 +118,12 @@ HEATMAP_PIXELS = 64
 SAVE_HEATMAP_DEBUG = False
 HEATMAP_Z_RANGE_M = 1.0
 
+
+# ── Point cloud del octomap hacia MoveIt (brazo) ─────────────────────────────
+OCTOMAP_POINTCLOUD_TOPIC = "/stepfield/points"
+OCTOMAP_POINTCLOUD_FRAME = "map"
+POINTCLOUD_RADIUS_M = 1.25
+POINTCLOUD_PUBLISH_HZ = 2.0
 # ── Velocidad de la base: DOS pares, no confundir ────────────────────────────
 # Hay dos conceptos distintos porque la oruga DESLIZA (skid-steer): lo que se
 # COMANDA no es lo que el robot LOGRA.
@@ -122,21 +154,36 @@ V_MAX_MPS   = 0.85     # COMANDO linear.x  a accion=1 (setpoint, no velocidad lo
 W_MAX_RADPS = 5.0      # COMANDO angular.z a accion=1 (setpoint, no velocidad lograda)
 V_REF_MPS   = 0.48     # REAL: velocidad lineal maxima medida  (referencia del reward)
 W_REF_RADPS = 0.76     # REAL: velocidad angular maxima medida (referencia del reward)
+
 # Limite de recorrido de los flippers (por software)
 FLIPPER_MIN_RAD = -1.1
 FLIPPER_MAX_RAD = 2.64159
 CONTROL_FLIPPERS = True
 
 # ── Mision (frame de aesir_complete.xml == frame de obstacles.json) ──────────
-START_XY: Tuple[float, float] = (-1.5, 3.5)
+START_XY: Tuple[float, float] = (0.5, -0.4)
 GOAL_XY:  Optional[Tuple[float, float]] = None   # None -> ultimo pallet del JSON
-SPAWN_Z   = 0.20
-FINISH_DIST       = 0.20
+SPAWN_Z   = 0.40          # (feat/maze)
+FINISH_DIST       = 0.20  # (base) default global; cada pista puede pisarlo con
+                          # TRACK_DEFS[...]["finish_dist"] -> fb["finish_dist"]
 EPISODE_MAX_STEPS = 10000
 SPAWN_XY_RANGE = 8.0
 GOAL_XY_RANGE  = 9.0
 
 PLATFORM_HALF_EXTENT = 10.0
+
+# ── Maze: mapa de ocupacion y muestreo del waypoint ──────────────────────────
+# El area navegable NO se declara a mano (antes eran dos rangos XY fijos que
+# caian mayormente DENTRO de paredes): global_navigator.get_maze_map() la deriva
+# del propio XML — rasteriza las cajas de colision, infla por ROBOT_RADIUS y se
+# queda con la componente conexa de la entrada (medido: 27.8 m2 navegables). Asi
+# el waypoint SIEMPRE cae en pasillo libre y alcanzable, y si el maze cambia el
+# mapa se recalcula solo.
+MAZE_ROBOT_TOP_M     = 0.45   # alto del robot: una pared que EMPIEZA por encima
+                              # de esto es un dintel y se pasa por debajo (68 de
+                              # las 159 cajas del maze son dinteles) -> no bloquea
+MAZE_GOAL_MIN_DIST_M = 2.0    # separacion minima robot->waypoint nuevo (si no,
+                              # sortearia metas pegadas y el episodio seria trivial)
 USE_VIRTUAL_OBSTACLE = True
 VIRTUAL_OBSTACLE_HALF_SIZE     = 0.3    # media-arista MAXIMA (m); se achica si el hueco es mas chico
 VIRTUAL_OBSTACLE_MIN_HALF_SIZE = 0.10   # media-arista MINIMA; por debajo de esto se descarta el obstaculo
@@ -340,5 +387,3 @@ ROS_ITERS          = 500
 ROS_BATCH_SIZE     = 256
 ROS_SAVE_EVERY     = 25
 WANDB_PROJECT_ROS  = "AIDL-PPO-AESIR-BASE"
-
-

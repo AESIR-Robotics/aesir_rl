@@ -1,0 +1,125 @@
+<mujoco model="aesir_steps">
+
+  <default>
+    <geom condim="4" friction="0.2 0.005 0.0001"/>
+  </default>
+
+  <asset>
+    <texture name="texplane" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512"/>
+    <material name="matplane" reflectance="0.3" texture="texplane" texrepeat="4 4" texuniform="true"/>
+    <material name="steps_visual" rgba="0.5 0.5 0.55 1"/>
+    <material name="obs_hub" rgba="0.8 0.3 0.15 1"/>
+    <material name="obs_door" rgba="0.2 0.6 0.85 1"/>
+
+    <mesh name="base_link_mesh" file="meshes/steps/base_link.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_1" file="meshes/steps/Component3_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_2" file="meshes/steps/Component3_2.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_3" file="meshes/steps/Component3_3.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_4" file="meshes/steps/Component3_4.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="hub_5" file="meshes/steps/Component3_5.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_1" file="meshes/steps/Component4_1.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_2" file="meshes/steps/Component4_2.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_3" file="meshes/steps/Component4_3.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_4" file="meshes/steps/Component4_4.stl" scale="0.001 0.001 0.001"/>
+    <mesh name="door_5" file="meshes/steps/Component4_5.stl" scale="0.001 0.001 0.001"/>
+  </asset>
+
+  <worldbody>
+    <light directional="true" pos="3 5 8" dir="-0.5 -0.5 -1"/>
+    <light directional="true" pos="-1 2 6" dir="0.5 -0.3 -1"/>
+
+    <geom name="steps_floor" type="plane" size="50 50 0.1" pos="0 0 0" material="matplane"/>
+
+    <!-- STEPS PLATFORM: visual + collider -->
+    <body name="steps_base">
+      <geom name="steps_visual" type="mesh" mesh="base_link_mesh"
+            contype="0" conaffinity="0" material="steps_visual"/>
+      <geom name="steps_collision" type="box" size="1.209 2.403 0.3045"
+            pos="1.209 2.403 0.2955" rgba="0.5 0.5 0.55 0.3"/>
+    </body>
+
+    <!-- ===== HUBS (Component3) ===== -->
+    <!-- Hub 1: center (1.221, 2.2874, 0.3746) -->
+    <body name="hub_1">
+      <geom name="hub_1_vis" type="mesh" mesh="hub_1"
+            contype="0" conaffinity="0" material="obs_hub"/>
+      <geom name="hub_1_col" type="box" size="0.0452 0.0475 0.0475"
+            pos="1.221 2.2874 0.3746" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+
+    <!-- Hub 2: center (1.3366, 2.403, 0.3746) -->
+    <body name="hub_2">
+      <geom name="hub_2_vis" type="mesh" mesh="hub_2"
+            contype="0" conaffinity="0" material="obs_hub"/>
+      <geom name="hub_2_col" type="box" size="0.0475 0.0452 0.0475"
+            pos="1.3366 2.403 0.3746" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+
+    <!-- Hub 3: center (1.221, 2.5186, 0.3746) -->
+    <body name="hub_3">
+      <geom name="hub_3_vis" type="mesh" mesh="hub_3"
+            contype="0" conaffinity="0" material="obs_hub"/>
+      <geom name="hub_3_col" type="box" size="0.0452 0.0475 0.0475"
+            pos="1.221 2.5186 0.3746" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+
+    <!-- Hub 4: center (1.1054, 2.403, 0.3746) -->
+    <body name="hub_4">
+      <geom name="hub_4_vis" type="mesh" mesh="hub_4"
+            contype="0" conaffinity="0" material="obs_hub"/>
+      <geom name="hub_4_col" type="box" size="0.0475 0.0452 0.0475"
+            pos="1.1054 2.403 0.3746" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+
+    <!-- Hub 5: center (1.221, 2.403, 0.431) -->
+    <body name="hub_5">
+      <geom name="hub_5_vis" type="mesh" mesh="hub_5"
+            contype="0" conaffinity="0" material="obs_hub"/>
+      <geom name="hub_5_col" type="box" size="0.0451 0.0451 0.022"
+            pos="1.221 2.403 0.431" rgba="0.8 0.3 0.15 0.4"/>
+    </body>
+
+    <!-- ===== DOORS/OBSTACLES (Component4) ===== -->
+    <!-- Door 1: center (1.221, 2.2673, 0.3946) -->
+    <body name="door_1">
+      <geom name="door_1_vis" type="mesh" mesh="door_1"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_1_col" type="box" size="0.02 0.0335 0.0335"
+            pos="1.221 2.2673 0.3946" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+    <!-- Door 2: center (1.3489, 2.403, 0.3869) -->
+    <body name="door_2">
+      <geom name="door_2_vis" type="mesh" mesh="door_2"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_2_col" type="box" size="0.0335 0.02 0.0335"
+            pos="1.3489 2.403 0.3869" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+    <!-- Door 3: center (1.221, 2.5309, 0.3869) -->
+    <body name="door_3">
+      <geom name="door_3_vis" type="mesh" mesh="door_3"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_3_col" type="box" size="0.02 0.0335 0.0335"
+            pos="1.221 2.5309 0.3869" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+    <!-- Door 4: center (1.0931, 2.403, 0.3869) -->
+    <body name="door_4">
+      <geom name="door_4_vis" type="mesh" mesh="door_4"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_4_col" type="box" size="0.0335 0.02 0.0335"
+            pos="1.0931 2.403 0.3869" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+    <!-- Door 5: center (1.221, 2.403, 0.4575) -->
+    <body name="door_5">
+      <geom name="door_5_vis" type="mesh" mesh="door_5"
+            contype="0" conaffinity="0" material="obs_door"/>
+      <geom name="door_5_col" type="box" size="0.02 0.02 0.0305"
+            pos="1.221 2.403 0.4575" rgba="0.2 0.6 0.85 0.4"/>
+    </body>
+
+  </worldbody>
+
+</mujoco>

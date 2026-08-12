@@ -119,6 +119,7 @@ class RewardState:
         self.last_twist = np.zeros(3, dtype=np.float32)
         self.stuck = 0
         self.best_dist_goal = np.inf
+        self.best_wp = 0
         self.no_progress_steps = 0
         self.last_terms = {}
 
@@ -130,6 +131,7 @@ class RewardState:
         self.last_twist = np.zeros(3, dtype=np.float32)
         self.stuck = 0
         self.best_dist_goal = np.inf
+        self.best_wp = 0
         self.no_progress_steps = 0
         self.last_terms = {}
 
@@ -248,9 +250,15 @@ def is_fallen(fb: dict) -> bool:
     o tocando el piso. UNA sola definicion para que compute_reward (que cobra
     FALL_PENALTY) y terminated (que corta el episodio) usen EXACTAMENTE los
     mismos umbrales -- si no, terminar por volcarse saldria gratis y seria un
-    escape barato de un episodio con retorno futuro negativo."""
+    escape barato de un episodio con retorno futuro negativo.
+
+    El umbral de altura es POR PISTA (fb["fall_z_min"], que ponen los backends
+    desde TRACK_DEFS; default = FALL_Z_MIN). No puede ser global: mide la altura
+    ABSOLUTA del chasis, y cada pista tiene su suelo a distinta z. En maze el
+    piso caminable es z=0 y el chasis reposa a 0.036 -> con el default de 0.10
+    el robot nacia ya "caido" y el episodio moria en el paso 1."""
     return (fb["upright"] < FALL_UPRIGHT_MIN
-            or fb["z"] < FALL_Z_MIN
+            or fb["z"] < fb.get("fall_z_min", FALL_Z_MIN)
             or fb.get("floor_contact", 0) > 0)
 
 
@@ -350,7 +358,8 @@ def compute_reward(fb: dict, guidance: dict, action: np.ndarray, rs: RewardState
     #     terminated() para que el cobro caiga en el mismo paso que cuenta como
     #     exito.
     goal_bonus = (GOAL_BONUS
-                  if float(np.linalg.norm(xy - np.asarray(goal_xy, dtype=np.float64))) < FINISH_DIST
+                  if (float(np.linalg.norm(xy - np.asarray(goal_xy, dtype=np.float64)))
+                      < fb.get("finish_dist", FINISH_DIST))
                   else 0.0)
     terms["goal_bonus"] = goal_bonus
 
@@ -404,14 +413,23 @@ def terminated(fb: dict, goal_xy: np.ndarray, ep_steps: int,
         return True, False, "limite de pasos"
     if fb["upright"] < FALL_UPRIGHT_MIN:
         return True, False, "caida (demasiado inclinado)"
-    if fb["z"] < FALL_Z_MIN:
+    if fb["z"] < fb.get("fall_z_min", FALL_Z_MIN):
         return True, False, "caida (demasiado bajo)"
     if fb.get("floor_contact", 0) > 0:
         return True, False, "toco el piso"
     dist_goal = float(np.linalg.norm(fb["xy"] - goal_xy))
-    if dist_goal < FINISH_DIST:
+    if dist_goal < fb.get("finish_dist", FINISH_DIST):
         return True, True, "META alcanzada"
-    if dist_goal < rs.best_dist_goal - STUCK_NO_PROGRESS_M:
+    # "Progreso" = acercarse a la meta O avanzar por la RUTA. Lo segundo no es
+    # un extra: en un laberinto rodear una pared ALEJA en linea recta de la meta,
+    # asi que con solo dist_goal el contador de atasco corre durante cada rodeo
+    # legitimo y mata el episodio (medido en maze: cortaba a 554 pasos con el
+    # robot avanzando bien por su ruta). rs.last_wp lo actualiza compute_reward,
+    # que en los dos backends corre ANTES que terminated() en el mismo paso.
+    if rs.last_wp > rs.best_wp:
+        rs.best_wp = rs.last_wp
+        rs.no_progress_steps = 0
+    elif dist_goal < rs.best_dist_goal - STUCK_NO_PROGRESS_M:
         rs.best_dist_goal = dist_goal
         rs.no_progress_steps = 0
     else:

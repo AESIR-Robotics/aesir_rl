@@ -27,11 +27,15 @@ from pathlib import Path
 
 import numpy as np
 import torch
+import mujoco
+import mujoco.viewer
 
 import os, sys
 _ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
+
+os.environ.setdefault("MUJOCO_GL", "glfw")
 
 import rl_ws.base_training.config as C
 from rl_ws.base_training.mujoco_sim_base import VecMujocoEnv
@@ -54,7 +58,8 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
           gamma=C.GAMMA, gae_lambda=C.GAE_LAMBDA, clip=C.CLIP,
           vf_coef=C.VF_COEF, ent_coef=C.ENT_COEF, lr=C.LR,
           save_every=C.SAVE_EVERY, use_wandb=False, resume_from=None,
-          device_str=C.DEVICE, seed=None, ckpt_dir=None, run_name=None):
+          device_str=C.DEVICE, seed=None, ckpt_dir=None, run_name=None,
+          show_viewer=False):
 
     device = torch.device("cuda" if (device_str == "auto" and torch.cuda.is_available())
                           else device_str if device_str != "auto" else "cpu")
@@ -75,6 +80,18 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
 
     venv = VecMujocoEnv(n_envs=n_envs)
     obs_dim, act_dim = venv.obs_dim, venv.act_dim
+
+    viewer = None
+    if show_viewer and hasattr(venv, "envs") and venv.envs:
+        try:
+            viewer = mujoco.viewer.launch_passive(venv.envs[0].model, venv.envs[0].data)
+            viewer.cam.distance = 1.5
+            viewer.cam.azimuth = 135.0
+            viewer.cam.elevation = -20.0
+            print("[viewer] MuJoCo viewer abierto")
+        except Exception as exc:
+            print(f"[viewer] no se pudo abrir: {exc}")
+            viewer = None
 
     policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS).to(device)
     opt = torch.optim.Adam(policy.parameters(), lr=lr)
@@ -127,14 +144,18 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
     b_done = np.zeros((T, N), dtype=np.float32)
 
     obs = venv.reset()
+    if viewer is not None and getattr(viewer, "is_running", lambda: False)():
+        viewer.sync()
     try:
         for it in range(start_iter, start_iter + iters):
             t0 = time.time()
             n_done = n_ok = 0
             for t in range(T):
-                action, raw, logp, val = policy.act_batch(obs, device)
-                nobs, rew, done, infos = venv.step(action)
-                b_obs[t], b_act[t], b_logp[t] = obs, raw, logp
+                act, raw, logp, val = policy.act_batch(obs, device)
+                nobs, rew, done, infos = venv.step(act)
+                if viewer is not None and getattr(viewer, "is_running", lambda: False)():
+                    viewer.sync()
+                b_obs[t], b_act[t], b_logp[t] = obs, act, logp
                 b_rew[t], b_val[t], b_done[t] = rew, val, done
                 obs = nobs
 
@@ -202,6 +223,8 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
                 best_avg = avg
                 torch.save(_ckpt(), ckpt_dir / "fast_best.pt")
     finally:
+        if viewer is not None:
+            viewer.close()
         venv.close()
         if use_wandb:
             wandb.finish()
@@ -215,12 +238,13 @@ if __name__ == "__main__":
     ap.add_argument("--batch", type=int, default=C.BATCH_SIZE)
     ap.add_argument("--lr", type=float, default=C.LR)
     ap.add_argument("--wandb", action="store_true")
+    ap.add_argument("--viewer", action="store_true", help="abrir el visualizador de MuJoCo")
     ap.add_argument("--resume", default="",
                     help='Checkpoint del que reanudar; por default DESDE CERO. '
-                         'Antes el default apuntaba a checkpoints_base/'
-                         'fast_iter00150.pt, lo que arrancaba en caliente sin '
-                         'avisar -- veneno para un barrido de semillas, donde '
-                         'cada corrida tiene que ser independiente.')
+                         'Antes el default apuntaba a un checkpoint concreto, lo '
+                         'que arrancaba en caliente sin avisar -- veneno para un '
+                         'barrido de semillas, donde cada corrida tiene que ser '
+                         'independiente. Para reanudar, pasalo explicito.')
     ap.add_argument("--seed", type=int, default=None,
                     help="Semilla de numpy/torch. Separa corridas; no da "
                          "reproducibilidad bit a bit (envs en threads).")
@@ -231,4 +255,4 @@ if __name__ == "__main__":
     train(n_envs=args.n_envs, steps_per_env=args.steps, iters=args.iters,
           batch_size=args.batch, lr=args.lr, use_wandb=args.wandb,
           resume_from=args.resume, seed=args.seed, ckpt_dir=args.ckpt_dir,
-          run_name=args.name)
+          run_name=args.name, show_viewer=args.viewer)
