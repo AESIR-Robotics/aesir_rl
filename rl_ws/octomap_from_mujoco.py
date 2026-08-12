@@ -52,7 +52,7 @@ _DEFAULT_INFLATED_OUT = os.path.join(_HERE, "inflated_map.bt")
 # ----------------------------------------------------------------------
 # Geoms que NO deben entrar al mapa estatico (el obstaculo virtual se
 # reposiciona por episodio; incluirlo congelaria una caja fantasma en el bt).
-_EXCLUDE_GEOM_NAMES = {"virtual_obstacle"}
+_EXCLUDE_GEOM_NAMES = {"virtual_obstacle", "maze_floor"}
 
 
 def load_collision_boxes(xml_path, include_names_prefix=None, exclude_planes=True):
@@ -281,6 +281,7 @@ _TRACK_XMLS = {
     "steps":   os.path.join(_PROJECT_ROOT, "models", "track_steps.xml"),
     "ramps":   os.path.join(_PROJECT_ROOT, "models", "track_ramps.xml"),
     "pallets": os.path.join(_PROJECT_ROOT, "models", "track_pallets.xml"),
+    "maze":    os.path.join(_PROJECT_ROOT, "models", "maze.xml"),
 }
 
 
