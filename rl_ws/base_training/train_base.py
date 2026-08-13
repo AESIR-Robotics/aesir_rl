@@ -205,13 +205,6 @@ if __name__ == "__main__":
     import argparse
 
     ap = argparse.ArgumentParser(description="Entrena la base con PPO sobre el bridge ROS2.")
-    # OJO con el default: entrenar DESDE CERO. Antes esto estaba fijo en
-    # base_best.pt, o sea que cada corrida reanudaba la anterior sin decirlo — y
-    # si esa anterior aprendio algo malo (p.ej. la que corrio con el maze roto,
-    # donde is_fallen() mataba el episodio en el paso 1: avg_ep_r=-240 y accion
-    # media ~0, "no moverse"), la corrida nueva HEREDA esa politica y el robot
-    # se queda quieto aunque la pista ya este arreglada. Reanudar ahora es
-    # explicito: --resume <ruta>.
     ap.add_argument("--resume", default="",
                     help="Checkpoint del que reanudar. Vacio (default) = desde cero. "
                          "Ej: --resume ../checkpoints_base/base_best.pt")

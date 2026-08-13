@@ -76,10 +76,6 @@ class BaseMujocoEnv:
         self._kind = self.track.get("kind", "platform")
         self._spawn_z = float(self.track.get("spawn_z", C.SPAWN_Z))
         self._settle = int(self.track.get("settle_steps", C.SPAWN_SETTLE_STEPS))
-        # Umbrales POR PISTA que viajan en `fb` hasta base_env (ver is_fallen /
-        # terminated): la altura de caida es absoluta, asi que depende de donde
-        # este el suelo de ESTA pista, y la distancia de meta de lo fino que sea
-        # su terreno. Sin esto el maze (suelo en z=0) moria en el primer paso.
         self._fall_z_min = float(self.track.get("fall_z_min", C.FALL_Z_MIN))
         self._finish_dist = float(self.track.get("finish_dist", C.FINISH_DIST))
         self.model = model if model is not None else mujoco.MjModel.from_xml_path(self.track["xml"])
@@ -113,10 +109,9 @@ class BaseMujocoEnv:
         self._arm_vadr  = [int(m.jnt_dofadr[jid(n)])  for n in C.ARM_JOINTS]
 
         # Geoms para deteccion de contacto robot<->piso (igual que el bridge).
-        # "maze_floor" es el piso CAMINABLE de la pista maze (a diferencia del
+        # "maze_floor" es el piso caminable de la pista maze (a diferencia del
         # resto de pistas, donde el unico plane es el piso fatal debajo de la
-        # plataforma/pallets) -- se excluye para que caminar sobre el maze no
-        # cuente como caida. "fatal_floor" (debajo de maze_floor) SI cuenta.
+        # plataforma/pallets) 
         self._floor_gids = {g for g in range(m.ngeom)
                             if int(m.geom_type[g]) == mujoco.mjtGeom.mjGEOM_PLANE
                             and (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "") != "maze_floor"}
@@ -156,12 +151,12 @@ class BaseMujocoEnv:
             self.nav = GlobalNavigator(nav_json, waypoints=waypoints,
                                        n_lookahead=C.N_LOOKAHEAD)
         elif self._kind == "maze":
-            # Maze: el robot nace SIEMPRE en la entrada y va a por un waypoint
+            # Maze: el robot nace siempre en la entrada y va a por un waypoint
             # sorteado en pasillo libre y alcanzable (A* sobre el mapa de
             # ocupacion del laberinto, ver global_navigator.MazeMap). Al
             # alcanzarlo el episodio termina -> reset() sortea otro.
             # La meta la devuelve el planeador: es la que valida terminated() y
-            # la que cobra GOAL_BONUS, asi que NO puede quedar en (0,0).
+            # la que cobra GOAL_BONUS, asi que no puede quedar en (0,0).
             spawn = self.track.get("spawn_xy", C.START_XY)
             waypoints, goal_xy = plan_maze_route(spawn, goal_xy, track=self.track)
             self.goal_xy = np.asarray(goal_xy, dtype=np.float64)
@@ -256,7 +251,7 @@ class BaseMujocoEnv:
             spawn_xy = np.array(C.START_XY, dtype=float)
             spawn_yaw = 0.0
         elif self._kind == "maze":
-            # Maze: spawn FIJO en la entrada del laberinto (mismo punto que usa
+            # Maze: spawn fijo en la entrada del laberinto (mismo punto que usa
             # el bridge ROS), mirando al corredor abierto. Lo que cambia entre
             # episodios es el waypoint, no el punto de partida.
             spawn_xy = np.array(self.track.get("spawn_xy", C.START_XY), dtype=float)

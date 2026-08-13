@@ -73,9 +73,6 @@ from rl_ws.base_training.config import (
     V_MAX_MPS, W_MAX_RADPS,
     FLIPPER_MIN_RAD, FLIPPER_MAX_RAD, FLIPPER_HOME_RAD,
     START_XY, GOAL_XY, EPISODE_MAX_STEPS,
-    # Defaults globales de caida/meta: aqui solo se usan como fallback al leer
-    # los umbrales POR PISTA de TRACK_DEFS (_FALL_Z_MIN/_FINISH_DIST abajo);
-    # quien los aplica es base_env.is_fallen/terminated via fb[...].
     FALL_Z_MIN, FINISH_DIST,
     N_LOOKAHEAD, LOOKAHEAD_STEP, OBS_DIM, ACT_DIM,
     FLIPPER_JOINTS, CONTROL_HZ, SIM_SPEEDUP,

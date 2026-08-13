@@ -181,9 +181,9 @@ class MujocoHardwareBridge(Node):
         self._base_dof_adr  = self.model.jnt_dofadr[base_jid]
 
         # Deteccion de contacto robot <-> PISO (el suelo a evitar, no los pallets).
-        # "maze_floor" es el piso CAMINABLE de la pista maze -- se excluye para
+        # "maze_floor" es el piso caminable de la pista maze -- se excluye para
         # que caminar sobre el maze no cuente como caida (ver mismo criterio en
-        # mujoco_sim_base.py). "fatal_floor", debajo de maze_floor, SI cuenta.
+        # mujoco_sim_base.py). "fatal_floor", debajo de maze_floor, si cuenta.
         self._floor_gids = {
             gid for gid in range(self.model.ngeom)
             if int(self.model.geom_type[gid]) == mujoco.mjtGeom.mjGEOM_PLANE
