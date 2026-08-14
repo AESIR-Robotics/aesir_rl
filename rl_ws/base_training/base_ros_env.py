@@ -47,9 +47,9 @@ from std_srvs.srv import Trigger
 from std_msgs.msg import Int32, Float32MultiArray
 
 from rl_ws.global_navigator import (
-    plan_route, GlobalNavigator, quat_to_yaw, quat_upright, quat_to_grav_body,
+    GlobalNavigator, quat_to_yaw, quat_upright, quat_to_grav_body,
     build_platform_zone, plan_platform_route, plan_platform_route_with_obstacle,
-    plan_maze_route,
+    plan_track_route,
 )
 from rl_ws.base_training.map_context import MapContext
 # Logica de tarea COMPARTIDA con el backend directo-MuJoCo (funciones puras de
@@ -311,9 +311,12 @@ class BaseRosEnv:
 
         # Ruta inicial (se replanifica en reset() desde el spawn real del bridge
         # en platform y maze). virtual_obstacle=None en modo pallets/maze.
-        if self.kind == "maze":
-            self.waypoints, self.goal_xy = plan_maze_route(
-                self.start_xy, self._fixed_goal, track=_ACTIVE_TRACK)
+        if self.kind in ("maze", "pallets"):
+            # MISMO planificador que el backend directo (global_navigator.TrackMap):
+            # A* consciente de la huella sobre (x, y, rumbo). Ver mujoco_sim_base.
+            self.waypoints, self.goal_xy = plan_track_route(
+                self.start_xy, self._fixed_goal, track=_ACTIVE_TRACK,
+                start_yaw=float(_ACTIVE_TRACK.get("spawn_yaw", 0.0)))
             self.virtual_obstacle = None
         else:
             self.goal_xy = self._sample_goal()
@@ -384,13 +387,19 @@ class BaseRosEnv:
             return self._fixed_goal.copy()
         return np.random.uniform(-GOAL_XY_RANGE, GOAL_XY_RANGE, 2)
 
-    def _plan_route(self, spawn_xy, goal_xy):
-        """Devuelve (waypoints, virtual_obstacle_or_None) para el mundo activo."""
-        if not self.use_platform:
-            return plan_route(self.nav_json, tuple(spawn_xy), tuple(goal_xy)), None
-        if USE_VIRTUAL_OBSTACLE:
-            return plan_platform_route_with_obstacle(tuple(spawn_xy), tuple(goal_xy))
-        return plan_platform_route(tuple(spawn_xy), tuple(goal_xy)), None
+    def _plan_route(self, spawn_xy, goal_xy, yaw: float = 0.0):
+        """Devuelve (waypoints, virtual_obstacle_or_None) para el mundo activo.
+
+        La caja virtual se coloca primero y luego se planea TENIENDOLA EN CUENTA,
+        como OVERLAY dinamico del mismo TrackMap -- no se puede hornear en las
+        mascaras porque cambia en cada episodio."""
+        if not USE_VIRTUAL_OBSTACLE:
+            return plan_platform_route(tuple(spawn_xy), tuple(goal_xy)), None
+        _, vobs = plan_platform_route_with_obstacle(tuple(spawn_xy), tuple(goal_xy))
+        waypoints, _ = plan_track_route(
+            spawn_xy, goal_xy, track=_ACTIVE_TRACK, start_yaw=yaw,
+            overlay=([vobs.bounds()] if vobs is not None else []))
+        return waypoints, vobs
 
     # ── Spin resiliente del executor ─────────────────────────────────────────
     def _spin_forever(self):
@@ -415,16 +424,17 @@ class BaseRosEnv:
             time.sleep(0.02)
             fb = self._node.feedback()
 
-        # Modo maze: waypoint NUEVO cada episodio, sorteado en pasillo libre y
+        # Modo maze: waypoint nuevo cada episodio, sorteado en pasillo libre y
         # alcanzable desde el spawn REAL que reporto el bridge, con ruta A*. Como
         # _terminated() corta al llegar (dist < finish_dist), esto es justo lo que
         # implementa "cada waypoint recogido -> reset -> waypoint nuevo".
         # Guardar self.goal_xy es obligatorio: de el dependen la condicion de
         # exito y GOAL_BONUS.
-        if self.kind == "maze":
-            self.waypoints, self.goal_xy = plan_maze_route(fb["xy"], track=_ACTIVE_TRACK)
+        if self.kind in ("maze", "pallets"):
+            self.waypoints, self.goal_xy = plan_track_route(
+                fb["xy"], track=_ACTIVE_TRACK, start_yaw=float(fb["yaw"]))
             self.nav.replan(self.waypoints, obstacles=[])
-            print(f"[base_env] maze: waypoint nuevo en "
+            print(f"[base_env] {self.kind}: waypoint nuevo en "
                   f"({self.goal_xy[0]:.2f}, {self.goal_xy[1]:.2f})  "
                   f"({len(self.waypoints)} waypoints)")
         # Modo plataforma: nueva mision cada episodio (goal random + ruta directa
@@ -432,7 +442,8 @@ class BaseRosEnv:
         # que BaseMujocoEnv.reset(). Modo pallets: ruta fija de __init__.
         elif self.use_platform:
             self.goal_xy = self._sample_goal()
-            self.waypoints, self.virtual_obstacle = self._plan_route(fb["xy"], self.goal_xy)
+            self.waypoints, self.virtual_obstacle = self._plan_route(
+                fb["xy"], self.goal_xy, yaw=float(fb["yaw"]))
             self.nav.replan(
                 self.waypoints,
                 obstacles=[self.virtual_obstacle] if self.virtual_obstacle is not None else [])

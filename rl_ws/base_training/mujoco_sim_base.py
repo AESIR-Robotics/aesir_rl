@@ -41,7 +41,7 @@ from rl_ws.base_training.robot_control import RampController
 from rl_ws.base_training.map_context import MapContext
 from rl_ws.global_navigator import (
     build_platform_zone, plan_platform_route, plan_platform_route_with_obstacle,
-    plan_route, plan_maze_route, GlobalNavigator, quat_to_yaw, quat_to_grav_body,
+    plan_route, plan_track_route, GlobalNavigator, quat_to_yaw, quat_to_grav_body,
 )
 
 CHECKOUT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -135,33 +135,27 @@ class BaseMujocoEnv:
             if (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "").startswith("fatal_stick")}
 
         # Mision + navegador segun el tipo de pista.
-        if self._kind == "pallets":
-            # Pista clasica: ruta A* fija del JSON (planeada por el caller o
-            # aqui), meta = ultimo pallet; el navegador construye obstaculos
-            # (sticks/puerta) y bordes de pallets desde el JSON.
-            nav_json = self.track["nav_json"]
-            if goal_xy is None:
-                import json as _json
-                goal_xy = C.GOAL_XY or tuple(
-                    _json.load(open(nav_json))["pallets"][-1]["center_xy"])
-            self.goal_xy = np.array(goal_xy, dtype=np.float64)
-            if waypoints is None:
-                waypoints = plan_route(nav_json, C.START_XY, tuple(self.goal_xy))
-            self._fixed_waypoints = waypoints
-            self.nav = GlobalNavigator(nav_json, waypoints=waypoints,
-                                       n_lookahead=C.N_LOOKAHEAD)
-        elif self._kind == "maze":
-            # Maze: el robot nace siempre en la entrada y va a por un waypoint
-            # sorteado en pasillo libre y alcanzable (A* sobre el mapa de
-            # ocupacion del laberinto, ver global_navigator.MazeMap). Al
-            # alcanzarlo el episodio termina -> reset() sortea otro.
-            # La meta la devuelve el planeador: es la que valida terminated() y
-            # la que cobra GOAL_BONUS, asi que no puede quedar en (0,0).
+        if self._kind in ("pallets", "maze"):
+            # MISMO planificador para las dos (global_navigator.TrackMap): A*
+            # consciente de la huella sobre (x, y, rumbo). Lo unico que cambia es
+            # de donde salen las cajas, y de eso se encarga el extractor que
+            # elige get_track_map segun el `kind`.
+            #
+            # La meta se SORTEA en zona alcanzable y el episodio termina al
+            # llegar -> el siguiente reset sortea otra. Para pallets esto es un
+            # cambio: antes la mision era FIJA (mismos 74 waypoints, 18.1 m,
+            # identicos en cada episodio), y esa era la razon de que nunca
+            # despegara del 0% entrenando en multipista -- sin rutas cortas no
+            # hay de donde bootstrapear el GOAL_BONUS. Ver docs/sigma_estado.md.
             spawn = self.track.get("spawn_xy", C.START_XY)
-            waypoints, goal_xy = plan_maze_route(spawn, goal_xy, track=self.track)
+            waypoints, goal_xy = plan_track_route(
+                spawn, goal_xy, track=self.track,
+                start_yaw=float(self.track.get("spawn_yaw", 0.0)))
             self.goal_xy = np.asarray(goal_xy, dtype=np.float64)
             self._fixed_waypoints = waypoints
-            self.nav = GlobalNavigator(None, waypoints=waypoints,
+            # El navegador de pallets necesita el JSON para los bordes/obstaculos
+            # del vortex (repulsion fina); el maze no tiene JSON.
+            self.nav = GlobalNavigator(self.track.get("nav_json"), waypoints=waypoints,
                                        n_lookahead=C.N_LOOKAHEAD)
         else:
             # Plataforma: goal_xy inicial solo para la primera construccion --
@@ -245,17 +239,12 @@ class BaseMujocoEnv:
     def reset(self) -> np.ndarray:
         mujoco.mj_resetData(self.model, self.data)
         a = self._base_qadr
-        if self._kind == "pallets":
-            # Pista clasica: spawn fijo en START_XY mirando al frente (como el
-            # bridge original); mision fija (ruta A* del JSON planeada en init).
-            spawn_xy = np.array(C.START_XY, dtype=float)
-            spawn_yaw = 0.0
-        elif self._kind == "maze":
-            # Maze: spawn fijo en la entrada del laberinto (mismo punto que usa
-            # el bridge ROS), mirando al corredor abierto. Lo que cambia entre
-            # episodios es el waypoint, no el punto de partida.
+        if self._kind in ("pallets", "maze"):
+            # Spawn FIJO (entrada del laberinto / START_XY de pallets, los mismos
+            # puntos que usa el bridge ROS). Lo que cambia entre episodios es la
+            # meta, no el punto de partida.
             spawn_xy = np.array(self.track.get("spawn_xy", C.START_XY), dtype=float)
-            spawn_yaw = float(self.track.get("spawn_yaw", C.SPAWN_YAW))
+            spawn_yaw = float(self.track.get("spawn_yaw", 0.0))
         else:
             # Plataforma: spawn random en ±SPAWN_XY_RANGE con yaw random.
             spawn_xy = np.random.uniform(-C.SPAWN_XY_RANGE, C.SPAWN_XY_RANGE, 2)
@@ -284,7 +273,15 @@ class BaseMujocoEnv:
             goal_xy = np.random.uniform(-C.GOAL_XY_RANGE, C.GOAL_XY_RANGE, 2)
             self.goal_xy = np.asarray(goal_xy, dtype=np.float64)
             if C.USE_VIRTUAL_OBSTACLE:
-                waypoints, vobs = plan_platform_route_with_obstacle(tuple(fb["xy"]), tuple(goal_xy))
+                # El obstaculo se coloca primero (random sobre el paso directo) y
+                # luego se planea TENIENDOLO EN CUENTA. La ruta la da el mismo
+                # planificador que maze/pallets, con la caja como OVERLAY
+                # dinamico: no se puede hornear en las mascaras porque cambia en
+                # cada episodio y rehacerlas cuesta ~1 s.
+                _, vobs = plan_platform_route_with_obstacle(tuple(fb["xy"]), tuple(goal_xy))
+                waypoints, goal_xy = plan_track_route(
+                    fb["xy"], goal_xy, track=self.track, start_yaw=float(fb["yaw"]),
+                    overlay=([vobs.bounds()] if vobs is not None else []))
             else:
                 waypoints, vobs = plan_platform_route(tuple(fb["xy"]), tuple(goal_xy)), None
             self.nav.replan(waypoints, obstacles=[vobs] if vobs is not None else [])
@@ -298,15 +295,16 @@ class BaseMujocoEnv:
                 else:
                     self.model.geom_pos[self._obstacle_gid, 2] = -5.0   # fuera de juego
                 mujoco.mj_forward(self.model, self.data)
-        elif self._kind == "maze":
-            # Maze: waypoint NUEVO en cada episodio, sorteado en pasillo libre y
-            # alcanzable desde donde esta el robot; la ruta la da A*, no la recta
-            # (que atravesaria paredes). Guardar la meta es obligatorio: de ella
-            # dependen la condicion de exito y GOAL_BONUS.
-            waypoints, goal_xy = plan_maze_route(fb["xy"], track=self.track)
+        elif self._kind in ("pallets", "maze"):
+            # Meta NUEVA en cada episodio, sorteada en zona libre y ALCANZABLE
+            # desde donde esta el robot; la ruta la da el A* consciente de la
+            # huella, no la recta (que atravesaria paredes o el vacio entre
+            # tarimas). Guardar la meta es obligatorio: de ella dependen la
+            # condicion de exito y GOAL_BONUS.
+            waypoints, goal_xy = plan_track_route(fb["xy"], track=self.track,
+                                                  start_yaw=float(fb["yaw"]))
             self.goal_xy = np.asarray(goal_xy, dtype=np.float64)
             self.nav.replan(waypoints, obstacles=[])
-        # (pallets: mision fija, nada que replanear ni reposicionar)
 
         self.nav.reset(fb["xy"])
         guidance = self.nav.step(fb["xy"], fb["yaw"])

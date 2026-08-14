@@ -102,7 +102,7 @@ TRACK_DEFS = {
 }
 # Pistas ACTIVAS para entrenar: una o varias — VecMujocoEnv las reparte entre
 # los envs (round-robin). Ej: ["flat"], ["steps"], ["flat","steps","ramps"].
-ACTIVE_TRACKS = ["flat", "ramps", "steps1m", "maze"]
+ACTIVE_TRACKS = ["ramps", "ramps", "steps1m", "flat"]
 
 # Compatibilidad: el "mundo por default" (bridge ROS, scripts single-track) es
 # la PRIMERA pista activa. Para probar otra pista por ROS, cambia el orden.
@@ -201,24 +201,6 @@ TIME_PENALTY   = 0.1
 FALL_PENALTY   = 250.0
 FALL_UPRIGHT_MIN = 0.20   # R[2,2]=cos(inclinacion); <0.20 -> volcado (~78°)
 FALL_Z_MIN       = 0.10   # altura del chasis (m) por debajo de la cual se cayo
-# Castigo por tocar un obstaculo: la caja del obstaculo virtual (plataform.xml)
-# o un poste "fatal_stick" de pallets. Es POR PASO y a proposito: compute_reward
-# hace return temprano con -OBSTACLE_PENALTY, asi que el contacto SOSTENIDO se
-# acumula (y encima se pierde el ~+1.3/paso de progreso+direccion+velocidad).
-# Se prefiere esto a terminar el episodio: castigar por TIEMPO de contacto
-# distingue el roce leve del quedarse encajado, cosa que una terminacion no hace.
-#
-# Estaba en 1.0, o sea nada frente a WP_BONUS=200. Dimensionado por derivacion,
-# contando la DURACION del contacto (medido con la politica iter500 en pallets:
-# 341 de 9600 pasos-env = 3.55%, ~34 pasos por episodio):
-#   (a) un roce tipico de ~3 pasos debe superar el atajo que evita -- rodear el
-#       poste cuesta ~1 m extra ~= 40 pasos a ~1.3/paso ~= 52 de reward -> >=18;
-#   (b) un encuentro de ~10 pasos debe superar WP_BONUS=200, si no sale rentable
-#       EMPUJAR a traves del poste para cobrar el siguiente waypoint -> >=20.
-# 50 cumple ambas con margen y deja el coste tipico en ~1700/episodio, un 13%
-# del retorno de pallets (~13000). Con 250 (una version anterior de esta cuenta,
-# que trataba el contacto como UN paso) se iba al 65% del retorno y dominaba la
-# tarea entera; por eso NO se usa ese valor.
 OBSTACLE_PENALTY = 1.0
 STUCK_MAX      = 1.0
 STUCK_ANGULAR_THRESH_RAD = 0.02
@@ -284,8 +266,45 @@ FLIPPER_HOME_RAD = 0.0   # pose de reposo de los flippers (fase 1 / referencia d
 ROBOT_RADIUS         = 0.35   # radio con el que se erosiona la zona transitable
 GAP_BRIDGE_DISTANCE  = 0.15   # huecos entre pallets menores a esto se "puentean"
 GRID_RESOLUTION      = 0.05   # celda (m) de la grilla A*
+# Las pistas platform son 20x20 m con UN obstaculo de 60 cm: a 0.05 serian
+# 401x401 celdas (4x el maze) para una precision que ahi no compra nada.
+PLATFORM_GRID_RESOLUTION = 0.15
 CORNER_DOT_THRESHOLD = 0.99   # giro se conserva como esquina si dot(v1,v2) < esto
 MAX_WAYPOINT_DIST    = 0.50   # espaciado maximo (m) entre waypoints en rectas
+
+# ── Huella RECTANGULAR del robot (para planear con orientacion) ──────────────
+# Medidas REALES del robot: 67.4 cm (x) x 60 cm (y), con el BRAZO RECOGIDO
+# (plegado dentro del perimetro: no cuenta para navegar) y los flippers plegados.
+#
+# Un solo radio no puede describir este chasis, porque avanzar y girar piden
+# cosas distintas:
+#     avanzar recto  -> holgura lateral >= ROBOT_HALF_WIDTH  (0.300 m)
+#     girar en sitio -> holgura         >= hypot(hw, hl)     (0.451 m)
+# Con ROBOT_RADIUS=0.35 (entre los dos) el A* daba rutas transitables pero con
+# giros en celdas donde el chasis no cabe rotando; subirlo a 0.40 fragmentaba el
+# laberinto y dejaba el spawn en un bolsillo de 0.9 m2. Ver MazeMap.
+SEGURY_DIST = 0.0                       # margen extra de seguridad, por si acaso
+ROBOT_HALF_WIDTH  = 0.290 + SEGURY_DIST # media-anchura (eje y):  60.0 cm / 2
+ROBOT_HALF_LENGTH = 0.327 + SEGURY_DIST # media-longitud (eje x): 67.4 cm / 2
+# 8 rumbos = 45 grados, y cada uno apunta a un vecino de la rejilla, asi que
+# TODAS las primitivas de avance son de una celda (5 cm). Con 16 los 8 rumbos
+# impares (22.5, 67.5...) no caen en ningun vecino y su paso minimo pasaba a ser
+# (2,1) = 11 cm; con 32 seria (5,1) = 25 cm. Ese desplazamiento minimo desigual
+# rompia las rutas.
+#
+# Y la precision extra no compra nada: MEDIDO sobre este maze, el area donde el
+# robot cabe en algun rumbo es 42.07 m2 con 8, 42.16 con 16 y 42.16 con 32 --
+# de 16 a 32 la ganancia es EXACTAMENTE cero. La rejilla es de 5 cm, asi que
+# rotar 11.25 grados mueve el contorno del rectangulo menos de una celda y la
+# mascara rasterizada sale identica: la resolucion angular esta limitada por la
+# espacial. Para afinar de verdad habria que bajar GRID_RESOLUTION a 0.025 Y
+# subir los rumbos a la vez (rejilla 284x480, arbol de ~2.2M estados).
+#
+# Solo se avanza HACIA DELANTE: una ruta que exigiera reversa estaria peleada
+# con BACKWARD_W, que castiga la velocidad hacia atras.
+MAZE_N_HEADINGS   = 8         # rumbos discretos del A*
+MAZE_TURN_COST    = 0.5       # coste (en celdas) por cada 360/N grados de giro
+MAZE_REVERSE_COST = 2.0
 
 # ── Navegacion global: seguimiento (vortex APF + guia) ───────────────────────
 REACH_DIST     = 0.10   # distancia a la que un waypoint cuenta como alcanzado
