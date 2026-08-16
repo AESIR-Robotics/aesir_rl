@@ -46,63 +46,101 @@ CHECKPOINT_DIR = Path(ROOT) / "checkpoints_base"
 #                      spawn/meta fijos) — la implementacion original, intacta.
 # Los .bt se regeneran con: python3 rl_ws/octomap_from_mujoco.py --track <pista>
 TRACKS_DIR = os.path.join(RL_WS, "tracks")
+# TABLA DE PISTAS. Cada fila declara las MISMAS claves, aunque alguna repita el
+# default: añadir una pista es rellenar una fila, no adivinar que hereda de donde.
+# Nada se deriva a proposito -- derivar es implicito y falla en silencio (p.ej.
+# sacar fall_z_min del octomap romperia el maze, cuyo piso no esta en el .bt).
+#
+#   kind          platform | pallets | maze  (elige extractor y tipo de mision)
+#   xml           modelo completo (robot + terreno)
+#   bt            octomap para el heatmap; se regenera con
+#                 python3 rl_ws/octomap_from_mujoco.py --track <pista>
+#   nav_json      solo kind="pallets": describe tarimas y postes
+#   spawn_xy      donde nace. None = procedural (kind="platform" lo sortea)
+#   spawn_yaw     rumbo inicial. None = random (solo con spawn_xy=None)
+#   spawn_z       altura de SUELTA; el robot cae y se asienta
+#   settle_steps  pasos de fisica para asentarlo antes de empezar
+#   fall_z_min    por debajo de esta z el chasis se considera caido. ABSOLUTA,
+#                 asi que depende de donde este el suelo de ESTA pista
+#   goal_xy       meta FIJA de la pista. None = se sortea una alcanzable en cada
+#                 episodio (curriculo natural: rutas cortas de las que se puede
+#                 bootstrapear). Con valor fijo, todos los episodios corren la
+#                 MISMA mision -- que es lo que quieres en pallets y similares
+#   finish_dist   a que distancia de la meta cuenta como alcanzada
+#   grid_res      celda (m) de la rejilla del planificador. Las platform son
+#                 20x20 m con UN obstaculo de 60 cm: a 0.05 serian 401x401
+#                 celdas para una precision que ahi no compra nada
 TRACK_DEFS = {
     "flat": dict(
         kind="platform",
         xml=os.path.join(_MODELS, "aesir_complete_flat.xml"),
         bt=os.path.join(TRACKS_DIR, "flat", "occupied_map.bt"),
-        spawn_z=0.20, settle_steps=50),          # techo terreno z=0.12
+        nav_json=None,
+        spawn_xy=None, spawn_yaw=None,           # procedural
+        spawn_z=0.20, settle_steps=50,           # techo terreno z=0.12
+        goal_xy=None,
+        fall_z_min=0.10, finish_dist=0.20, grid_res=0.15),
     "steps": dict(
         kind="platform",
         xml=os.path.join(_MODELS, "aesir_complete_steps.xml"),
         bt=os.path.join(TRACKS_DIR, "steps", "occupied_map.bt"),
-        spawn_z=0.55, settle_steps=150),         # escalones hasta z=0.42
+        nav_json=None,
+        spawn_xy=None, spawn_yaw=None,
+        spawn_z=0.55, settle_steps=150,          # escalones hasta z=0.42
+        goal_xy=None,
+        fall_z_min=0.10, finish_dist=0.20, grid_res=0.15),
     "steps1m": dict(
         kind="platform",
         xml=os.path.join(_MODELS, "aesir_complete_steps1m.xml"),
         bt=os.path.join(TRACKS_DIR, "steps1m", "occupied_map.bt"),
-        spawn_z=0.55, settle_steps=150),         # escalones de 1x1 m hasta z=0.42
+        nav_json=None,
+        spawn_xy=None, spawn_yaw=None,
+        spawn_z=0.55, settle_steps=150,          # escalones de 1x1 m hasta z=0.42
+        goal_xy=None,
+        fall_z_min=0.10, finish_dist=0.20, grid_res=0.15),
     "ramps": dict(
         kind="platform",
         xml=os.path.join(_MODELS, "aesir_complete_ramps.xml"),
         bt=os.path.join(TRACKS_DIR, "ramps", "occupied_map.bt"),
-        spawn_z=0.45, settle_steps=150),         # rampas hasta z=0.28
+        nav_json=None,
+        spawn_xy=None, spawn_yaw=None,
+        spawn_z=0.45, settle_steps=150,          # rampas hasta z=0.28
+        goal_xy=None,
+        fall_z_min=0.10, finish_dist=0.20, grid_res=0.15),
     "pallets": dict(
         kind="pallets",
         xml=os.path.join(_MODELS, "aesir_complete_pallets.xml"),
         bt=os.path.join(TRACKS_DIR, "pallets", "occupied_map.bt"),
         nav_json=os.path.join(TRACKS_DIR, "pallets", "obstacles.json"),
-        spawn_z=0.20, settle_steps=50),          # pista original de pallets
-    # Maze: laberinto de paredes (140 cajas "maze_collision_*" en maze.xml) sobre
-    # el plano "maze_floor" a z=0. OJO con las tres claves propias:
-    #   spawn_xy/spawn_yaw — la mision NO es procedural como en platform: el robot
-    #     SIEMPRE nace en la entrada del laberinto (medido libre, holgura 0.40 m)
-    #     mirando al corredor abierto. START_XY global no sirve: es la mision de
-    #     pallets, que en el frame del maze cae en otro lado.
-    #   fall_z_min — el piso caminable del maze es z=0, no una plataforma elevada
-    #     (flat/steps/ramps tienen el suyo a z>=0.12). Medido en sim, el chasis
-    #     REPOSA a z=0.036, o sea por DEBAJO del FALL_Z_MIN global de 0.10: con el
-    #     default el robot nace "caido" y is_fallen() mata el episodio en el paso
-    #     1, siempre. -0.20 queda debajo del piso caminable y encima del
-    #     "fatal_floor" (z=-0.5), que sigue siendo la red de seguridad real.
-    #   finish_dist — 0.10 m es inalcanzable de forma fiable para un skid-steer en
-    #     pasillos de ~0.9 m; 0.25 es "recoger el waypoint" sin pedir puntería.
+        spawn_xy=(-1.5, 3.5), spawn_yaw=0.0,
+        spawn_z=0.20, settle_steps=50,
+        goal_xy=(7.8, 1.01),
+        fall_z_min=0.10, finish_dist=0.20, grid_res=0.05),
     "maze": dict(
         kind="maze",
         xml=os.path.join(_MODELS, "aesir_complete_maze.xml"),
         bt=os.path.join(TRACKS_DIR, "maze", "occupied_map.bt"),
-        # spawn_yaw=0 (mirando a +x) NO es arbitrario: medido sobre 300 metas
-        # sorteadas, el 100% de las rutas sale de la entrada hacia +x (rumbo
-        # medio +3°). Con yaw=pi el robot arrancaba 177° girado en TODOS los
-        # episodios, y como el reward de progreso es ciego a la orientacion le
-        # salia mas barato conducir en REVERSA que girar -> aprendia al reves.
+        nav_json=None,
         spawn_xy=(0.5, -0.4), spawn_yaw=0.0,
         spawn_z=0.12, settle_steps=100,
-        fall_z_min=-0.20, finish_dist=0.25),
+        goal_xy=None,
+        fall_z_min=-0.20, finish_dist=0.25, grid_res=0.05),
 }
+def track_get(track: dict, key: str, default):
+    """Valor de la tabla de pistas, cayendo al default si la fila declara None.
+
+    Necesario porque la tabla declara TODAS las claves en TODAS las filas (para
+    que añadir una pista sea rellenar una fila): una fila con spawn_xy=None dice
+    "procedural", no "sin definir". Con dict.get(k, default) el default NO se
+    aplica -- la clave existe -- y el que lee recibe None. Ya rompio dos veces:
+    el bridge al hacer float(None) y el env al quedarse sin nav_json."""
+    v = track.get(key, default)
+    return default if v is None else v
+
+
 # Pistas ACTIVAS para entrenar: una o varias — VecMujocoEnv las reparte entre
 # los envs (round-robin). Ej: ["flat"], ["steps"], ["flat","steps","ramps"].
-ACTIVE_TRACKS = ["ramps", "ramps", "steps1m", "flat"]
+ACTIVE_TRACKS = ["maze", "ramps", "steps1m", "flat"]
 
 # Compatibilidad: el "mundo por default" (bridge ROS, scripts single-track) es
 # la PRIMERA pista activa. Para probar otra pista por ROS, cambia el orden.
@@ -173,17 +211,6 @@ GOAL_XY_RANGE  = 9.0
 PLATFORM_HALF_EXTENT = 10.0
 
 # ── Maze: mapa de ocupacion y muestreo del waypoint ──────────────────────────
-# El area navegable NO se declara a mano (antes eran dos rangos XY fijos que
-# caian mayormente DENTRO de paredes): global_navigator.get_maze_map() la deriva
-# del propio XML — rasteriza las cajas de colision, infla por ROBOT_RADIUS y se
-# queda con la componente conexa de la entrada (medido: 27.8 m2 navegables). Asi
-# el waypoint SIEMPRE cae en pasillo libre y alcanzable, y si el maze cambia el
-# mapa se recalcula solo.
-MAZE_ROBOT_TOP_M     = 0.45   # alto del robot: una pared que EMPIEZA por encima
-                              # de esto es un dintel y se pasa por debajo (68 de
-                              # las 159 cajas del maze son dinteles) -> no bloquea
-MAZE_GOAL_MIN_DIST_M = 2.0    # separacion minima robot->waypoint nuevo (si no,
-                              # sortearia metas pegadas y el episodio seria trivial)
 USE_VIRTUAL_OBSTACLE = True
 VIRTUAL_OBSTACLE_HALF_SIZE     = 0.3    # media-arista MAXIMA (m); se achica si el hueco es mas chico
 VIRTUAL_OBSTACLE_MIN_HALF_SIZE = 0.10   # media-arista MINIMA; por debajo de esto se descarta el obstaculo
@@ -262,15 +289,21 @@ OBS_DIM = 19 + 3*N_LOOKAHEAD + HEATMAP_PIXELS**2
 ACT_DIM = 6
 FLIPPER_HOME_RAD = 0.0   # pose de reposo de los flippers (fase 1 / referencia del reward de terreno)
 
-# ── Navegacion global: planeacion A* sobre la zona segura de pallets ─────────
-ROBOT_RADIUS         = 0.35   # radio con el que se erosiona la zona transitable
-GAP_BRIDGE_DISTANCE  = 0.15   # huecos entre pallets menores a esto se "puentean"
-GRID_RESOLUTION      = 0.05   # celda (m) de la grilla A*
-# Las pistas platform son 20x20 m con UN obstaculo de 60 cm: a 0.05 serian
-# 401x401 celdas (4x el maze) para una precision que ahi no compra nada.
-PLATFORM_GRID_RESOLUTION = 0.15
-CORNER_DOT_THRESHOLD = 0.99   # giro se conserva como esquina si dot(v1,v2) < esto
+# ── Navegacion global ────────────────────────────────────────────────────────
+# El planificador usa la huella
+# rectangular (ROBOT_HALF_WIDTH/LENGTH). Queda solo para dos cosas que si tratan
+# al robot como un disco y les vale: colocar el obstaculo virtual de las pistas
+# platform, y la zona de repulsion de bordes del vortex.
+ROBOT_RADIUS         = 0.35   # radio aprox. del cuerpo (obstaculo virtual + vortex)
+GRID_RESOLUTION      = 0.05   # celda (m) por DEFECTO del planificador; cada pista
+                              # la puede fijar en su fila (columna grid_res)
+GAP_BRIDGE_DISTANCE  = 0.15   # huecos entre cajas TRANSITABLES menores a esto se
+                              # "puentean" (juntas entre tarimas contiguas)
 MAX_WAYPOINT_DIST    = 0.50   # espaciado maximo (m) entre waypoints en rectas
+# Alto del robot: una caja que EMPIEZA por encima de esto es un dintel y se pasa
+# por debajo (68 de las 159 del maze). Aplica a CUALQUIER pista leida de MuJoCo.
+ROBOT_TOP_M          = 0.45
+GOAL_MIN_DIST_M      = 2.0    # separacion minima robot->meta al sortearla
 
 # ── Huella RECTANGULAR del robot (para planear con orientacion) ──────────────
 # Medidas REALES del robot: 67.4 cm (x) x 60 cm (y), con el BRAZO RECOGIDO
@@ -280,31 +313,29 @@ MAX_WAYPOINT_DIST    = 0.50   # espaciado maximo (m) entre waypoints en rectas
 # cosas distintas:
 #     avanzar recto  -> holgura lateral >= ROBOT_HALF_WIDTH  (0.300 m)
 #     girar en sitio -> holgura         >= hypot(hw, hl)     (0.451 m)
-# Con ROBOT_RADIUS=0.35 (entre los dos) el A* daba rutas transitables pero con
-# giros en celdas donde el chasis no cabe rotando; subirlo a 0.40 fragmentaba el
-# laberinto y dejaba el spawn en un bolsillo de 0.9 m2. Ver MazeMap.
-SEGURY_DIST = 0.0                       # margen extra de seguridad, por si acaso
-ROBOT_HALF_WIDTH  = 0.290 + SEGURY_DIST # media-anchura (eje y):  60.0 cm / 2
-ROBOT_HALF_LENGTH = 0.327 + SEGURY_DIST # media-longitud (eje x): 67.4 cm / 2
-# 8 rumbos = 45 grados, y cada uno apunta a un vecino de la rejilla, asi que
-# TODAS las primitivas de avance son de una celda (5 cm). Con 16 los 8 rumbos
-# impares (22.5, 67.5...) no caen en ningun vecino y su paso minimo pasaba a ser
-# (2,1) = 11 cm; con 32 seria (5,1) = 25 cm. Ese desplazamiento minimo desigual
-# rompia las rutas.
+SEGURY_DIST = 0.03                       # margen extra de seguridad, por si acaso
+ROBOT_HALF_WIDTH  = 0.300 + SEGURY_DIST # media-anchura (eje y):  60.0 cm / 2
+ROBOT_HALF_LENGTH = 0.337 + SEGURY_DIST # media-longitud (eje x): 67.4 cm / 2
+PLAN_N_HEADINGS   = 8         # rumbos discretos del A*
+PLAN_TURN_COST    = 0.5       # coste (en celdas) por cada 360/N grados de giro
+# Sub-angulos por rumbo al calcular el BARRIDO de un giro. El barrido es
+# continuo: entre dos rumbos del lattice el rectangulo pasa por angulos
+# intermedios que sobresalen en las esquinas, asi que muestrear solo los
+# PLAN_N_HEADINGS da un resultado optimista. 4 basta (medido en el maze: 29.7 m2
+# con 8 angulos contra 29.5 reales). Coste: N*SUB dilataciones al construir el
+# mapa (32 -> 0.26 s), una sola vez y cacheado.
+TURN_SUBSAMPLE    = 4
+PLAN_REVERSE_COST = 2.0
+# Primitivas de ARCO: girar 360/N grados mientras se avanza, sobre un arco de
+# estos radios (m). Vacio = sin arcos.
 #
-# Y la precision extra no compra nada: MEDIDO sobre este maze, el area donde el
-# robot cabe en algun rumbo es 42.07 m2 con 8, 42.16 con 16 y 42.16 con 32 --
-# de 16 a 32 la ganancia es EXACTAMENTE cero. La rejilla es de 5 cm, asi que
-# rotar 11.25 grados mueve el contorno del rectangulo menos de una celda y la
-# mascara rasterizada sale identica: la resolucion angular esta limitada por la
-# espacial. Para afinar de verdad habria que bajar GRID_RESOLUTION a 0.025 Y
-# subir los rumbos a la vez (rejilla 284x480, arbol de ~2.2M estados).
-#
-# Solo se avanza HACIA DELANTE: una ruta que exigiera reversa estaria peleada
-# con BACKWARD_W, que castiga la velocidad hacia atras.
-MAZE_N_HEADINGS   = 8         # rumbos discretos del A*
-MAZE_TURN_COST    = 0.5       # coste (en celdas) por cada 360/N grados de giro
-MAZE_REVERSE_COST = 2.0
+# Sin ellas el planificador solo sabia cambiar de rumbo parandose a rotar en
+# sitio, y eso exige el disco circunscrito completo (0.874 m de holgura con esta
+# huella). O sea que convertia cada curva suave de un pasillo en "avanza, parate,
+# rota 45 grados, avanza" -- una maniobra que ningun conductor hace y para la que
+# no hay sitio. Un diferencial toma la curva girando MIENTRAS avanza: su huella
+# barre una BANDA a lo largo del arco, no un disco en un punto.
+PLAN_ARC_RADII    = (0.4, 0.8)
 
 # ── Navegacion global: seguimiento (vortex APF + guia) ───────────────────────
 REACH_DIST     = 0.10   # distancia a la que un waypoint cuenta como alcanzado
@@ -313,7 +344,6 @@ ATT_GAIN     = 1.0      # grado de atraccion (magnitud maxima del pull al waypoi
 ATT_RANGE    = 0.1      # distancia sobre la que la atraccion crece de 0 a ATT_GAIN
 REP_GAIN     = 1.0      # grado de repulsion (magnitud maxima del push por fuente)
 REP_RANGE    = 0.1      # distancia (del cuerpo del robot) a la que empieza a repeler
-ROBOT_HALF   = 0.30     # media anchura del robot (su cuerpo, no un punto)
 SWIRL        = 1.0      # peso de la componente tangencial (0 = APF plano, 1 = vortex)
 MIN_PROGRESS = 0.1      # fraccion de la atraccion que SIEMPRE sobrevive (garantia
                         # anti-minimo-local: la repulsion nunca frena mas del

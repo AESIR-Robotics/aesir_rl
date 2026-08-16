@@ -20,28 +20,26 @@ from shapely.ops import unary_union, nearest_points
 try:
     from rl_ws.base_training.config import (
         ROBOT_RADIUS, GAP_BRIDGE_DISTANCE, GRID_RESOLUTION,
-        CORNER_DOT_THRESHOLD, MAX_WAYPOINT_DIST,
+        MAX_WAYPOINT_DIST,
         REACH_DIST, MAX_GUIDE_DIST, N_LOOKAHEAD, LOOKAHEAD_STEP,
-        ATT_GAIN, ATT_RANGE, REP_GAIN, REP_RANGE, ROBOT_HALF, SWIRL, MIN_PROGRESS,
+        ATT_GAIN, ATT_RANGE, REP_GAIN, REP_RANGE, SWIRL, MIN_PROGRESS,
         PLATFORM_HALF_EXTENT, VIRTUAL_OBSTACLE_HALF_SIZE,
         VIRTUAL_OBSTACLE_MIN_HALF_SIZE, VIRTUAL_OBSTACLE_OFFSET_FRAC,
-        MAZE_ROBOT_TOP_M, MAZE_GOAL_MIN_DIST_M, TRACK_DEFS, START_XY,
-        PLATFORM_GRID_RESOLUTION,
-        ROBOT_HALF_WIDTH, ROBOT_HALF_LENGTH, MAZE_N_HEADINGS, MAZE_TURN_COST,
-        MAZE_REVERSE_COST,
+        ROBOT_TOP_M, GOAL_MIN_DIST_M, TRACK_DEFS, START_XY, track_get,
+        ROBOT_HALF_WIDTH, ROBOT_HALF_LENGTH, PLAN_N_HEADINGS, PLAN_TURN_COST,
+        PLAN_REVERSE_COST, PLAN_ARC_RADII, TURN_SUBSAMPLE,
     )
 except ModuleNotFoundError:
     from base_training.config import (
         ROBOT_RADIUS, GAP_BRIDGE_DISTANCE, GRID_RESOLUTION,
-        CORNER_DOT_THRESHOLD, MAX_WAYPOINT_DIST,
+        MAX_WAYPOINT_DIST,
         REACH_DIST, MAX_GUIDE_DIST, N_LOOKAHEAD, LOOKAHEAD_STEP,
-        ATT_GAIN, ATT_RANGE, REP_GAIN, REP_RANGE, ROBOT_HALF, SWIRL, MIN_PROGRESS,
+        ATT_GAIN, ATT_RANGE, REP_GAIN, REP_RANGE, SWIRL, MIN_PROGRESS,
         PLATFORM_HALF_EXTENT, VIRTUAL_OBSTACLE_HALF_SIZE,
         VIRTUAL_OBSTACLE_MIN_HALF_SIZE, VIRTUAL_OBSTACLE_OFFSET_FRAC,
-        MAZE_ROBOT_TOP_M, MAZE_GOAL_MIN_DIST_M, TRACK_DEFS, START_XY,
-        PLATFORM_GRID_RESOLUTION,
-        ROBOT_HALF_WIDTH, ROBOT_HALF_LENGTH, MAZE_N_HEADINGS, MAZE_TURN_COST,
-        MAZE_REVERSE_COST,
+        ROBOT_TOP_M, GOAL_MIN_DIST_M, TRACK_DEFS, START_XY, track_get,
+        ROBOT_HALF_WIDTH, ROBOT_HALF_LENGTH, PLAN_N_HEADINGS, PLAN_TURN_COST,
+        PLAN_REVERSE_COST, PLAN_ARC_RADII, TURN_SUBSAMPLE,
     )
 
 def box_corners_2d(center_xy: np.ndarray, half_sizes: np.ndarray, rot_mat: np.ndarray) -> np.ndarray:
@@ -132,7 +130,7 @@ def vortex_apf(robot_xy: np.ndarray, target_xy: np.ndarray, obstacles: list[Obst
                edges=None,
                att_gain: float = ATT_GAIN, att_range: float = ATT_RANGE,
                rep_gain: float = REP_GAIN, rep_range: float = REP_RANGE,
-               rh: float = ROBOT_HALF, swirl: float = SWIRL,
+               rh: float = ROBOT_HALF_WIDTH, swirl: float = SWIRL,
                min_progress: float = MIN_PROGRESS) -> np.ndarray:
     """Campo vortex: ATRACCION al waypoint + REPULSION (radial + swirl) de los
     obstaculos-caja (sticks, puerta) y de los BORDES de los pallets ('edges').
@@ -265,7 +263,7 @@ def _bresenham(a: tuple, b: tuple) -> list:
 
 
 class TrackMap:
-    """Mapa del laberinto + planeacion A* CONSCIENTE DE LA HUELLA, una vez por XML.
+    """Mapa del laberinto + planeacion A* consciente de la huella, una vez por XML.
 
     Se arma leyendo el modelo MuJoCo de la pista, no una lista escrita a mano:
       1. Cajas de colision que NO son del robot (todas las paredes del maze son
@@ -309,7 +307,7 @@ class TrackMap:
                  spawn_yaw: float = 0.0, res: float = GRID_RESOLUTION,
                  half_width: float = ROBOT_HALF_WIDTH,
                  half_length: float = ROBOT_HALF_LENGTH,
-                 n_headings: int = MAZE_N_HEADINGS,
+                 n_headings: int = PLAN_N_HEADINGS,
                  gap_bridge: float = 0.0, margin: float = 0.5, name: str = "",
                  compute_reach: bool = True):
         """obstacles / drivable: AABB (N,4) = (x0,y0,x1,y1) en el mundo.
@@ -384,18 +382,46 @@ class TrackMap:
         # Borde del bbox = pared virtual -> el area navegable no se escapa fuera.
         occ_pad = np.pad(occ, 1, constant_values=True)
 
-        # ── Mascara de GIRO: donde cabe el disco circunscrito ────────────────
-        # Rotar el rectangulo barre su circulo circunscrito, asi que para GIRAR
-        # el disco si es el modelo correcto (y sale exacto de la transformada).
+        # ── Huellas a resolucion FINA (SUB sub-angulos por rumbo) ────────────
+        # De aqui salen las dos cosas: las mascaras de avance por rumbo (que son
+        # un submuestreo de estas) y el barrido de cada giro. Sub-muestrear hace
+        # falta porque el barrido es CONTINUO: entre dos rumbos del lattice el
+        # rectangulo pasa por angulos intermedios que sobresalen en las esquinas.
+        nfine = self.n_head * TURN_SUBSAMPLE
+        fine = [self._footprint_free(occ_pad, 2.0 * np.pi * j / nfine)
+                for j in range(nfine)]
+
+        # ── Mascara de AVANCE, una por rumbo: la huella RECTANGULAR rotada ───
+        self.free = [fine[h * TURN_SUBSAMPLE] for h in range(self.n_head)]
+
+        # ── Mascaras de GIRO, una POR CANTIDAD DE GIRO ───────────────────────
+        # El barrido de rotar de `h` a `nh` es la union de la huella en todos los
+        # angulos intermedios, luego la celda vale si y solo si TODOS caben ahi:
+        # un AND de mascaras que ya tenemos, sin una sola dilatacion extra.
+        self._rot_ok = [[None] * self.n_head for _ in range(self.n_head)]
+        half = self.n_head // 2
+        for h in range(self.n_head):
+            for sgn in (+1, -1):                  # se gira por el lado mas corto
+                acc = fine[h * TURN_SUBSAMPLE].copy()
+                for k in range(1, half + 1):
+                    for s in range(1, TURN_SUBSAMPLE + 1):
+                        acc &= fine[(h * TURN_SUBSAMPLE + sgn * ((k - 1) * TURN_SUBSAMPLE + s)) % nfine]
+                    nh = (h + sgn * k) % self.n_head
+                    prev = self._rot_ok[h][nh]
+                    # d == n_head/2: los dos sentidos empatan en coste, vale
+                    # cualquiera de los dos -> OR. Para el resto solo entra el corto.
+                    self._rot_ok[h][nh] = acc.copy() if prev is None else (prev | acc)
+
+        # Disco circunscrito: ya NO decide los giros del lattice (lo hace _rot_ok),
+        # pero se conserva porque overlay_masks lo usa para el obstaculo movil y
+        # porque es la referencia que se reporta.
         dist = ndimage.distance_transform_edt(~occ_pad)[1:-1, 1:-1] * self.res
         self.rotable = dist >= self._r_rot
 
-        # ── Mascara de AVANCE, una por rumbo: la huella RECTANGULAR rotada ───
-        self.free = [self._footprint_free(occ_pad, 2.0 * np.pi * h / self.n_head)
-                     for h in range(self.n_head)]
-
         # Primitivas del lattice: el paso entero que mejor aproxima cada rumbo.
         self._moves = self._build_moves()
+        # arcos: girar mientras se avanza. Ver _build_arcs.
+        self._arcs = self._build_arcs(occ_pad)
 
         # ── Alcanzabilidad REAL: BFS sobre (celda, rumbo) ───────────────────
         spawn_cell = self._cell(spawn_xy)
@@ -458,10 +484,60 @@ class TrackMap:
             moves.append((best[0], best[1], float(np.hypot(best[0], best[1]))))
         return moves
 
+    def _build_arcs(self, occ_pad):
+        """Primitivas de ARCO: girar 360/N grados MIENTRAS se avanza.
+
+        Es lo que le faltaba al lattice. Con solo "avanzar recto" y "rotar en
+        sitio", cada curva de un pasillo obligaba a PARARSE y rotar, y rotar
+        exige el disco circunscrito entero -- holgura que en un pasillo no hay.
+        Un diferencial toma la curva girando mientras avanza: la huella barre una
+        BANDA a lo largo del arco, no un disco en un punto. MEDIDO: pallets pasa
+        de 2.5 a 21.2 m2 alcanzables y el maze de 37.1 a 71.0.
+
+        Devuelve {(rumbo, sentido, i): (di, dj, mascara, coste)}, donde la
+        mascara dice, POR CELDA DE PARTIDA, si el barrido completo cabe. Se
+        precalcula una vez por pista (2 radios x N rumbos x 2 sentidos)."""
+        from scipy import ndimage
+        arcs = {}
+        if not PLAN_ARC_RADII:
+            return arcs
+        res, hl, hw = self.res, self.half_length, self.half_width
+        dth = 2.0 * np.pi / self.n_head
+        for ri, R in enumerate(PLAN_ARC_RADII):
+            for h in range(self.n_head):
+                a = 2.0 * np.pi * h / self.n_head
+                for sgn in (+1, -1):
+                    # Centro de giro: a R metros perpendicular al rumbo.
+                    ctr = np.array([-np.sin(a), np.cos(a)]) * (R * sgn)
+                    poses = []
+                    for t in np.linspace(0.0, 1.0, 17):
+                        th = t * dth * sgn
+                        rot = np.array([[np.cos(th), -np.sin(th)],
+                                        [np.sin(th),  np.cos(th)]])
+                        poses.append((ctr + rot @ (-ctr), a + th))
+                    disp = poses[-1][0]
+                    rad = int(np.ceil((np.hypot(hl, hw) + np.linalg.norm(disp)) / res)) + 1
+                    di, dj = np.meshgrid(np.arange(-rad, rad + 1),
+                                         np.arange(-rad, rad + 1), indexing="ij")
+                    wx, wy = di * res, dj * res
+                    kern = np.zeros(wx.shape, dtype=bool)
+                    for pos, th in poses:
+                        ox, oy = wx - pos[0], wy - pos[1]
+                        xp = ox * np.cos(th) + oy * np.sin(th)
+                        yp = -ox * np.sin(th) + oy * np.cos(th)
+                        kern |= (np.abs(xp) <= hl) & (np.abs(yp) <= hw)
+                    free = ~ndimage.binary_dilation(occ_pad, structure=kern)[1:-1, 1:-1]
+                    # Coste = LONGITUD DEL ARCO (>= la cuerda), asi la heuristica
+                    # euclidea del A* sigue siendo admisible.
+                    arcs[(h, sgn, ri)] = (int(round(disp[0] / res)),
+                                          int(round(disp[1] / res)),
+                                          free, float(R * dth / res))
+        return arcs
+
     def _yaw_to_head(self, yaw: float) -> int:
         return int(round((yaw % (2.0 * np.pi)) / (2.0 * np.pi) * self.n_head)) % self.n_head
 
-    def _successors(self, cell: tuple, h: int, blocked=None, no_rot=None):
+    def _successors(self, cell: tuple, h: int, blocked=None):
         """(celda, rumbo, coste) en un paso. LA REGLA del planificador:
         avanzar SOLO hacia donde mira y solo si la huella a ese rumbo cabe en
         todo el trayecto; girar a CUALQUIER rumbo, solo donde `rotable`.
@@ -474,8 +550,8 @@ class TrackMap:
         como mover las orugas. El coste sigue siendo proporcional al angulo para
         que A* prefiera rutas con menos giro.
 
-        `blocked` / `no_rot`: OVERLAY DINAMICO -- estados (celda,rumbo) y celdas
-        que una caja movil bloquea SOLO en este episodio (el obstaculo virtual de
+        `blocked`: OVERLAY DINAMICO -- estados (celda,rumbo) que una caja movil
+        bloquea SOLO en este episodio (el obstaculo virtual de
         las pistas platform, que se recoloca en cada reset). Se pasan aparte en
         vez de recalcular las mascaras porque rehacerlas cuesta ~1 s y esto son
         microsegundos: la caja afecta a una ventana de ~1.3 m."""
@@ -485,34 +561,62 @@ class TrackMap:
         # Avanzar (sign=+1) y RETROCEDER (sign=-1). La huella es la misma en los
         # dos casos -- el rectangulo no cambia por ir marcha atras -- asi que se
         # comprueba `free[h]` igual; solo cambia el coste.
-        for sign, mult in ((1, 1.0), (-1, MAZE_REVERSE_COST)):
+        for sign, mult in ((1, 1.0), (-1, PLAN_REVERSE_COST)):
             nb = (cell[0] + sign * di, cell[1] + sign * dj)
             if 0 <= nb[0] < W and 0 <= nb[1] < H:
                 if all(fh[c] for c in _bresenham(cell, nb)) and (
                         blocked is None or not any((c, h) in blocked
                                                    for c in _bresenham(cell, nb))):
                     yield nb, h, cost * mult
-        if self.rotable[cell] and (no_rot is None or cell not in no_rot):
-            for nh in range(self.n_head):
-                if nh == h:
-                    continue
-                d = (nh - h) % self.n_head
-                yield cell, nh, MAZE_TURN_COST * min(d, self.n_head - d)
+        for nh in range(self.n_head):
+            if nh == h:
+                continue
+            # Barrido de 45 grados pide
+            # bastante menos hueco que dar la vuelta entera. Mismo criterio para
+            # las paredes (mascara precalculada) y para la caja movil (overlay).
+            if not self._rot_ok[h][nh][cell]:
+                continue
+            if self._turn_hits_overlay(blocked, cell, h, nh):
+                continue
+            d = (nh - h) % self.n_head
+            yield cell, nh, PLAN_TURN_COST * min(d, self.n_head - d)
+        # arco: cambiar de rumbo sin pararse. No exige `rotable` -- el barrido a
+        # lo largo del arco es mucho menor que el disco de una rotacion en sitio.
+        for (ah, sgn, _ri), (dx, dy, free, cost) in self._arcs.items():
+            if ah != h:
+                continue
+            nb = (cell[0] + dx, cell[1] + dy)
+            if not (0 <= nb[0] < W and 0 <= nb[1] < H) or not free[cell]:
+                continue
+            nh = (h + sgn) % self.n_head
+            if blocked is not None and any((c, h) in blocked or (c, nh) in blocked
+                                           for c in _bresenham(cell, nb)):
+                continue
+            yield nb, nh, cost
 
     # ── Overlay dinamico ────────────────────────────────────────────────────
     def overlay_masks(self, boxes):
-        """Cajas moviles -> (blocked, no_rot) para pasar a _successors/plan.
+        """Cajas moviles -> `blocked` = {(celda, rumbo)} donde la huella a ese
+        rumbo tocaria la caja. Solo se recorre la ventana que la caja puede
+        afectar (su AABB inflado por el radio circunscrito), no la rejilla entera.
 
-        blocked = {(celda, rumbo)} donde la huella a ese rumbo tocaria la caja.
-        no_rot  = {celda} donde ya no cabe el disco de giro.
-        Solo se recorre la ventana que la caja puede afectar (su AABB inflado por
-        el radio circunscrito), no la rejilla entera."""
-        blocked, no_rot = set(), set()
+        Con esto basta TAMBIEN para los giros: rotar de h a nh barre los rumbos
+        intermedios, asi que el giro toca la caja si y solo si alguno de esos
+        rumbos esta en `blocked` (ver _turn_hits_overlay). Antes se devolvia
+        ademas un `no_rot` con las celdas donde no cabia el disco circunscrito
+        -- el barrido de girar 360 grados -- lo que prohibia girar cerca de la
+        caja aunque el giro fuera de 45. Era la ultima parte del planificador que
+        seguia con el modelo del disco: ahora paredes estaticas y obstaculo movil
+        usan el MISMO criterio por cantidad de giro, y sale gratis porque
+        `blocked` ya se calculaba."""
+        blocked = set()
         if boxes is None:
-            return blocked, no_rot
+            return blocked
         pad = self._r_rot + self.res
         hl, hw = self.half_length, self.half_width
+        grow = 0.5 * self.res
         for x0, y0, x1, y1 in np.asarray(boxes, dtype=float).reshape(-1, 4):
+            x0, y0, x1, y1 = x0 - grow, y0 - grow, x1 + grow, y1 + grow
             b = np.array([(x0 + x1) / 2.0, (y0 + y1) / 2.0])
             bh = np.array([(x1 - x0) / 2.0, (y1 - y0) / 2.0])
             i0, j0 = self._cell((x0 - pad, y0 - pad))
@@ -521,12 +625,8 @@ class TrackMap:
             px = self.origin[0] + ii * self.res
             py = self.origin[1] + jj * self.res
             dx, dy = px - b[0], py - b[1]
-            # Giro: hace falta el disco circunscrito libre.
-            near = (np.maximum(np.abs(dx) - bh[0], 0.0) ** 2 +
-                    np.maximum(np.abs(dy) - bh[1], 0.0) ** 2) < self._r_rot ** 2
-            for a, bcell in zip(ii[near].ravel(), jj[near].ravel()):
-                no_rot.add((int(a), int(bcell)))
-            # Avance: SAT entre el rectangulo a rumbo h y el AABB de la caja.
+            # SAT entre el rectangulo a rumbo h y el AABB de la caja. Sirve para
+            # avanzar (rumbo fijo) y, por union sobre el arco, tambien para girar.
             for h in range(self.n_head):
                 th = 2.0 * np.pi * h / self.n_head
                 c, s = np.cos(th), np.sin(th)
@@ -537,7 +637,22 @@ class TrackMap:
                 hit = ~sep
                 for a, bcell in zip(ii[hit].ravel(), jj[hit].ravel()):
                     blocked.add(((int(a), int(bcell)), h))
-        return blocked, no_rot
+        return blocked
+
+    def _turn_hits_overlay(self, blocked, cell: tuple, h: int, nh: int) -> bool:
+        """True si girar de `h` a `nh` en `cell` barreria la caja movil. Mismo
+        criterio que `_rot_ok` usa con las paredes -- la union de la huella sobre
+        los rumbos intermedios -- pero leyendo el `blocked` del overlay en vez de
+        una mascara precalculada, porque la caja cambia en cada episodio."""
+        if not blocked:
+            return False
+        n = self.n_head
+        d = (nh - h) % n
+        step = 1 if d <= n - d else -1              # se gira por el lado mas corto
+        for s in range(min(d, n - d) + 1):
+            if (cell, (h + step * s) % n) in blocked:
+                return True
+        return False
 
     def _reachable_from(self, cell: tuple, h0: int) -> np.ndarray:
         """(n_head, W, H) bool: estados alcanzables desde (cell, h0)."""
@@ -593,7 +708,7 @@ class TrackMap:
         return tuple(self._free_cells[int(np.argmin(d))])
 
     # ── Muestreo del waypoint ───────────────────────────────────────────────
-    def sample_goal(self, from_xy, min_dist: float = MAZE_GOAL_MIN_DIST_M) -> np.ndarray:
+    def sample_goal(self, from_xy, min_dist: float = GOAL_MIN_DIST_M) -> np.ndarray:
         """Celda navegable aleatoria a >= min_dist del robot. Si ninguna cumple
         (laberinto chico), se relaja al punto navegable mas lejano que haya."""
         pts = self.origin + self._free_cells * self.res
@@ -632,22 +747,22 @@ class TrackMap:
                                        self._world(goal)], max_wp_dist)
 
         if overlay is not None or self._reach is None:
-            blocked, no_rot = self.overlay_masks(overlay)
-            cells = self._astar(start, h0, goal, blocked, no_rot)
-            if cells is None:
+            blocked = self.overlay_masks(overlay)
+            _, parent, end = self._search(start, h0, goal, blocked)
+            if end is None:
                 # Ni un paso viable: el robot esta encerrado. Se queda donde esta
                 # (un waypoint en su sitio) en vez de recibir una recta que
                 # atraviesa obstaculos.
                 print(f"[trackmap] {self.name}: sin salida desde "
                       f"{tuple(np.round(start_xy,2))}")
                 return [tuple(np.asarray(start_xy, dtype=float))]
+            cells = self._shortcut(self._backtrack(parent, end), blocked)
             pts = [np.asarray(start_xy, dtype=float)] + [self._world(c) for c, _ in cells[1:]]
             return _resample_polyline(pts, max_wp_dist)
 
-        import heapq
         cells = self._plan_cache.get((start, h0, goal))
         if cells is None:
-            dist, parent = self._tree(start, h0)
+            dist, parent, _ = self._search(start, h0)
             # De todos los rumbos posibles al llegar a la meta, el mas barato.
             end, best = None, float("inf")
             for h in range(self.n_head):
@@ -661,97 +776,96 @@ class TrackMap:
                       f"{tuple(goal_xy)} (rumbo inicial {h0})")
                 return _resample_polyline([np.asarray(start_xy, dtype=float),
                                            np.asarray(goal_xy, dtype=float)], max_wp_dist)
-            seq = [end]
-            while seq[-1] in parent:
-                seq.append(parent[seq[-1]])
-            seq.reverse()
-            cells = self._shortcut(seq)
+            cells = self._shortcut(self._backtrack(parent, end))
             self._plan_cache[(start, h0, goal)] = cells
 
         pts = [np.asarray(start_xy, dtype=float)] + [self._world(c) for c, _ in cells[1:]]
         return _resample_polyline(pts, max_wp_dist)
 
-    def _astar(self, start: tuple, h0: int, goal: tuple, blocked, no_rot):
-        """A* hacia UNA meta, respetando el overlay. Para pistas donde el arbol
-        cacheado no sirve porque el arranque o los obstaculos cambian cada
-        episodio. Heuristica: distancia euclidea en celdas (admisible: avanzar
-        cuesta la distancia y girar solo suma)."""
+    def _search(self, start: tuple, h0: int, goal: tuple = None,
+                blocked=None):
+        """Busqueda UNICA sobre (celda, rumbo). Dijkstra y A* son el MISMO bucle:
+        la unica diferencia es la heuristica, y A* con heuristica 0 ES Dijkstra.
+        Devuelve (dist, parent, end).
+
+          goal=None  -> explora TODO el grafo y CACHEA el arbol. En pistas con
+                        spawn fijo (maze, pallets) un unico arbol sirve para
+                        TODAS las metas: cada plan() es un backtrack en vez de
+                        una busqueda (medido: 1876 ms el arbol, 11 ms por ruta
+                        despues). end=None, el caller elige a que estado-meta ir.
+          goal=(i,j) -> A* con heuristica euclidea en celdas (admisible: avanzar
+                        cuesta la distancia y girar solo suma). Para cuando el
+                        arbol NO se puede reutilizar porque cambia cada episodio:
+                        hay `overlay` (obstaculo movil) o el spawn es aleatorio
+                        (platform). `end` es el estado meta, o el nodo mas cercano
+                        alcanzado (MEJOR ESFUERZO), o None si no se dio un paso.
+
+        El mejor-esfuerzo existe porque devolver una recta cruda al fallar era
+        peor que inutil: pasa por encima de lo que haya en medio y le enseña a la
+        politica a conducir contra el obstaculo.
+
+        El estado INICIAL se admite siempre, aunque el overlay lo marque en
+        colision: es donde el robot ESTA. Puede pasar (medido) que el obstaculo
+        virtual se coloque solapando la huella del spawn; prohibir esa pose
+        dejaba el problema sin solucion y se caia al fallback de recta cruda.
+        """
         import heapq
-        # El estado INICIAL se admite siempre, aunque el overlay lo marque en
-        # colision: es donde el robot ESTA. Puede pasar (medido) que el obstaculo
-        # virtual se coloque solapando la huella del spawn; prohibir esa pose
-        # dejaba el problema sin solucion y se caia al fallback de recta cruda,
-        # que justamente atraviesa el obstaculo. Salir de ahi es lo que haria
-        # cualquiera.
-        g_score = {(start, h0): 0.0}
+        # El arbol completo (goal=None, sin overlay) es lo unico cacheable: con
+        # meta o con overlay el resultado vale solo para ESE episodio.
+        cacheable = goal is None and blocked is None
+        if cacheable:
+            cached = self._tree_cache.get((start, h0))
+            if cached is not None:
+                return cached[0], cached[1], None
+
+        dist = {(start, h0): 0.0}
         parent = {}
         heap = [(0.0, start, h0)]
         closed = set()
         end = None
         # Mejor nodo visto por cercania a la meta, para el mejor-esfuerzo.
-        best_node, best_h = (start, h0), math.hypot(goal[0] - start[0], goal[1] - start[1])
+        best_node = (start, h0)
+        best_h = (float("inf") if goal is None
+                  else math.hypot(goal[0] - start[0], goal[1] - start[1]))
         while heap:
             _, cur, ch = heapq.heappop(heap)
             if (cur, ch) in closed:
                 continue
-            if cur == goal:
+            if goal is not None and cur == goal:
                 end = (cur, ch)
                 break
             closed.add((cur, ch))
-            gc = g_score[(cur, ch)]
-            for nb, nh, step in self._successors(cur, ch, blocked, no_rot):
+            gc = dist[(cur, ch)]
+            for nb, nh, step in self._successors(cur, ch, blocked):
                 if (nb, nh) in closed:
                     continue
                 t = gc + step
-                if t < g_score.get((nb, nh), float("inf")):
-                    g_score[(nb, nh)] = t
+                if t < dist.get((nb, nh), float("inf")):
+                    dist[(nb, nh)] = t
                     parent[(nb, nh)] = (cur, ch)
-                    hh = math.hypot(goal[0] - nb[0], goal[1] - nb[1])
-                    if hh < best_h:
-                        best_h, best_node = hh, (nb, nh)
+                    hh = 0.0                      # heuristica 0 -> Dijkstra
+                    if goal is not None:
+                        hh = math.hypot(goal[0] - nb[0], goal[1] - nb[1])
+                        if hh < best_h:
+                            best_h, best_node = hh, (nb, nh)
                     heapq.heappush(heap, (t + hh, nb, nh))
-        if end is None:
-            # MEJOR ESFUERZO hacia la meta en vez de una recta cruda. Devolver la
-            # recta era peor que inutil: pasa por encima de lo que haya en medio
-            # y le enseña a la politica a conducir contra el obstaculo.
-            if best_node == (start, h0):
-                return None
+
+        if goal is not None and end is None and best_node != (start, h0):
             end = best_node
+        if cacheable:
+            self._tree_cache[(start, h0)] = (dist, parent)
+        return dist, parent, end
+
+    @staticmethod
+    def _backtrack(parent: dict, end: tuple) -> list:
+        """Cadena de estados (celda, rumbo) desde el arranque hasta `end`."""
         seq = [end]
         while seq[-1] in parent:
             seq.append(parent[seq[-1]])
         seq.reverse()
-        return self._shortcut(seq, blocked, no_rot)
+        return seq
 
-    def _tree(self, start: tuple, h0: int):
-        """Dijkstra COMPLETO desde (start, h0), cacheado. Devuelve (dist, parent).
-
-        En el maze el spawn es fijo, asi que un unico arbol sirve para TODAS las
-        metas: cada plan() pasa a ser un backtrack en vez de una busqueda. Un A*
-        por meta costaba ~400 ms y se repetia en cada reset de cada env; esto se
-        paga una vez y luego es practicamente gratis."""
-        import heapq
-        key = (start, h0)
-        cached = self._tree_cache.get(key)
-        if cached is not None:
-            return cached
-        dist = {(start, h0): 0.0}
-        parent = {}
-        heap = [(0.0, start, h0)]
-        while heap:
-            d, cur, ch = heapq.heappop(heap)
-            if d > dist.get((cur, ch), float("inf")):
-                continue
-            for nb, nh, step in self._successors(cur, ch):
-                nd = d + step
-                if nd < dist.get((nb, nh), float("inf")):
-                    dist[(nb, nh)] = nd
-                    parent[(nb, nh)] = (cur, ch)
-                    heapq.heappush(heap, (nd, nb, nh))
-        self._tree_cache[key] = (dist, parent)
-        return dist, parent
-
-    def _shortcut(self, states: list, blocked=None, no_rot=None) -> list:
+    def _shortcut(self, states: list, blocked=None) -> list:
         """String-pulling CONSCIENTE DEL RUMBO sobre la secuencia (celda, rumbo).
 
         El atajo ingenuo desharia todo el trabajo: cambiaria un rodeo del tipo
@@ -768,7 +882,7 @@ class TrackMap:
             chosen = None
             while j > i + 1:
                 h = self._segment_head(states[i][0], states[j][0], cur_h,
-                                       blocked, no_rot)
+                                       blocked)
                 # INVARIANTE: solo se acepta el atajo si deja al robot con el
                 # MISMO rumbo que traia el camino original en ese nodo. Asi
                 # cur_h siempre coincide con states[i][1], y el caso de reserva
@@ -792,7 +906,7 @@ class TrackMap:
         return self._segment_head(a[0], b[0], a[1]) is not None
 
     def _segment_head(self, ca: tuple, cb: tuple, h_in: int,
-                      blocked=None, no_rot=None):
+                      blocked=None):
         """Rumbo del tramo recto ca->cb si es viable llegando con rumbo `h_in`,
         o None. OJO con `h_in`: es el rumbo con el que se LLEGA a ca DESPUES de
         atajar, no el que traia el camino original -- usar el original hacia que
@@ -801,8 +915,8 @@ class TrackMap:
         if d == (0, 0):
             return h_in
         h_seg = self._yaw_to_head(math.atan2(d[1], d[0]))
-        if h_seg != h_in and (not self.rotable[ca]
-                              or (no_rot is not None and ca in no_rot)):
+        if h_seg != h_in and (not self._rot_ok[h_in][h_seg][ca]
+                              or self._turn_hits_overlay(blocked, ca, h_in, h_seg)):
             return None            # habria que girar aqui, y aqui no cabe
         fh = self.free[h_seg]
         seg = _bresenham(ca, cb)
@@ -822,7 +936,7 @@ class TrackMap:
 # de un XML de MuJoCo, de un JSON o de donde sea; solo recibe AABB. Añadir una
 # pista nueva es escribir su extractor, no otro planificador.
 
-def obstacles_from_mujoco(xml_path: str, robot_top: float = MAZE_ROBOT_TOP_M):
+def obstacles_from_mujoco(xml_path: str, robot_top: float = ROBOT_TOP_M):
     """Cajas de colision de un XML de MuJoCo que NO son del robot -> AABB (N,4).
 
     Descarta las que empiezan por encima de `robot_top`: son dinteles de puerta
@@ -904,18 +1018,20 @@ def get_track_map(track: dict = None) -> TrackMap:
         # (4x el maze) para una precision que aqui no compra nada.
         he = PLATFORM_HALF_EXTENT
         tm = TrackMap(np.zeros((0, 4)), drivable=[(-he, -he, he, he)],
-                      spawn_xy=(0.0, 0.0), res=PLATFORM_GRID_RESOLUTION,
+                      spawn_xy=(0.0, 0.0), res=track_get(track, "grid_res", GRID_RESOLUTION),
                       compute_reach=False, name=track.get("name", "platform"))
     elif kind == "pallets":
         drivable, obstacles = boxes_from_pallets_json(track["nav_json"])
         tm = TrackMap(obstacles, drivable=drivable,
-                      spawn_xy=track.get("spawn_xy", START_XY),
-                      spawn_yaw=float(track.get("spawn_yaw", 0.0)),
+                      spawn_xy=track_get(track, "spawn_xy", START_XY),
+                      spawn_yaw=float(track_get(track, "spawn_yaw", 0.0)),
+                      res=track_get(track, "grid_res", GRID_RESOLUTION),
                       gap_bridge=GAP_BRIDGE_DISTANCE, name=track.get("name", "pallets"))
     else:
         tm = TrackMap(obstacles_from_mujoco(track["xml"]),
-                      spawn_xy=track.get("spawn_xy", (0.0, 0.0)),
-                      spawn_yaw=float(track.get("spawn_yaw", 0.0)),
+                      spawn_xy=track_get(track, "spawn_xy", (0.0, 0.0)),
+                      spawn_yaw=float(track_get(track, "spawn_yaw", 0.0)),
+                      res=track_get(track, "grid_res", GRID_RESOLUTION),
                       name=track.get("name", "maze"))
     _TRACK_MAPS[key] = tm
     return tm
@@ -928,7 +1044,7 @@ def plan_track_route(start_xy: tuple, goal_xy: tuple = None,
     """Ruta consciente de la huella dentro de la pista. Devuelve (waypoints, goal_xy).
 
     goal_xy=None (lo normal) -> se SORTEA una meta en zona libre y ALCANZABLE,
-    a >= MAZE_GOAL_MIN_DIST_M del robot. Devolver la meta es obligatorio: el que
+    a >= GOAL_MIN_DIST_M del robot. Devolver la meta es obligatorio: el que
     llama tiene que guardarla en env.goal_xy, porque de ahi salen tanto la
     condicion de exito como GOAL_BONUS.
 
@@ -993,8 +1109,10 @@ def plan_platform_route_with_obstacle(
     evasion FINA; estos waypoints ya doblan alrededor, asi el lookahead que ve la
     politica es coherente con el rodeo (no recto por encima de la caja).
 
-    SOLO para la plataforma plana. La pista de pallets usa plan_route/_plan_segment
-    (A* sobre el JSON), que esta funcion NO toca.
+    SOLO coloca la caja y devuelve una ruta de referencia; la ruta que se USA la
+    da plan_track_route con esa caja como overlay dinamico (ver mujoco_sim_base y
+    base_ros_env). Antes esta funcion era el planificador de platform y el
+    docstring apuntaba a plan_route para pallets -- las dos cosas ya no existen.
 
     Devuelve (waypoints, obstacle_or_None) -- None si la ruta es muy corta para
     meter un obstaculo con margen."""
@@ -1063,134 +1181,11 @@ def plan_platform_route_with_obstacle(
     path.reverse()
     return _resample_polyline(path, max_wp_dist), obstacle
 
-
-def build_safe_zone(json_path: str):
-    with open(json_path, "r") as f:
-        data = json.load(f)
-    pallets_poly = []
-    for p in data["pallets"]:
-        corners = box_corners_2d(np.array(p["center_xy"]), np.array(p["size"]), np.array(p["rot_mat"]))
-        pallets_poly.append(ShapelyPolygon(corners))
-
-    merged_pallets = unary_union(pallets_poly)
-    dilated = merged_pallets.buffer(GAP_BRIDGE_DISTANCE)
-    closed = dilated.buffer(-GAP_BRIDGE_DISTANCE)
-    safe_zone_union = closed.buffer(-ROBOT_RADIUS)
-
-    blocker_polys = []
-    for s in data.get("sticks", []):
-        corners = box_corners_2d(np.array(s["center_xy"]), np.array(s["size"]), np.array(s["rot_mat"]))
-        blocker_polys.append(ShapelyPolygon(corners))
-    for o in data.get("obstacles", []):
-        if o["name"] == "col_manija":
-            continue
-        corners = box_corners_2d(np.array(o["center_xy"]), np.array(o["size"]), np.array(o["rot_mat"]))
-        blocker_polys.append(ShapelyPolygon(corners))
-    if blocker_polys:
-        blockers_inflated = unary_union(blocker_polys).buffer(ROBOT_RADIUS)
-        safe_zone_union = safe_zone_union.difference(blockers_inflated)
-
-    return safe_zone_union, data
-
-def _astar_route(safe_zone_union, data: dict, start_xy: tuple, goal_xy: tuple) -> list[tuple]:
-    all_pts = [np.array(p["center_xy"]) for p in data["pallets"]] + [np.array(start_xy), np.array(goal_xy)]
-    xs = [pt[0] for pt in all_pts]
-    ys = [pt[1] for pt in all_pts]
-    
-    margin = 1.5
-    min_x, max_x = min(xs) - margin, max(xs) + margin
-    min_y, max_y = min(ys) - margin, max(ys) + margin
-    
-    width = int(np.ceil((max_x - min_x) / GRID_RESOLUTION))
-    height = int(np.ceil((max_y - min_y) / GRID_RESOLUTION))
-    
-    grid = np.ones((width, height), dtype=bool)
-    for i in range(width):
-        for j in range(height):
-            x = min_x + i * GRID_RESOLUTION
-            y = min_y + j * GRID_RESOLUTION
-            if safe_zone_union.contains(ShapelyPoint(x, y)):
-                grid[i, j] = False
-                
-    def w_to_g(x, y):
-        return int(np.clip(round((x - min_x) / GRID_RESOLUTION), 0, width - 1)), int(np.clip(round((y - min_y) / GRID_RESOLUTION), 0, height - 1))
-    def g_to_w(i, j):
-        return min_x + i * GRID_RESOLUTION, min_y + j * GRID_RESOLUTION
-        
-    start_node = w_to_g(*start_xy)
-    goal_node = w_to_g(*goal_xy)
-    grid[start_node[0], start_node[1]] = False
-    grid[goal_node[0], goal_node[1]] = False
-    
-    moves = [(1,0,1.), (-1,0,1.), (0,1,1.), (0,-1,1.), (1,1,1.414), (1,-1,1.414), (-1,1,1.414), (-1,-1,1.414)]
-    open_set = {start_node: 0.0}
-    closed_set = set()
-    parent = {}
-    g_score = {start_node: 0.0}
-    
-    while open_set:
-        curr = min(open_set, key=lambda o: g_score[o] + np.hypot(o[0]-goal_node[0], o[1]-goal_node[1]))
-        if curr == goal_node:
-            path = []
-            while curr in parent:
-                path.append(g_to_w(*curr))
-                curr = parent[curr]
-            path.append(start_xy)
-            path = path[::-1]
-            
-            corners = [path[0]]
-            for i in range(1, len(path) - 1):
-                p_prev, p_curr, p_next = np.array(corners[-1]), np.array(path[i]), np.array(path[i+1])
-                v1 = (p_curr - p_prev) / (np.linalg.norm(p_curr - p_prev) + 1e-6)
-                v2 = (p_next - p_curr) / (np.linalg.norm(p_next - p_curr) + 1e-6)
-                if np.dot(v1, v2) < CORNER_DOT_THRESHOLD:
-                    corners.append(path[i])
-            corners.append(path[-1])
-
-            final_waypoints = [corners[0]]
-            for i in range(len(corners) - 1):
-                p_start = np.array(corners[i])
-                p_end = np.array(corners[i + 1])
-                segment_vector = p_end - p_start
-                segment_dist = np.linalg.norm(segment_vector)
-
-                if segment_dist > MAX_WAYPOINT_DIST:
-                    num_segments = int(np.ceil(segment_dist / MAX_WAYPOINT_DIST))
-                    for j in range(1, num_segments):
-                        alpha = j / num_segments
-                        p_interp = p_start + alpha * segment_vector
-                        final_waypoints.append(tuple(p_interp))
-
-                final_waypoints.append(tuple(p_end))
-
-            return final_waypoints
-            
-        open_set.pop(curr)
-        closed_set.add(curr)
-        
-        for dx, dy, cost in moves:
-            neighbor = (curr[0] + dx, curr[1] + dy)
-            if not (0 <= neighbor[0] < width and 0 <= neighbor[1] < height) or grid[neighbor[0], neighbor[1]] or neighbor in closed_set:
-                continue
-            tg = g_score[curr] + cost * GRID_RESOLUTION
-            if tg < g_score.get(neighbor, float('inf')):
-                g_score[neighbor] = tg
-                parent[neighbor] = curr
-                open_set[neighbor] = tg
-                
-    return [start_xy, goal_xy]
-
-def plan_route(json_path: str, start_xy: tuple, goal_xy: tuple, safe_zone=None) -> list[tuple]:
-    if safe_zone is None:
-        safe_zone = build_safe_zone(json_path)
-    safe_zone_union, data = safe_zone
-    return _astar_route(safe_zone_union, data, start_xy, goal_xy)
-
 class GlobalNavigator:
     def __init__(self, json_path, waypoints: list,
                  att_gain: float = ATT_GAIN, att_range: float = ATT_RANGE,
                  rep_gain: float = REP_GAIN, rep_range: float = REP_RANGE,
-                 rh: float = ROBOT_HALF, swirl: float = SWIRL,
+                 rh: float = ROBOT_HALF_WIDTH, swirl: float = SWIRL,
                  min_progress: float = MIN_PROGRESS,
                  pallet_edges: bool = True,
                  n_lookahead: int = N_LOOKAHEAD,

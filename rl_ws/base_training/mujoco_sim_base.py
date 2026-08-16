@@ -41,7 +41,7 @@ from rl_ws.base_training.robot_control import RampController
 from rl_ws.base_training.map_context import MapContext
 from rl_ws.global_navigator import (
     build_platform_zone, plan_platform_route, plan_platform_route_with_obstacle,
-    plan_route, plan_track_route, GlobalNavigator, quat_to_yaw, quat_to_grav_body,
+    plan_track_route, GlobalNavigator, quat_to_yaw, quat_to_grav_body,
 )
 
 CHECKOUT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -74,10 +74,10 @@ class BaseMujocoEnv:
         self.track = track if track is not None else C.TRACK_DEFS[C.ACTIVE_TRACKS[0]]
         self.track_name = self.track.get("name", "?")
         self._kind = self.track.get("kind", "platform")
-        self._spawn_z = float(self.track.get("spawn_z", C.SPAWN_Z))
-        self._settle = int(self.track.get("settle_steps", C.SPAWN_SETTLE_STEPS))
-        self._fall_z_min = float(self.track.get("fall_z_min", C.FALL_Z_MIN))
-        self._finish_dist = float(self.track.get("finish_dist", C.FINISH_DIST))
+        self._spawn_z = float(C.track_get(self.track, "spawn_z", C.SPAWN_Z))
+        self._settle = int(C.track_get(self.track, "settle_steps", C.SPAWN_SETTLE_STEPS))
+        self._fall_z_min = float(C.track_get(self.track, "fall_z_min", C.FALL_Z_MIN))
+        self._finish_dist = float(C.track_get(self.track, "finish_dist", C.FINISH_DIST))
         self.model = model if model is not None else mujoco.MjModel.from_xml_path(self.track["xml"])
         self.data  = mujoco.MjData(self.model)
         self.decim = control_decimation
@@ -147,10 +147,13 @@ class BaseMujocoEnv:
             # identicos en cada episodio), y esa era la razon de que nunca
             # despegara del 0% entrenando en multipista -- sin rutas cortas no
             # hay de donde bootstrapear el GOAL_BONUS. Ver docs/sigma_estado.md.
-            spawn = self.track.get("spawn_xy", C.START_XY)
+            spawn = C.track_get(self.track, "spawn_xy", C.START_XY)
+            # goal_xy de la tabla: si la pista declara meta FIJA se usa esa; si es
+            # None, plan_track_route sortea una alcanzable.
+            goal_xy = goal_xy if goal_xy is not None else self.track.get("goal_xy")
             waypoints, goal_xy = plan_track_route(
                 spawn, goal_xy, track=self.track,
-                start_yaw=float(self.track.get("spawn_yaw", 0.0)))
+                start_yaw=float(C.track_get(self.track, "spawn_yaw", 0.0)))
             self.goal_xy = np.asarray(goal_xy, dtype=np.float64)
             self._fixed_waypoints = waypoints
             # El navegador de pallets necesita el JSON para los bordes/obstaculos
@@ -243,8 +246,8 @@ class BaseMujocoEnv:
             # Spawn FIJO (entrada del laberinto / START_XY de pallets, los mismos
             # puntos que usa el bridge ROS). Lo que cambia entre episodios es la
             # meta, no el punto de partida.
-            spawn_xy = np.array(self.track.get("spawn_xy", C.START_XY), dtype=float)
-            spawn_yaw = float(self.track.get("spawn_yaw", 0.0))
+            spawn_xy = np.array(C.track_get(self.track, "spawn_xy", C.START_XY), dtype=float)
+            spawn_yaw = float(C.track_get(self.track, "spawn_yaw", 0.0))
         else:
             # Plataforma: spawn random en ±SPAWN_XY_RANGE con yaw random.
             spawn_xy = np.random.uniform(-C.SPAWN_XY_RANGE, C.SPAWN_XY_RANGE, 2)
@@ -301,8 +304,10 @@ class BaseMujocoEnv:
             # huella, no la recta (que atravesaria paredes o el vacio entre
             # tarimas). Guardar la meta es obligatorio: de ella dependen la
             # condicion de exito y GOAL_BONUS.
-            waypoints, goal_xy = plan_track_route(fb["xy"], track=self.track,
-                                                  start_yaw=float(fb["yaw"]))
+            # Meta FIJA de la tabla, o sorteada si la fila dice None.
+            waypoints, goal_xy = plan_track_route(
+                fb["xy"], self.track.get("goal_xy"), track=self.track,
+                start_yaw=float(fb["yaw"]))
             self.goal_xy = np.asarray(goal_xy, dtype=np.float64)
             self.nav.replan(waypoints, obstacles=[])
 

@@ -13,11 +13,14 @@ _RL_WS_ROOT = os.path.dirname(_THIS_DIR)
 if _RL_WS_ROOT not in sys.path:
     sys.path.insert(0, _RL_WS_ROOT)
 
-from ppo_pallets_train import SPAWN_XYZ, GOAL_XY
-from global_navigator import plan_route, box_corners_2d
+from global_navigator import plan_track_route, box_corners_2d
+from base_training.config import (
+    TRACK_DEFS, ROBOT_RADIUS, GAP_BRIDGE_DISTANCE, SPAWN_Z,
+)
 
-ROBOT_RADIUS = 0.20  
-GAP_BRIDGE_DISTANCE = 0.15  
+_PALLETS  = TRACK_DEFS["pallets"]
+SPAWN_XYZ = (float(_PALLETS["spawn_xy"][0]), float(_PALLETS["spawn_xy"][1]), float(SPAWN_Z))
+GOAL_XY   = tuple(_PALLETS["goal_xy"])
 
 STYLE_OBSTACLE = dict(fc="#2f3542", ec="#000000", alpha=0.90, zorder=2, lw=0.8)
 STYLE_STICK = dict(fc="#e17055", ec="#d63031", alpha=0.95, zorder=2, lw=1.2)
@@ -37,8 +40,11 @@ def main():
     with open(args.json, "r") as f:
         data = json.load(f)
 
-    print("Computing A* path with exact curvature simplification...")
-    waypoints = plan_route(args.json, SPAWN_XYZ[:2], GOAL_XY)
+    # MISMO planificador que corre en el pipeline (TrackMap, consciente de la
+    # huella), no el viejo plan_route sobre la zona de shapely: daban rutas
+    # distintas (74 wp / 18.10 m contra 54 wp / 17.03 m, hasta 4.87 m de desvio).
+    print("Planeando ruta (TrackMap, el mismo del pipeline)...")
+    waypoints, _goal = plan_track_route(SPAWN_XYZ[:2], GOAL_XY, track=_PALLETS)
     wps_arr = np.array(waypoints)
 
     fig, ax = plt.subplots(figsize=(14, 10))

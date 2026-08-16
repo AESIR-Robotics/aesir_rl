@@ -143,6 +143,28 @@ _TERM_LABELS = [
 ]
 
 
+def _pick_device(pref: str = "auto") -> torch.device:
+    """Dispositivo REALMENTE utilizable. No basta con torch.cuda.is_available():
+    puede devolver True y luego fallar la primera reserva con 'CUDA-capable
+    device(s) is/are busy or unavailable' -- pasa cuando un proceso anterior
+    murio dejando el contexto CUDA colgado. Como aqui la red es minuscula y el
+    lazo va al ritmo del bridge (20 Hz), caer a CPU no cuesta nada; morir con un
+    core dump a media prueba si. Con pref='cuda'/'cpu' se fuerza sin probar."""
+    if pref != "auto":
+        return torch.device(pref)
+    if not torch.cuda.is_available():
+        return torch.device("cpu")
+    try:                                   # reserva de prueba: lo unico concluyente
+        torch.zeros(8, device="cuda")
+        torch.cuda.synchronize()
+        return torch.device("cuda")
+    except Exception as e:
+        print(f"[test_base] CUDA presente pero inutilizable ({type(e).__name__}); "
+              f"se usa CPU. Si esperabas GPU: 'sudo rmmod nvidia_uvm && "
+              f"sudo modprobe nvidia_uvm' suele reponerla tras un core dump.")
+        return torch.device("cpu")
+
+
 def print_reward_breakdown(title: str, sums: dict, steps: int):
     """Imprime cuanto aporto cada componente al reward: total, promedio/paso y
     % del reward positivo/negativo. La suma de todos == reward total."""
@@ -237,6 +259,11 @@ class LiveTrajectoryPlot:
         else:
             from rl_ws.utils.plot_path_vortex import draw_map          # pista de pallets (fondo)
             draw_map(ax, map_data)
+            from rl_ws.global_navigator import get_track_map
+            tm = get_track_map(C.TRACK_DEFS[C.ACTIVE_TRACKS[0]])
+            lo = tm.origin
+            hi = lo + (tm.dims - 1) * tm.res
+            ax.set_xlim(lo[0] - 0.5, hi[0] + 0.5); ax.set_ylim(lo[1] - 0.5, hi[1] + 0.5)
 
         # ── Escena por episodio (se rellena en set_scene, cambia cada reset) ─
         (self.route_line,) = ax.plot([], [], "--", color="#ffffff", lw=1.3, alpha=0.45,
@@ -275,10 +302,6 @@ class LiveTrajectoryPlot:
             self._obs_patch = self.ax.add_patch(self.Rectangle(
                 (o.x - o.hx, o.y - o.hy), 2 * o.hx, 2 * o.hy,
                 fc="#e17055", ec="#d63031", alpha=0.95, lw=1.4, zorder=3))
-        if self.kind == "pallets":                        # pallets: encuadrar a la ruta
-            pad = 1.0
-            self.ax.set_xlim(wp[:, 0].min() - pad, wp[:, 0].max() + pad)
-            self.ax.set_ylim(wp[:, 1].min() - pad, wp[:, 1].max() + pad)
 
     def start_episode(self, ep: int):
         self._rx, self._ry = [], []
@@ -318,6 +341,8 @@ def main():
     ap.add_argument("--checkpoint", default=DEFAULT_CKPT)
     ap.add_argument("--algo", choices=("auto", "ppo", "sac"), default="auto",
                     help="auto = deducirlo del contenido del .pt")
+    ap.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto",
+                    help="auto = GPU si de verdad se puede reservar en ella, si no CPU")
     ap.add_argument("--episodes", type=int, default=3)
     ap.add_argument("--stochastic", action="store_true",
                     help="muestrea de la distribucion (default: deterministico = media)")
@@ -340,7 +365,7 @@ def main():
             f"  (buscado tambien en {_ROOT}/ y {_ROOT}/checkpoints_base/)")
     args.checkpoint = ckpt
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = _pick_device(args.device)
     print(f"Dispositivo: {device}")
 
     env = BaseRosEnv()   # se conecta al bridge (espera su feedback); el bridge abre el viewer

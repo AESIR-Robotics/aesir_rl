@@ -79,7 +79,7 @@ from rl_ws.base_training.config import (
     USE_HEATMAP, OCTOMAP_BT_PATH, OCTOMAP_RESOLUTION, HEATMAP_RADIUS_M, HEATMAP_PIXELS,
     HEATMAP_Z_RANGE_M,
     USE_VIRTUAL_OBSTACLE, GOAL_XY_RANGE,
-    TRACK_DEFS, ACTIVE_TRACKS,
+    TRACK_DEFS, ACTIVE_TRACKS, track_get,
 )
 # Pista ACTIVA (primera de ACTIVE_TRACKS): define el mundo que ve el env ROS.
 # El bridge (mujoco_sim_rosbridge.py) simula esta MISMA pista. Para probar otra,
@@ -89,8 +89,8 @@ _KIND = _ACTIVE_TRACK.get("kind", "platform")
 # Umbrales POR PISTA (ver el comentario de "maze" en config.TRACK_DEFS): la
 # altura de caida es ABSOLUTA, asi que depende de donde este el suelo de esta
 # pista. Se inyectan en `fb` para que base_env.is_fallen/_terminated los usen.
-_FALL_Z_MIN  = float(_ACTIVE_TRACK.get("fall_z_min", FALL_Z_MIN))
-_FINISH_DIST = float(_ACTIVE_TRACK.get("finish_dist", FINISH_DIST))
+_FALL_Z_MIN  = float(track_get(_ACTIVE_TRACK, "fall_z_min", FALL_Z_MIN))
+_FINISH_DIST = float(track_get(_ACTIVE_TRACK, "finish_dist", FINISH_DIST))
 
 
 # ── Convencion "hardware" (espejo de topic_bridge_hardware.cpp) ──────────────
@@ -279,11 +279,11 @@ class BaseRosEnv:
         # nav_json y octomap de la pista activa (config ya los resolvio arriba,
         # pero en modo pallets usamos el JSON de esa pista explicitamente).
         if self.kind == "pallets":
-            nav_json = _ACTIVE_TRACK.get("nav_json", nav_json)
+            nav_json = track_get(_ACTIVE_TRACK, "nav_json", nav_json)
         if self.kind == "maze":
             # El spawn del maze es el suyo (la entrada del laberinto), no el
             # START_XY global, que es la mision de pallets en otro frame.
-            start_xy = _ACTIVE_TRACK.get("spawn_xy", start_xy)
+            start_xy = track_get(_ACTIVE_TRACK, "spawn_xy", start_xy)
 
         self.obs_dim = OBS_DIM
         self.act_len = ACT_DIM
@@ -315,8 +315,9 @@ class BaseRosEnv:
             # MISMO planificador que el backend directo (global_navigator.TrackMap):
             # A* consciente de la huella sobre (x, y, rumbo). Ver mujoco_sim_base.
             self.waypoints, self.goal_xy = plan_track_route(
-                self.start_xy, self._fixed_goal, track=_ACTIVE_TRACK,
-                start_yaw=float(_ACTIVE_TRACK.get("spawn_yaw", 0.0)))
+                self.start_xy, self._fixed_goal if self._fixed_goal is not None
+                else _ACTIVE_TRACK.get("goal_xy"), track=_ACTIVE_TRACK,
+                start_yaw=float(track_get(_ACTIVE_TRACK, "spawn_yaw", 0.0)))
             self.virtual_obstacle = None
         else:
             self.goal_xy = self._sample_goal()
@@ -432,7 +433,8 @@ class BaseRosEnv:
         # exito y GOAL_BONUS.
         if self.kind in ("maze", "pallets"):
             self.waypoints, self.goal_xy = plan_track_route(
-                fb["xy"], track=_ACTIVE_TRACK, start_yaw=float(fb["yaw"]))
+                fb["xy"], _ACTIVE_TRACK.get("goal_xy"), track=_ACTIVE_TRACK,
+                start_yaw=float(fb["yaw"]))
             self.nav.replan(self.waypoints, obstacles=[])
             print(f"[base_env] {self.kind}: waypoint nuevo en "
                   f"({self.goal_xy[0]:.2f}, {self.goal_xy[1]:.2f})  "

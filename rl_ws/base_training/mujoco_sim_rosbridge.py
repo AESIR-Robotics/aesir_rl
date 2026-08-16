@@ -84,11 +84,14 @@ SIM_SPEEDUP = C.SIM_SPEEDUP   # mismo valor que duerme BaseRosEnv (dt/SIM_SPEEDU
 # (steps/ramps son mas altos) — mismo spawn que usa BaseMujocoEnv al entrenar en
 # esa pista. El maze SI trae el suyo: su entrada no coincide con START_XY, que es
 # el arranque de la mision de pallets (otra pista, otro frame).
-_SPAWN_XY = _TRACK.get("spawn_xy", C.START_XY)
+# spawn_xy/spawn_yaw pueden venir a None: en las pistas platform la mision es
+# procedural y el spawn lo sortea el env. El bridge necesita UNA pose concreta
+# para su reset, asi que cae al default de config.
+_SPAWN_XY = C.track_get(_TRACK, "spawn_xy", C.START_XY)
 SPAWN_POSE = (float(_SPAWN_XY[0]), float(_SPAWN_XY[1]),
-              float(_TRACK.get("spawn_z", C.SPAWN_Z)),
-              float(_TRACK.get("spawn_yaw", C.SPAWN_YAW)))
-SPAWN_SETTLE_STEPS = int(_TRACK.get("settle_steps", C.SPAWN_SETTLE_STEPS))
+              float(C.track_get(_TRACK, "spawn_z", C.SPAWN_Z)),
+              float(C.track_get(_TRACK, "spawn_yaw", C.SPAWN_YAW)))
+SPAWN_SETTLE_STEPS = int(C.track_get(_TRACK, "settle_steps", C.SPAWN_SETTLE_STEPS))
 
 # ── Limites de movimiento tipo AVR446 (rampa trapezoidal), en radianes ──────
 # Brazo desde config.ARM_JOINT_LIMITS; flippers con los MISMOS limites que el

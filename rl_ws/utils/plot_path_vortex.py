@@ -38,25 +38,33 @@ if _RL_WS_ROOT not in sys.path:
     sys.path.insert(0, _RL_WS_ROOT)
 
 from global_navigator import (
-    plan_route, box_corners_2d, GlobalNavigator, vortex_apf,
+    plan_track_route, box_corners_2d, GlobalNavigator, vortex_apf,
 )
 # TODOS los parametros compartidos (inicio/meta de la mision, escalas de
 # comando, geometria de la zona segura) salen de base_training/config.py — la
 # misma fuente que usan los dos backends de entrenamiento. Sin arrastrar
 # ROS/mujoco/torch, asi este script sigue corriendo sin sourcear el workspace.
 from base_training.config import (
-    START_XY as _START_XY, GOAL_XY as _GOAL_XY, NAV_JSON as _WB_NAV, SPAWN_Z,
+    NAV_JSON as _WB_NAV, SPAWN_Z,
     V_MAX_MPS, W_MAX_RADPS, FINISH_DIST,
-    ROBOT_RADIUS, GAP_BRIDGE_DISTANCE,
+    ROBOT_RADIUS, GAP_BRIDGE_DISTANCE, TRACK_DEFS,
 )
 
+# Inicio/meta de la pista de PALLETS, que es la que dibuja este script. NO se
+# usa el START_XY global: ese es el de la primera pista de ACTIVE_TRACKS y hoy
+# apunta al maze, asi que el script planeaba desde el spawn del maze sobre el
+# mapa de pallets y el planificador respondia "sin ruta".
+_PALLETS = TRACK_DEFS["pallets"]
+
 def _resolve_goal():
-    if _GOAL_XY is not None:
-        return tuple(_GOAL_XY)
+    g = _PALLETS.get("goal_xy")
+    if g is not None:
+        return tuple(g)
     with open(_WB_NAV, "r") as _f:                 # None -> ultimo pallet del JSON
         return tuple(json.load(_f)["pallets"][-1]["center_xy"])
 
-SPAWN_XYZ = (float(_START_XY[0]), float(_START_XY[1]), float(SPAWN_Z))   # compat: [:2] es el inicio
+SPAWN_XYZ = (float(_PALLETS["spawn_xy"][0]), float(_PALLETS["spawn_xy"][1]),
+             float(SPAWN_Z))                       # compat: [:2] es el inicio
 GOAL_XY   = _resolve_goal()
 
 STYLE_OBSTACLE    = dict(fc="#2f3542", ec="#000000", alpha=0.90, zorder=2, lw=0.8)
@@ -297,9 +305,10 @@ def main():
 
     start_xy = tuple(args.start)
     goal_xy  = tuple(args.goal)
-
-    print("Planeando ruta A* ...")
-    waypoints = plan_route(args.json, start_xy, goal_xy)
+    
+    print("Planeando ruta (TrackMap, el mismo del pipeline) ...")
+    waypoints, goal_xy = plan_track_route(start_xy, goal_xy,
+                                          track=_PALLETS)
     wps_arr = np.array(waypoints)
 
     nav = GlobalNavigator(args.json, waypoints=waypoints)
