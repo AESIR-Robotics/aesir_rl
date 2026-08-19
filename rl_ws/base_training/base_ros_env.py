@@ -47,9 +47,9 @@ from std_srvs.srv import Trigger
 from std_msgs.msg import Int32, Float32MultiArray
 
 from rl_ws.global_navigator import (
-    GlobalNavigator, quat_to_yaw, quat_upright, quat_to_grav_body,
+    quat_to_yaw, quat_upright, quat_to_grav_body,
     build_platform_zone, plan_platform_route, plan_platform_route_with_obstacle,
-    plan_track_route,
+    plan_track_route, make_navigator,
 )
 from rl_ws.base_training.map_context import MapContext
 # Logica de tarea COMPARTIDA con el backend directo-MuJoCo (funciones puras de
@@ -322,22 +322,15 @@ class BaseRosEnv:
         else:
             self.goal_xy = self._sample_goal()
             self.waypoints, self.virtual_obstacle = self._plan_route(self.start_xy, self.goal_xy)
-        if self.kind == "maze":
-            # Sin obstaculos ni bordes en el vortex: la ruta A* ya va inflada por
-            # ROBOT_RADIUS, o sea que seguir sus waypoints ya deja al robot dentro
-            # del pasillo. Meter las ~90 paredes como Obstacle2D costaria una
-            # pasada por todas ellas en CADA step sin comprar nada.
-            self.nav = GlobalNavigator(None, waypoints=self.waypoints,
-                                       n_lookahead=N_LOOKAHEAD, lookahead_step=LOOKAHEAD_STEP)
-        elif use_platform:
-            self.nav = GlobalNavigator(
-                None, waypoints=self.waypoints,
-                n_lookahead=N_LOOKAHEAD, lookahead_step=LOOKAHEAD_STEP,
-                obstacles=[self.virtual_obstacle] if self.virtual_obstacle is not None else [],
-                edges_zone=self.platform_zone)
-        else:
-            self.nav = GlobalNavigator(nav_json, waypoints=self.waypoints,
-                                       n_lookahead=N_LOOKAHEAD, lookahead_step=LOOKAHEAD_STEP)
+        # La guia la construye make_navigator (global_navigator): decide por
+        # `kind` en UN solo sitio, compartido con el backend directo-MuJoCo, para
+        # que los dos vean el mismo mundo y añadir una pista no toque este archivo.
+        self.nav = make_navigator(
+            _ACTIVE_TRACK, self.waypoints,
+            extra_obstacles=([self.virtual_obstacle]
+                             if self.virtual_obstacle is not None else None),
+            edges_zone=self.platform_zone,
+            n_lookahead=N_LOOKAHEAD, lookahead_step=LOOKAHEAD_STEP)
         print(f"[base_env] pista={ACTIVE_TRACKS[0]} ({self.kind}): "
               f"{tuple(self.start_xy)} -> {tuple(np.round(self.goal_xy, 2))}  "
               f"({len(self.waypoints)} waypoints, "

@@ -131,7 +131,8 @@ def vortex_apf(robot_xy: np.ndarray, target_xy: np.ndarray, obstacles: list[Obst
                att_gain: float = ATT_GAIN, att_range: float = ATT_RANGE,
                rep_gain: float = REP_GAIN, rep_range: float = REP_RANGE,
                rh: float = ROBOT_HALF_WIDTH, swirl: float = SWIRL,
-               min_progress: float = MIN_PROGRESS) -> np.ndarray:
+               min_progress: float = MIN_PROGRESS,
+               obs_bounds: np.ndarray = None) -> np.ndarray:
     """Campo vortex: ATRACCION al waypoint + REPULSION (radial + swirl) de los
     obstaculos-caja (sticks, puerta) y de los BORDES de los pallets ('edges').
 
@@ -169,6 +170,16 @@ def vortex_apf(robot_xy: np.ndarray, target_xy: np.ndarray, obstacles: list[Obst
     #    alejarlo limpiamente del lado que esta cruzando.
     rep = np.zeros(2)
     rb = (rx - rh, ry - rh, rx + rh, ry + rh)
+    # PREFILTRO vectorizado: con rep_range de pocos cm, en una pista con paredes
+    # (el maze tiene 91) casi ninguna esta en rango, pero el bucle las recorria
+    # TODAS en cada paso (medido: 11.5 -> 591.6 us). `obs_bounds` es el array
+    # (N,4) cacheado por el llamante; se calcula el hueco de golpe y solo se
+    # entra al cuerpo por las pocas que de verdad repelen.
+    if obs_bounds is not None and len(obs_bounds):
+        gx = np.maximum(np.maximum(obs_bounds[:, 0] - rb[2], rb[0] - obs_bounds[:, 2]), 0.0)
+        gy = np.maximum(np.maximum(obs_bounds[:, 1] - rb[3], rb[1] - obs_bounds[:, 3]), 0.0)
+        cerca = np.nonzero(np.hypot(gx, gy) < rep_range)[0]
+        obstacles = [obstacles[i] for i in cerca]
     for o in obstacles:
         bounds = o.bounds()
         gap = _aabb_dist(rb, bounds)
@@ -445,6 +456,11 @@ class TrackMap:
                 f"{self._r_rot:.3f} m de holgura.")
         self._plan_cache = {}
         self._tree_cache = {}
+        # Las cajas crudas se guardan para el VORTEX: el planificador las rasteriza
+        # a rejilla, pero la guia reactiva las necesita como geometria para repeler
+        # (ver vortex_obstacles). Sin esto el maze corria con el vortex CIEGO a sus
+        # paredes -- medido: el 16.4% de los puntos-guia caian donde el robot no cabe.
+        self.obstacle_boxes = np.asarray(obstacles, dtype=float).reshape(-1, 4)
         print(f"[trackmap] {self.name}: {len(obstacles)} obstaculos, rejilla {tuple(self.dims)} "
               f"@{self.res} m, {self.n_head} rumbos | huella "
               f"{2*half_width:.2f}x{2*half_length:.2f} m (giro >= {self._r_rot:.3f} m) | "
@@ -534,6 +550,14 @@ class TrackMap:
                                           free, float(R * dth / res))
         return arcs
 
+    def vortex_obstacles(self) -> list:
+        """Paredes de la pista como Obstacle2D, para la repulsion del vortex.
+        Misma geometria que rasteriza el planificador, asi que guia reactiva y
+        ruta global ven el MISMO mundo en cualquier pista."""
+        return [Obstacle2D(f"wall_{i}", (x0 + x1) / 2.0, (y0 + y1) / 2.0,
+                           (x1 - x0) / 2.0, (y1 - y0) / 2.0)
+                for i, (x0, y0, x1, y1) in enumerate(self.obstacle_boxes)]
+
     def _yaw_to_head(self, yaw: float) -> int:
         return int(round((yaw % (2.0 * np.pi)) / (2.0 * np.pi) * self.n_head)) % self.n_head
 
@@ -589,6 +613,8 @@ class TrackMap:
             if not (0 <= nb[0] < W and 0 <= nb[1] < H) or not free[cell]:
                 continue
             nh = (h + sgn) % self.n_head
+            if not self.free[nh][nb]:
+                continue
             if blocked is not None and any((c, h) in blocked or (c, nh) in blocked
                                            for c in _bresenham(cell, nb)):
                 continue
@@ -1037,6 +1063,38 @@ def get_track_map(track: dict = None) -> TrackMap:
     return tm
 
 
+def make_navigator(track: dict, waypoints: list, extra_obstacles=None,
+                   edges_zone=None, **kw) -> "GlobalNavigator":
+    """GlobalNavigator de una pista, SIN que el llamante tenga que saber su `kind`.
+
+    Existe para que los dos backends (directo-MuJoCo y ROS) construyan la guia
+    igual y para que añadir una pista no obligue a tocar ninguno: toda la decision
+    por tipo de pista vive AQUI. Antes cada backend tenia su propio if/elif y ya
+    habian divergido -- pallets acababa con 42 obstaculos en ROS y 84 en
+    entrenamiento (los mismos, contados dos veces).
+
+    De donde salen los obstaculos del vortex, en UNA sola via:
+      - la pista trae nav_json (pallets) -> el JSON ya aporta sticks/puerta y los
+        bordes de tarima. NO se añade vortex_obstacles() ademas: el TrackMap de
+        pallets se construye de ese MISMO json, asi que se duplicaria la repulsion.
+      - sin nav_json (maze, platform) -> las cajas salen del XML de MuJoCo via
+        TrackMap.obstacle_boxes, la misma geometria que rasteriza el planificador.
+        En platform esa lista es vacia (no hay paredes), que es lo correcto.
+
+    `extra_obstacles` es para lo DINAMICO (el obstaculo virtual del episodio);
+    `edges_zone` para la zona que repele hacia adentro (plataforma). Si no se
+    pasa y la pista es platform, se deriva sola.
+    """
+    nav_json = track.get("nav_json")
+    obstacles = list(extra_obstacles or [])
+    if not nav_json:
+        obstacles += get_track_map(track).vortex_obstacles()
+    if edges_zone is None and track.get("kind") == "platform":
+        edges_zone = build_platform_zone()
+    return GlobalNavigator(nav_json, waypoints=waypoints,
+                           obstacles=obstacles or None, edges_zone=edges_zone, **kw)
+
+
 def plan_track_route(start_xy: tuple, goal_xy: tuple = None,
                      max_wp_dist: float = MAX_WAYPOINT_DIST,
                      track: dict = None, start_yaw: float = 0.0,
@@ -1195,16 +1253,22 @@ class GlobalNavigator:
         """json_path=None -> modo plataforma plana (sin pallets/sticks fisicos)"""
         self._wps = [np.array(w) for w in waypoints]
 
+        # Obstaculos del vortex en DOS grupos: los ESTATICOS son la geometria de
+        # la pista (paredes del maze, sticks/puerta de pallets) y viven todo el
+        # episodio; los DINAMICOS son el obstaculo virtual, que replan() cambia
+        # en cada reset. Antes habia una sola lista y replan(obstacles=[]) --
+        # que se llama en varios sitios -- borraba tambien la geometria fija.
         if json_path is None:
-            self._vo = list(obstacles) if obstacles is not None else []
+            self._vo_static = list(obstacles) if obstacles is not None else []
             self._edges = edges_zone
         else:
             with open(json_path, "r") as f:
                 data = json.load(f)
-            self._vo = [Obstacle2D.from_entry(o) for o in data["obstacles"] if o["name"] != "col_manija"]
-            self._vo += [Obstacle2D.from_entry(s) for s in data["sticks"]]
+            self._vo_static = [Obstacle2D.from_entry(o) for o in data["obstacles"]
+                               if o["name"] != "col_manija"]
+            self._vo_static += [Obstacle2D.from_entry(s) for s in data["sticks"]]
             if obstacles is not None:
-                self._vo += list(obstacles)
+                self._vo_static += list(obstacles)
 
             self._edges = edges_zone
             if pallet_edges and self._edges is None:
@@ -1221,7 +1285,16 @@ class GlobalNavigator:
         self._min_progress = min_progress
         self._n_look = int(n_lookahead)
         self._look_step = float(lookahead_step)
+        self._vo_dyn = []
+        self._sync_obstacles()
         self._wi = 0
+
+    def _sync_obstacles(self):
+        """Refresca la lista efectiva y su array de AABB, que vortex_apf usa para
+        descartar de golpe las que estan fuera de rep_range."""
+        self._vo = self._vo_static + self._vo_dyn
+        self._vo_bounds = (np.array([o.bounds() for o in self._vo], dtype=float)
+                           if self._vo else None)
 
     def reset(self, robot_xy: np.ndarray):
         self._wi = 0
@@ -1230,14 +1303,16 @@ class GlobalNavigator:
         self._wps = [np.array(w) for w in waypoints]
         self._wi = 0
         if obstacles is not None:
-            self._vo = list(obstacles)
+            self._vo_dyn = list(obstacles)      # NO pisa la geometria de la pista
+            self._sync_obstacles()
 
     def _vortex_at(self, pos: np.ndarray, target: np.ndarray) -> np.ndarray:
         return vortex_apf(pos, target, self._vo, edges=self._edges,
                           att_gain=self._att_gain, att_range=self._att_range,
                           rep_gain=self._rep_gain, rep_range=self._rep_range,
                           rh=self._rh, swirl=self._swirl,
-                          min_progress=self._min_progress)
+                          min_progress=self._min_progress,
+                          obs_bounds=self._vo_bounds)
 
     def _lookahead(self, robot_xy: np.ndarray, robot_yaw: float) -> np.ndarray:
         """Previsualiza la ruta que viene: n_look puntos muestreados a arco fijo

@@ -40,8 +40,9 @@ import rl_ws.base_training.base_env as W
 from rl_ws.base_training.robot_control import RampController
 from rl_ws.base_training.map_context import MapContext
 from rl_ws.global_navigator import (
+    make_navigator,
     build_platform_zone, plan_platform_route, plan_platform_route_with_obstacle,
-    plan_track_route, GlobalNavigator, quat_to_yaw, quat_to_grav_body,
+    plan_track_route, quat_to_yaw, quat_to_grav_body,
 )
 
 CHECKOUT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -156,10 +157,7 @@ class BaseMujocoEnv:
                 start_yaw=float(C.track_get(self.track, "spawn_yaw", 0.0)))
             self.goal_xy = np.asarray(goal_xy, dtype=np.float64)
             self._fixed_waypoints = waypoints
-            # El navegador de pallets necesita el JSON para los bordes/obstaculos
-            # del vortex (repulsion fina); el maze no tiene JSON.
-            self.nav = GlobalNavigator(self.track.get("nav_json"), waypoints=waypoints,
-                                       n_lookahead=C.N_LOOKAHEAD)
+            self.nav = make_navigator(self.track, waypoints, n_lookahead=C.N_LOOKAHEAD)
         else:
             # Plataforma: goal_xy inicial solo para la primera construccion --
             # el primer reset() ya sortea uno random y replanifica.
@@ -168,9 +166,8 @@ class BaseMujocoEnv:
             self.goal_xy = np.array(goal_xy, dtype=np.float64)
             if waypoints is None:
                 waypoints = plan_platform_route(C.START_XY, tuple(self.goal_xy))
-            self.nav = GlobalNavigator(None, waypoints=waypoints,
-                                       n_lookahead=C.N_LOOKAHEAD,
-                                       edges_zone=self._platform_zone)
+            self.nav = make_navigator(self.track, waypoints, n_lookahead=C.N_LOOKAHEAD,
+                                      edges_zone=self._platform_zone)
 
         self._rs = W.RewardState()
         self._ep_steps = 0

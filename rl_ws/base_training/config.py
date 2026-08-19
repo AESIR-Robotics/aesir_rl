@@ -342,9 +342,9 @@ REACH_DIST     = 0.10   # distancia a la que un waypoint cuenta como alcanzado
 MAX_GUIDE_DIST = 5.0    # normalizacion de la distancia en la obs (dist_norm)
 ATT_GAIN     = 1.0      # grado de atraccion (magnitud maxima del pull al waypoint)
 ATT_RANGE    = 0.1      # distancia sobre la que la atraccion crece de 0 a ATT_GAIN
-REP_GAIN     = 1.0      # grado de repulsion (magnitud maxima del push por fuente)
-REP_RANGE    = 0.1      # distancia (del cuerpo del robot) a la que empieza a repeler
-SWIRL        = 1.0      # peso de la componente tangencial (0 = APF plano, 1 = vortex)
+REP_GAIN     = 0.8      # grado de repulsion (magnitud maxima del push por fuente)
+REP_RANGE    = 0.06      # distancia (del cuerpo del robot) a la que empieza a repeler
+SWIRL        = 0.8      # peso de la componente tangencial (0 = APF plano, 1 = vortex)
 MIN_PROGRESS = 0.1      # fraccion de la atraccion que SIEMPRE sobrevive (garantia
                         # anti-minimo-local: la repulsion nunca frena mas del
                         # (1-MIN_PROGRESS) del avance hacia el waypoint)
