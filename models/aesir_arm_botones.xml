@@ -1,0 +1,68 @@
+<mujoco model="aesir_arm_botones">
+  <!--
+    aesir_arm_botones.xml — Mundo para entrenar SOLO EL BRAZO contra el panel
+    de botones. La base no se entrena: el env la congela (ver rl_ws/boton_env.py,
+    freeze_base=True), no hay pista ni navegacion.
+
+    Mismo compiler/option/visual que aesir_complete_*.xml (RADIANES) para que la
+    fisica del brazo sea identica a la de las pistas de entrenamiento de base.
+
+    Colocacion: robot en el origen mirando +X; la torre de botones
+    (models/torre_botones.xml, replica actuable de la del maze) con su eje en
+    x=0.55. Con esa distancia son alcanzables 4 de los 5 botones (verificado con
+    IK offline: `python3 tests/test_boton.py --reach`). El quinto es el del LADO
+    OPUESTO de la cupula: para ese hay que mover la base, que es justo lo que
+    esta tarea no entrena.
+  -->
+  <compiler angle="radian" autolimits="true" meshdir=""/>
+  <option timestep="0.002" iterations="50" tolerance="1e-10" cone="elliptic"/>
+  <size njmax="1000" nconmax="500" nstack="2000000"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
+    <rgba haze="0.15 0.25 0.35 1"/>
+    <map znear="0.01" zfar="50"/>
+    <!-- framebuffer offscreen grande: hace falta para renderizar
+         fotogramas de inspeccion sin abrir el viewer. -->
+    <global azimuth="150" elevation="-20" offwidth="1280" offheight="800"/>
+  </visual>
+
+  <asset>
+    <texture type="skybox" builtin="gradient" rgb1="0.4 0.6 0.8" rgb2="0 0 0" width="512" height="512"/>
+    <texture name="tex_piso_bot" type="2d" builtin="checker" rgb1="0.15 0.1 0.1" rgb2="0.08 0.05 0.05" width="512" height="512"/>
+    <material name="mat_piso_bot" texture="tex_piso_bot" texrepeat="20 20" texuniform="true" reflectance="0.1"/>
+  </asset>
+
+  <worldbody>
+    <light directional="true" pos="0 0 6" dir="0 0 -1"/>
+    <light directional="true" pos="-2 2 4" dir="0.4 -0.4 -1"/>
+    <geom name="suelo" type="plane" size="20 20 0.1" material="mat_piso_bot"
+          condim="3" friction="1 0.005 0.0001"/>
+  </worldbody>
+
+  <include file="aesir_mujoco_robot.xml"/>
+  <include file="torre_botones.xml"/>
+  <include file="botones_sueltos.xml"/>
+
+  <!--
+    Chasis SOLDADO al mundo. En esta tarea la base no se entrena y no debe
+    moverse, pero el brazo pesa 6.1 kg de los 46.8 del robot (13%) y moverlo SI
+    empuja al chasis: medido, hasta 5.9 mm y 1.17 grados dentro de un solo paso
+    de control de 25 substeps.
+
+    Congelarlo desde Python reescribiendo qpos/qvel del freejoint funciona, pero
+    obliga a hacerlo en CADA substep, y eso son 25 llamadas sueltas a mj_step por
+    paso en vez de una con nstep=25 -> 200 handoffs del GIL por paso vectorizado
+    y el paralelismo por hilos se evapora (medido: 1.27x con 8 envs en vez de
+    2.3x). Hacerlo una sola vez por paso de control deja al chasis moverse esos
+    5.9 mm y luego lo "teletransporta" de vuelta, que no es fisica.
+
+    La restriccion de igualdad la resuelve el solver en C en cada substep: sin
+    saltos, sin Python en el bucle interno. solref/solimp apretados para que la
+    deflexion residual sea despreciable.
+  -->
+  <equality>
+    <weld name="freeze_base" body1="footprint_link"
+          solref="0.0002 1" solimp="0.9999 0.9999 1e-6"/>
+  </equality>
+</mujoco>

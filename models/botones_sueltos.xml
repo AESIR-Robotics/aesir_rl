@@ -1,0 +1,97 @@
+<mujoco model="botones_sueltos">
+  <!--
+    botones_sueltos.xml — N botones INDEPENDIENTES, cada uno con su cuerpo raiz
+    movible.
+
+    Para que: la torre de torre_botones.xml ensena a presionar ESOS botones en
+    ESAS cinco posiciones. Con estos, cada episodio pone un boton donde quiera
+    dentro del alcance del brazo y con la orientacion que quiera, asi que lo
+    aprendido es "ve a estas coordenadas y empuja en esta direccion" en vez de
+    memorizar cinco casos.
+
+    Mecanismo IDENTICO al de la torre (mismo joint, mismo muelle de 500 N/m,
+    misma carrera de 18 mm, misma geometria de cabeza) para que la habilidad sea
+    la misma y los dos modos se puedan mezclar en un entrenamiento.
+
+    Colocacion: en runtime con model.body_pos/body_quat del cuerpo raiz. Los que
+    no se usan se aparcan en z=-5, fuera de juego -- mismo patron que
+    'virtual_obstacle' en plataform.xml.
+
+    El +Z local del cuerpo raiz es la NORMAL SALIENTE (hacia donde mira el
+    boton). El slide va en -Z, hacia dentro: presionar es hundir. Ver la nota
+    del signo en torre_botones.xml, que es el bug que costo cuatro corridas.
+  -->
+
+  <default>
+    <default class="libre_hub">
+      <geom type="cylinder" rgba="0.80 0.30 0.15 1" condim="3" friction="1 0.005 0.0001"/>
+    </default>
+    <default class="libre_stem">
+      <geom type="cylinder" rgba="0.35 0.37 0.40 1" contype="0" conaffinity="0" group="1"/>
+    </default>
+    <default class="libre_head">
+      <geom type="cylinder" rgba="0.20 0.60 0.85 1" condim="4" friction="2.0 0.02 0.001"/>
+    </default>
+    <default class="libre_joint">
+      <joint type="slide" axis="0 0 -1" limited="true" range="0 0.018"
+             stiffness="500" springref="0" damping="3" armature="0.001"/>
+    </default>
+  </default>
+
+  <worldbody>
+    <body name="libre_0" pos="0 0 -5">
+      <geom name="libre_0_hub"  class="libre_hub"  size="0.045 0.040" pos="0 0 -0.010"/>
+      <body name="libre_0_head_body">
+        <joint name="libre_0_slide" class="libre_joint"/>
+        <geom name="libre_0_stem" class="libre_stem" size="0.012 0.011" pos="0 0 0.041"/>
+        <geom name="libre_0_head" class="libre_head" size="0.026 0.012" pos="0 0 0.064"/>
+        <site name="libre_0_target" pos="0 0 0.076" size="0.005" rgba="1 1 0 0.35"/>
+      </body>
+    </body>
+
+    <body name="libre_1" pos="0 0 -5">
+      <geom name="libre_1_hub"  class="libre_hub"  size="0.045 0.040" pos="0 0 -0.010"/>
+      <body name="libre_1_head_body">
+        <joint name="libre_1_slide" class="libre_joint"/>
+        <geom name="libre_1_stem" class="libre_stem" size="0.012 0.011" pos="0 0 0.041"/>
+        <geom name="libre_1_head" class="libre_head" size="0.026 0.012" pos="0 0 0.064"/>
+        <site name="libre_1_target" pos="0 0 0.076" size="0.005" rgba="1 1 0 0.35"/>
+      </body>
+    </body>
+
+    <body name="libre_2" pos="0 0 -5">
+      <geom name="libre_2_hub"  class="libre_hub"  size="0.045 0.040" pos="0 0 -0.010"/>
+      <body name="libre_2_head_body">
+        <joint name="libre_2_slide" class="libre_joint"/>
+        <geom name="libre_2_stem" class="libre_stem" size="0.012 0.011" pos="0 0 0.041"/>
+        <geom name="libre_2_head" class="libre_head" size="0.026 0.012" pos="0 0 0.064"/>
+        <site name="libre_2_target" pos="0 0 0.076" size="0.005" rgba="1 1 0 0.35"/>
+      </body>
+    </body>
+
+    <body name="libre_3" pos="0 0 -5">
+      <geom name="libre_3_hub"  class="libre_hub"  size="0.045 0.040" pos="0 0 -0.010"/>
+      <body name="libre_3_head_body">
+        <joint name="libre_3_slide" class="libre_joint"/>
+        <geom name="libre_3_stem" class="libre_stem" size="0.012 0.011" pos="0 0 0.041"/>
+        <geom name="libre_3_head" class="libre_head" size="0.026 0.012" pos="0 0 0.064"/>
+        <site name="libre_3_target" pos="0 0 0.076" size="0.005" rgba="1 1 0 0.35"/>
+      </body>
+    </body>
+
+  </worldbody>
+
+  <contact>
+    <exclude body1="libre_0" body2="libre_0_head_body"/>
+    <exclude body1="libre_1" body2="libre_1_head_body"/>
+    <exclude body1="libre_2" body2="libre_2_head_body"/>
+    <exclude body1="libre_3" body2="libre_3_head_body"/>
+  </contact>
+
+  <sensor>
+    <jointpos name="libre_0_pos" joint="libre_0_slide"/>
+    <jointpos name="libre_1_pos" joint="libre_1_slide"/>
+    <jointpos name="libre_2_pos" joint="libre_2_slide"/>
+    <jointpos name="libre_3_pos" joint="libre_3_slide"/>
+  </sensor>
+</mujoco>
