@@ -84,9 +84,17 @@
          el boton un 19.6% EN REPOSO: la posicion de "suelto" no era 0. A 500
          N/m la flecha por gravedad baja a ~2% y presionar los 18 mm pide ~9 N,
          de sobra para el brazo (los actuadores de muñeca dan +-16 N.m). -->
+    <!-- El tope del recorrido es una RESTRICCION, y por defecto es blanda: bajo
+         empuje fuerte el boton se hunde MAS ALLA de sus 18 mm. Medido con la
+         politica entrenada: llegaba a 41 mm, 2.3 veces su carrera. (El mismo
+         mecanismo, en grande, dio el bug de los 0.68 m cuando un boton aparcado
+         caia libre.) press_frac lo recorta a 1.0, asi que no se ve en las
+         metricas, pero en el robot real es forzar el pulsador contra su fondo.
+         solreflimit/solimplimit apretados endurecen ese tope. -->
     <default class="torre_joint">
       <joint type="slide" axis="0 0 -1" limited="true" range="0 0.018"
-             stiffness="500" springref="0" damping="3" armature="0.001"/>
+             stiffness="500" springref="0" damping="3" armature="0.001"
+             solreflimit="0.002 1" solimplimit="0.99 0.999 0.001"/>
     </default>
   </default>
 

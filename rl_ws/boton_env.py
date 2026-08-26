@@ -97,9 +97,10 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import mujoco
 
-# Escalas del twist e IK amortiguada: se importan de arm_env para que sigan
-# atadas a servo_params.yaml en un solo sitio.
-from arm_env import MAX_LINEAR_VEL, MAX_ANGULAR_VEL, DLS_DAMPING
+# IK amortiguada compartida con arm_env.
+from arm_env import DLS_DAMPING
+from arm_env import MAX_LINEAR_VEL as SERVO_SCALE_LINEAR
+from arm_env import MAX_ANGULAR_VEL as SERVO_SCALE_ANGULAR
 
 # ──────────────────────────── Constantes ───────────────────────────────────
 _HERE     = os.path.dirname(os.path.abspath(__file__))
@@ -342,6 +343,71 @@ SING_COND_STOP     = 100.0
 # en vez de quedar el brazo suelto sin tope.
 TCP_SPEED_MAX      = 3.0    # m/s
 
+# ── PRECISION ANTES QUE VELOCIDAD ───────────────────────────────────────────
+# Escala del twist comandado. arm_env/servo_params.yaml usan 1.0 m/s y 1.0
+# rad/s; aqui se baja porque la tarea es de PRECISION, no de rapidez, y con el
+# valor alto la politica arrancaba a fondo: medido sobre la politica entrenada,
+# |accion lineal| = 0.85 de 1.0 en el paso 0 del episodio, cuando su media a lo
+# largo del episodio es 0.10. O sea, un lunge inicial seguido de ajuste fino.
+#
+# OJO PARA DESPLIEGUE: si se baja aqui hay que bajar scale.linear y
+# scale.rotational en servo_params.yaml EXACTAMENTE IGUAL, o el robot real se
+# movera 2.5x mas rapido que lo entrenado. No se toca ese archivo desde aqui.
+MAX_LINEAR_VEL     = 0.40   # m/s   (servo_params.yaml scale.linear seria 0.40)
+MAX_ANGULAR_VEL    = 0.60   # rad/s (servo_params.yaml scale.rotational = 0.60)
+
+# Topes POR ARTICULACION, no globales. El tope unico de 3.14 rad/s no distingue
+# entre el hombro y la muñeca, y son muy distintos: joint_4/5/6 tienen
+# actuatorfrcrange de +-16 N.m en el XML frente a los +-100/+-200 de los
+# eslabones grandes. Son las articulaciones DEBILES, y son las que mueven la
+# garra entera: forzarlas es lo que la dobla.
+#
+# Medido sobre la politica entrenada (max por joint, rad/s):
+#     j1=2.76  j2=2.66  j3=2.22  j4=1.61  j5=1.81  j6=0.60
+# y en aceleracion (max, rad/s^2):
+#     j1=27.4  j2=34.1  j3=18.3  j4=22.0  j5=18.9  j6=10.3
+# o sea hasta 3.4x la referencia de 10 rad/s^2 de config.ARM_JOINT_LIMITS.
+ARM_VEL_MAX = np.array([1.50, 1.50, 1.50, 1.00, 1.00, 0.80])   # rad/s
+ARM_ACC_MAX = np.array([8.00, 8.00, 8.00, 5.00, 5.00, 4.00])   # rad/s^2
+
+# ── ANTI-WINDUP: que el hombro no reviente la muñeca ────────────────────────
+# La accion se integra en una posicion comandada (_joint_pos) que va a unos
+# actuadores <position kp=200>. Cuando la garra topa con el boton, el brazo deja
+# de avanzar pero el integrador SIGUE, asi que el comando se separa de la
+# posicion real y el par crece sin freno: hombro y codo empujan contra un
+# obstaculo y la muñeca, que es la pieza debil, se lleva la reaccion y se dobla.
+#
+# Medido sobre la politica entrenada, par del actuador contra su tope del XML:
+#     joint_3: 112.5 N.m de 100     joint_4: 26.5 de 16
+#     joint_5:  68.8 N.m de  16  <- 4.3 veces su nominal
+#
+# El limite es geometrico: con un servo de posicion, par = kp * desfase. Luego
+# acotar el desfase a (tope_de_par / kp) hace que el actuador NO PUEDA superar
+# su par nominal, pase lo que pase. No es un numero elegido: sale de
+# actuatorfrcrange del XML dividido por kp, y se recalcula del modelo en el
+# __init__ por si el XML cambia.
+#
+# Es tambien lo que hace un variador real (anti-windup del lazo de posicion), y
+# lo que evita que en el robot de verdad se rompa la muñeca empujando.
+ANTIWINDUP = True
+# Margen de seguridad sobre el desfase maximo. El recorte se aplica entre
+# tramos de subpasos, no en cada subpaso, asi que el desfase real puede
+# rebasar un poco el nominal antes de que le toque el recorte. Con 0.85 el
+# rebase cabe dentro del par nominal en vez de superarlo.
+LAG_SAFETY = 0.85
+
+# El paso de control (CONTROL_DECIMATION subpasos) se parte en tramos, y entre
+# tramos se vuelve a aplicar el anti-windup y la compensacion de gravedad.
+#
+# Por que no en cada subpaso: mj_step con nstep hace el bucle en C y suelta el
+# GIL UNA vez; llamarlo 25 veces sueltas mata el paralelismo por hilos (medido:
+# 1.27x en vez de 2.3x con 8 envs). Por que no una sola vez: recortando solo al
+# principio, el contacto empuja el brazo durante los 25 subpasos y el desfase
+# crece sin freno -- medido, 0.132 rad de desfase con un tope de 0.080 y 26.3
+# N.m de par en joint_4 sobre un nominal de 16.
+# 5 tramos de 5 subpasos es el punto medio: 5 sueltas de GIL en vez de 25.
+SUBPASOS_POR_TRAMO = 5
+
 # ── Pesos del reward ────────────────────────────────────────────────────────
 # CALIBRACION. Lo que importa no es cada peso por separado sino la distancia
 # entre conductas. Medido sobre episodios completos de 300 pasos:
@@ -515,6 +581,13 @@ class BotonArmEnv:
         self._arm_lo = self._arm_lo_hw + ARM_SOFT_MARGIN_RAD
         self._arm_hi = self._arm_hi_hw - ARM_SOFT_MARGIN_RAD
 
+        # Desfase maximo comando-real por articulacion = par nominal / kp.
+        # Con eso el actuador de posicion no puede pasar de su par del XML.
+        kp = np.array([float(m.actuator_gainprm[a, 0]) for a in self._a_arm])
+        par_max = np.array([float(np.abs(m.jnt_actfrcrange[j]).max())
+                            for j in self._j_arm])
+        self._lag_max = par_max / np.maximum(kp, 1e-6)
+
         # ── dedos ──────────────────────────────────────────────────────────
         self._a_flip = np.array([aid(n) for n in FLIPPER_ACTS], dtype=np.int32)
         self._q_flip = np.array([m.jnt_qposadr[jid(n)] for n in FLIPPER_JOINTS],
@@ -597,6 +670,7 @@ class BotonArmEnv:
         self.obs_len = 28
 
         self._joint_pos  = np.zeros(6)      # integrador de la IK
+        self._qvel_cmd_prev = np.zeros(6)   # velocidad comandada anterior (rampa)
         self._prev_frac_dedo = 0.0
         self._hold = self._hold_best = self._prev_hold_best = 0
         self._tocado = False
@@ -709,29 +783,58 @@ class BotonArmEnv:
         qvel_arm = _dls_joint_vel(self.model, self.data, self.tcp(), self._b_l6,
                                   self._v_arm, R_ab, twist)
 
-        # TOPE DURO de velocidad articular, no solo castigo. MoveIt Servo escala
-        # el twist entero cuando la IK pide mas de lo que joint_limits.yaml
-        # permite; si aqui solo se castigara, la politica aprende a pagar el
-        # castigo y a moverse mas rapido de lo que el robot real la dejara, y lo
-        # aprendido no transfiere. La auditoria de la politica entrenada lo
-        # encontro: 45 pasos de 1294 por encima del tope, con pico de 4.61 rad/s
-        # frente a los 3.14 declarados (47% de exceso).
-        # Se escala el VECTOR entero, no se recorta componente a componente: eso
-        # conserva la direccion del movimiento (que es lo que hace Servo) en vez
-        # de torcerla.
-        v_max = float(np.abs(qvel_arm).max())
-        if v_max > JOINT_VEL_MAX:
-            qvel_arm *= JOINT_VEL_MAX / v_max
+        # TOPES DUROS, no castigos. Un castigo con techo (0.30) contra un bonus
+        # de 250 sale rentable pagarlo: la politica aprende a superarlo y lo
+        # aprendido no transfiere, porque el robot real si tiene los topes.
+        #
+        # 1) VELOCIDAD por articulacion. Se escala el VECTOR entero por el factor
+        #    mas restrictivo, no componente a componente: eso conserva la
+        #    direccion del movimiento (que es lo que hace MoveIt Servo) en vez de
+        #    torcerla, cosa que en una tarea de precision importa.
+        exceso = np.abs(qvel_arm) / ARM_VEL_MAX
+        if exceso.max() > 1.0:
+            qvel_arm = qvel_arm / exceso.max()
+
+        # 2) ACELERACION por articulacion: rampa. Limita cuanto puede CAMBIAR la
+        #    velocidad comandada entre pasos de control. Es la misma idea que las
+        #    rampas AVR446 que base_training/robot_control.py aplica a orugas y
+        #    flippers, y que el bridge de despliegue reproduce. Sin esto el
+        #    movimiento sale a tirones: medido, hasta 34 rad/s^2 en joint_2.
+        dv = qvel_arm - self._qvel_cmd_prev
+        lim = ARM_ACC_MAX * self._dt
+        exc_a = np.abs(dv) / lim
+        if exc_a.max() > 1.0:
+            dv = dv / exc_a.max()
+        qvel_arm = self._qvel_cmd_prev + dv
+        self._qvel_cmd_prev = qvel_arm.copy()
 
         self._joint_pos = np.clip(self._joint_pos + qvel_arm * self._dt,
                                   self._arm_lo, self._arm_hi)
-        self.data.ctrl[self._a_arm] = self._joint_pos
+
+        self._aplicar_antiwindup()
 
         # un solo valor para los dos dedos: -1 abierta, +1 cerrada
         grip = float((a[6] + 1.0) / 2.0 * FINGER_CLOSED)
         self.data.ctrl[self._a_fing] = grip
 
         self.data.ctrl[self._a_lidar] = 0.0
+
+    def _aplicar_antiwindup(self) -> None:
+        """ANTI-WINDUP. El comando no puede separarse de la posicion REAL mas de
+        lo que da el par nominal de cada articulacion (par = kp * desfase). Si la
+        garra esta bloqueada contra el boton, el integrador deja de correr por
+        delante y el hombro no puede seguir empujando contra la muñeca.
+
+        Se llama al comandar la accion Y entre tramos de subpasos, porque el
+        contacto puede empujar el brazo mientras la fisica avanza: recortando
+        solo al principio del paso de control, el desfase llegaba a 0.132 rad
+        con un tope de 0.080 (medido)."""
+        if not ANTIWINDUP:
+            return
+        q_real = self.data.qpos[self._q_arm]
+        lag = self._lag_max * LAG_SAFETY
+        np.clip(self._joint_pos, q_real - lag, q_real + lag, out=self._joint_pos)
+        self.data.ctrl[self._a_arm] = self._joint_pos
 
     # ── colocacion de botones ──────────────────────────────────────────────
     def _pose_libre(self, p_sh: np.ndarray, R_ab: np.ndarray):
@@ -1244,6 +1347,7 @@ class BotonArmEnv:
             j = self._id(mujoco.mjtObj.mjOBJ_JOINT, name)
             d.qpos[m.jnt_qposadr[j]] = q
         self._joint_pos = np.array([ARM_REST_POSE[n] for n in ARM_JOINTS])
+        self._qvel_cmd_prev = np.zeros(6)   # el episodio arranca desde parado
         d.ctrl[self._a_arm]  = self._joint_pos
         # Flippers plegados y fuera del camino del brazo (ver FLIPPER_STOW_RAD).
         d.qpos[self._q_flip] = FLIPPER_STOW_RAD
@@ -1369,8 +1473,16 @@ class BotonArmEnv:
             # asi que no hace falta entrar en el bucle interno desde Python.
             # grav-comp una vez por paso de control: qfrc_applied persiste
             # (mismo tratamiento que mujoco_sim_base._grav_comp_arm).
-            self._grav_comp_arm()
-            mujoco.mj_step(self.model, self.data, nstep=self.control_decimation)
+            # Tramos de subpasos con anti-windup entre medias (ver
+            # SUBPASOS_POR_TRAMO). Sin esto el desfase crece durante los 25
+            # subpasos y la muñeca acaba forzada.
+            restantes = self.control_decimation
+            while restantes > 0:
+                n = min(SUBPASOS_POR_TRAMO, restantes)
+                self._grav_comp_arm()
+                mujoco.mj_step(self.model, self.data, nstep=n)
+                self._aplicar_antiwindup()
+                restantes -= n
         else:
             for _ in range(self.control_decimation):
                 self._hold_base()
