@@ -45,11 +45,24 @@ C.CHECKPOINT_DIR.mkdir(exist_ok=True)
 def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
           batch_size=C.SAC_BATCH_SIZE, lr=C.SAC_LR, utd=C.SAC_UTD,
           save_every=C.SAVE_EVERY, use_wandb=False, resume_from=None,
-          device_str=C.DEVICE):
+          device_str=C.DEVICE, seed=None, ckpt_dir=None, run_name=None):
 
     device = torch.device("cuda" if (device_str == "auto" and torch.cuda.is_available())
                           else device_str if device_str != "auto" else "cpu")
     print(f"Dispositivo: {device}")
+
+    if seed is not None:
+        np.random.seed(seed)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        print(f"Semilla: {seed}  (separa corridas; no reproducible bit a bit "
+              f"por el paralelismo en threads)")
+
+    # Directorio propio por corrida para que las semillas no se pisen los
+    # checkpoints (todas escriben sac_iterNNNNN.pt).
+    ckpt_dir = Path(ckpt_dir) if ckpt_dir else C.CHECKPOINT_DIR
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Checkpoints: {ckpt_dir}")
 
     venv = VecMujocoEnv(n_envs=n_envs)
     obs_dim = venv.obs_dim
@@ -88,7 +101,7 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
 
     use_wandb = use_wandb and _HAS_WANDB
     if use_wandb:
-        wandb.init(project=C.WANDB_PROJECT_SAC, config=dict(
+        wandb.init(name=run_name, project=C.WANDB_PROJECT_SAC, config=dict(
             algo="SAC", n_envs=n_envs, batch_size=batch_size, lr=lr, utd=utd,
             buffer=C.SAC_BUFFER_SIZE, tau=C.SAC_TAU, gamma=C.SAC_GAMMA,
             target_entropy=C.SAC_TARGET_ENTROPY, reward_scale=C.SAC_REWARD_SCALE,
@@ -163,7 +176,7 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
                 wandb.log(log)
 
             if (it + 1) % save_every == 0:
-                p = C.CHECKPOINT_DIR / f"sac_iter{it+1:05d}.pt"
+                p = ckpt_dir / f"sac_iter{it+1:05d}.pt"
                 torch.save({"iter": it + 1, "actor": actor.state_dict(),
                             "critic": critic.state_dict(),
                             "critic_targ": critic_targ.state_dict(),
@@ -188,7 +201,14 @@ if __name__ == "__main__":
     ap.add_argument("--utd", type=float, default=C.SAC_UTD)
     ap.add_argument("--wandb", action="store_true")
     ap.add_argument("--resume", default=None)
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Semilla de numpy/torch. Separa corridas; no da "
+                         "reproducibilidad bit a bit (envs en threads).")
+    ap.add_argument("--ckpt-dir", default=None,
+                    help="Directorio de checkpoints propio de esta corrida.")
+    ap.add_argument("--name", default=None, help="Nombre de la corrida en wandb.")
     args = ap.parse_args()
     train(n_envs=args.n_envs, steps_per_env=args.steps, iters=args.iters,
           batch_size=args.batch, lr=args.lr, utd=args.utd,
-          use_wandb=args.wandb, resume_from=args.resume)
+          use_wandb=args.wandb, resume_from=args.resume,
+          seed=args.seed, ckpt_dir=args.ckpt_dir, run_name=args.name)

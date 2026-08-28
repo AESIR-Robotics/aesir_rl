@@ -74,6 +74,10 @@ def load_policy(path: str, obs_dim: int, act_dim: int, device, algo: str = "ppo"
     else:
         k, expected = "state_encoder.0.weight", obs_dim - C.HEATMAP_PIXELS ** 2
     ckpt_in = int(saved[k].shape[1])
+    ckpt_hidden = int(saved[k].shape[0])
+    if ckpt_hidden != C.HIDDEN:
+        print(f"[test_base] el checkpoint usa hidden={ckpt_hidden} y config dice "
+              f"{C.HIDDEN}; se construye la red con la del checkpoint.")
     if ckpt_in != expected:
         raise SystemExit(
             f"El checkpoint no coincide con el env: checkpoint(entrada={ckpt_in}) "
@@ -81,9 +85,10 @@ def load_policy(path: str, obs_dim: int, act_dim: int, device, algo: str = "ppo"
             f"Usa un .pt entrenado con esta misma configuracion.")
 
     if algo == "sac":
-        policy = SacActor(obs_dim, C.SAC_ACT_DIM, map_pixels=C.HEATMAP_PIXELS).to(device)
+        policy = SacActor(obs_dim, C.SAC_ACT_DIM, map_pixels=C.HEATMAP_PIXELS,
+                          hidden=ckpt_hidden).to(device)
     elif is_mlp:
-        policy = MLPActorCritic(obs_dim, act_dim).to(device)
+        policy = MLPActorCritic(obs_dim, act_dim, hidden=ckpt_hidden).to(device)
     else:
         if "actor_gate.weight" in saved:
             raise SystemExit(
@@ -94,7 +99,8 @@ def load_policy(path: str, obs_dim: int, act_dim: int, device, algo: str = "ppo"
                 f"'{os.path.basename(path)}' tiene sigma dependiente del estado "
                 f"(actor_logstd), variante rechazada; esta red usa sigma global. "
                 f"Ver docs/sigma_estado.md.")
-        policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS).to(device)
+        policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS,
+                                hidden=ckpt_hidden).to(device)
     policy.load_state_dict(saved)
     policy.eval()
     extra = (f"success={ckpt['success_rate']:.1%}" if "success_rate" in ckpt
