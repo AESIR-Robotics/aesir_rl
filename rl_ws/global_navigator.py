@@ -962,7 +962,8 @@ class TrackMap:
 # de un XML de MuJoCo, de un JSON o de donde sea; solo recibe AABB. Añadir una
 # pista nueva es escribir su extractor, no otro planificador.
 
-def obstacles_from_mujoco(xml_path: str, robot_top: float = ROBOT_TOP_M):
+def obstacles_from_mujoco(xml_path: str, robot_top: float = ROBOT_TOP_M,
+                          name_filter: str = None):
     """Cajas de colision de un XML de MuJoCo que NO son del robot -> AABB (N,4).
 
     Descarta las que empiezan por encima de `robot_top`: son dinteles de puerta
@@ -982,6 +983,14 @@ def obstacles_from_mujoco(xml_path: str, robot_top: float = ROBOT_TOP_M):
             continue                            # geom puramente visual
         if int(model.body_rootid[model.geom_bodyid[g]]) == robot_root:
             continue                            # el robot no es pared
+        # Pistas donde solo ALGUNAS cajas son pared: en steps2 los 407 geoms
+        # "steps2_col_*" son escalones que SE PISAN, y solo los 9 "steps2_wall_*"
+        # delimitan el circuito. Sin este filtro el planificador daria el campo
+        # entero por intransitable. Las pistas sin `wall_prefix` no lo usan.
+        if name_filter is not None:
+            nm = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
+            if name_filter not in nm:
+                continue
         pos = np.asarray(data.geom_xpos[g], dtype=float)
         rot = np.asarray(data.geom_xmat[g], dtype=float).reshape(3, 3)
         # AABB de la caja (posiblemente rotada) = |R| @ half, conservador.
@@ -1054,7 +1063,8 @@ def get_track_map(track: dict = None) -> TrackMap:
                       res=track_get(track, "grid_res", GRID_RESOLUTION),
                       gap_bridge=GAP_BRIDGE_DISTANCE, name=track.get("name", "pallets"))
     else:
-        tm = TrackMap(obstacles_from_mujoco(track["xml"]),
+        tm = TrackMap(obstacles_from_mujoco(track["xml"],
+                                            name_filter=track.get("wall_prefix")),
                       spawn_xy=track_get(track, "spawn_xy", (0.0, 0.0)),
                       spawn_yaw=float(track_get(track, "spawn_yaw", 0.0)),
                       res=track_get(track, "grid_res", GRID_RESOLUTION),

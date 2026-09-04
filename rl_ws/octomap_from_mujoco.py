@@ -282,6 +282,8 @@ _TRACK_XMLS = {
     "ramps":   os.path.join(_PROJECT_ROOT, "models", "track_ramps.xml"),
     "pallets": os.path.join(_PROJECT_ROOT, "models", "track_pallets.xml"),
     "maze":    os.path.join(_PROJECT_ROOT, "models", "maze.xml"),
+    "steps1m": os.path.join(_PROJECT_ROOT, "models", "track_steps1m.xml"),
+    "steps2":  os.path.join(_PROJECT_ROOT, "models", "steps2.xml"),
 }
 
 

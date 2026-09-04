@@ -67,6 +67,10 @@ TRACKS_DIR = os.path.join(RL_WS, "tracks")
 #                 bootstrapear). Con valor fijo, todos los episodios corren la
 #                 MISMA mision -- que es lo que quieres en pallets y similares
 #   finish_dist   a que distancia de la meta cuenta como alcanzada
+#   wall_prefix   SOLO para pistas donde una parte de las cajas del XML no son
+#                 pared sino terreno que se pisa (steps2). Es el trozo de nombre
+#                 que identifica a las que SI son pared; el extractor ignora el
+#                 resto. None (lo normal) = toda caja de colision es pared.
 #   grid_res      celda (m) de la rejilla del planificador. Las platform son
 #                 20x20 m con UN obstaculo de 60 cm: a 0.05 serian 401x401
 #                 celdas para una precision que ahi no compra nada
@@ -107,6 +111,16 @@ TRACK_DEFS = {
         spawn_z=0.45, settle_steps=150,          # rampas hasta z=0.28
         goal_xy=None,
         fall_z_min=0.10, finish_dist=0.20, grid_res=0.15),
+    "steps2": dict(
+        kind="maze",
+        xml=os.path.join(_MODELS, "aesir_complete_steps2.xml"),
+        bt=os.path.join(TRACKS_DIR, "steps2", "occupied_map.bt"),
+        nav_json=None,
+        spawn_xy=(0.60, -0.15), spawn_yaw=1.5708,    # frente a la entrada, mirando a +y
+        spawn_z=0.80, settle_steps=150,
+        goal_xy=(1.80, 4.95),                        # ya fuera, pasada la salida
+        fall_z_min=-0.20, finish_dist=0.20, wall_prefix="steps2_wall",
+        grid_res=0.05),
     "pallets": dict(
         kind="pallets",
         xml=os.path.join(_MODELS, "aesir_complete_pallets.xml"),
@@ -140,7 +154,7 @@ def track_get(track: dict, key: str, default):
 
 # Pistas ACTIVAS para entrenar: una o varias — VecMujocoEnv las reparte entre
 # los envs (round-robin). Ej: ["flat"], ["steps"], ["flat","steps","ramps"].
-ACTIVE_TRACKS = ["pallets", "ramps", "steps1m", "flat"]
+ACTIVE_TRACKS = ["steps2", "ramps", "steps1m", "steps2"]
 
 # Compatibilidad: el "mundo por default" (bridge ROS, scripts single-track) es
 # la PRIMERA pista activa. Para probar otra pista por ROS, cambia el orden.

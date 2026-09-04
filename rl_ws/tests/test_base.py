@@ -239,12 +239,12 @@ class LiveTrajectoryPlot:
 
         # ── Fondo estatico del mundo activo ─────────────────────────────────
         if self.kind == "maze":
-            # Paredes del laberinto: se pintan las MISMAS cajas que usa el
+            # Paredes de la pista: se pintan las MISMAS cajas que usa el
             # planeador (TrackMap.walls, ya filtradas por altura), asi lo que ves
             # es exactamente el mapa contra el que se planeo la ruta — no un
             # dibujo aparte que pueda desincronizarse del XML.
             from rl_ws.global_navigator import get_track_map
-            mmap = get_track_map()
+            mmap = get_track_map(C.TRACK_DEFS[C.ACTIVE_TRACKS[0]])
             for x0, y0, x1, y1 in mmap.walls:
                 ax.add_patch(Rectangle((x0, y0), x1 - x0, y1 - y0,
                                        fc="#4b5566", ec="#8494a8", lw=0.4, zorder=1))

@@ -46,7 +46,14 @@
     <!-- El piso va a z=-0.009 (el espesor de la losa base) para que la
          superficie pisable de la pista quede EXACTAMENTE en z=0 y no
          haya z-fighting con la losa. -->
-    <geom name="steps2_floor" type="plane" size="50 50 0.1" pos="0 0 -0.009" material="matplane"/>
+    <!-- Suelo pisable recortado al circuito (+0.55 m de delantal SOLO en Y, para
+         la entrada de abajo y la salida de arriba). Es una CAJA, no un plano: en
+         MuJoCo el `plane` colisiona como semiespacio INFINITO (el size solo es de
+         dibujo), asi que con el plano de 50x50 original el robot podia rodear el
+         circuito por fuera de las paredes. Fuera de la caja no hay suelo: cae al
+         plano por defecto (z=-1) y el episodio termina por fall_z_min.
+         La cara superior queda en z=-0.009, donde apoyan los escalones. -->
+    <geom name="steps2_floor" type="box" size="1.209 2.953 0.1" pos="1.209 2.403 -0.109" material="matplane"/>
 
     <!-- Visual: los vertices del mesh ya estan en coordenadas de mundo. -->
     <body name="steps2_base">

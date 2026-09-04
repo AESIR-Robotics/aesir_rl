@@ -3,9 +3,15 @@
 make_figures_v2.py -- Figuras del paper SII sobre la tanda NUEVA (post-lattice).
 
 Se separa de make_figures.py a proposito: aquel lee la tanda de agosto
-(`seed?.log`, `e8_seed?.log`, ...) y esta lee E1'/E4' (`e1p_seed?.log`,
-`e4p_seed?.log`), que son otro sistema. Mezclarlas en un script daria figuras
-que promedian condiciones no comparables.
+(`seed?.log`, `e8_seed?.log`, ...) y esta lee la tanda post-lattice
+(`e1p_seed?.log`), que es otro sistema. Mezclarlas daria figuras que promedian
+condiciones no comparables.
+
+NO hay figuras que contrasten con y sin flippers: que un robot oruga necesite
+flippers para subir escalones no es una pregunta de este trabajo, y una figura
+organizada alrededor de esa comparacion le daria el protagonismo a lo unico
+obvio que hay medido. La unica comparacion que queda es la del gate (figE),
+que si es un hallazgo.
 
 Misma paleta y mismo estilo que make_figures.py para que las figuras del paper
 se lean como una sola familia.
@@ -33,7 +39,10 @@ DIV_NEG, NEUTRAL = "#e34948", "#f0efec"
 INK, INK2, INK3 = "#0b0b0b", "#52514e", "#8a8983"
 
 TRACKS = ["flat", "ramps", "steps1m", "pallets"]
-WIN = (250, 300)          # ventana de reporte: la meseta del sistema nuevo
+WIN = (250, 300)   # ventana de reporte: la meseta del sistema con lattice
+# Umbral de "corrida muerta". No es un juicio: la separacion es bimodal y de 33
+# puntos (convergidas 41.9-53.1%, muertas 6.4-9.2%), sin nada en medio.
+DEAD_T = 0.15
 
 plt.rcParams.update({
     "figure.dpi": 160, "savefig.dpi": 300, "savefig.bbox": "tight",
@@ -79,70 +88,76 @@ def win_mean(its, y, lo=WIN[0], hi=WIN[1]):
     return float(np.nanmean(y[m]))
 
 
-# ── fig A: curvas por semilla, E1' vs E4' ────────────────────────────────────
-def figA(E1, E4, out):
-    """Curvas individuales. La semilla muerta de E1' SE VE: es un resultado,
-    no un defecto que esconder promediando."""
-    fig, ax = plt.subplots(figsize=(5.4, 3.2))
-    for i, (name, its, sr, *_ ) in enumerate(E1):
+# ── fig A: curvas por semilla del sistema completo ───────────────────────────
+def figA(E1, out):
+    """Curvas por semilla del sistema completo. Las que nunca despegaron SE VEN:
+    la bimodalidad del entrenamiento es el resultado, no un defecto que esconder
+    promediando. No se contrasta contra la condicion sin flippers: que un robot
+    oruga necesite flippers no es una pregunta de este trabajo."""
+    fig, ax = plt.subplots(figsize=(5.6, 3.3))
+    n_dead = first_conv = first_dead = 0
+    for name, its, sr, *_ in E1:
         x, y = its[14:], smooth(sr)
-        dead = win_mean(its, sr) < .15
-        ax.plot(x, y, color=CAT[0], lw=1.8 if not dead else 1.2,
-                ls="-" if not dead else (0, (3, 2)), alpha=1 if not dead else .75,
-                label="Flipper control" if i == 0 else None)
-        if dead:
-            j = len(x) // 2
-            ax.annotate("1 of 3 seeds never took off", xy=(x[j], y[j]),
-                        xytext=(0, -16), textcoords="offset points",
-                        ha="center", fontsize=7.5, color=DIV_NEG, style="italic")
-    for i, (name, its, sr, *_) in enumerate(E4):
-        ax.plot(its[14:], smooth(sr), color=CAT[1], lw=1.6,
-                label="Flippers parked" if i == 0 else None)
+        dead = win_mean(its, sr) < DEAD_T
+        n_dead += dead
+        lab = None
+        if dead and not first_dead:
+            lab, first_dead = "Never left the initial policy", 1
+        elif not dead and not first_conv:
+            lab, first_conv = "Converged", 1
+        ax.plot(x, y, color=DIV_NEG if dead else CAT[0], lw=1.2 if dead else 1.8,
+                ls=(0, (3, 2)) if dead else "-", alpha=.85 if dead else 1, label=lab)
     ax.axvspan(WIN[0], WIN[1] - 1, color=INK3, alpha=.07, lw=0)
-    ax.text(WIN[0] + 2, .02, "reporting window", fontsize=7, color=INK2, style="italic")
+    ax.text(WIN[0] + 3, .015, "reporting window", fontsize=7, color=INK2, style="italic")
+    ax.text(.02, .95, f"{n_dead} of {len(E1)} runs never left the initial policy",
+            transform=ax.transAxes, fontsize=7.5, color=INK2, va="top")
     ax.set_xlabel("PPO iteration"); ax.set_ylabel("Success rate")
     ax.set_title("Per-seed learning curves", loc="left")
-    ax.legend(loc="upper left"); style(ax)
+    ax.legend(loc="center left", bbox_to_anchor=(.02, .62)); style(ax)
     save(fig, out, "v2_fig1_learning_curves")
 
 
-# ── fig B: barras por pista con puntos de semilla ────────────────────────────
-def figB(E1, E4, out):
-    fig, ax = plt.subplots(figsize=(5.4, 3.0))
-    w, xs = .36, np.arange(len(TRACKS))
-    for k, (R, c, lab, off) in enumerate([(E1, CAT[0], "Flipper control", -w/2),
-                                          (E4, CAT[1], "Flippers parked", +w/2)]):
-        M = np.array([[win_mean(its, per[t]) if t in per else np.nan
-                       for t in TRACKS] for _, its, sr, ret, per in R])
-        ax.bar(xs + off, np.nanmean(M, 0), w, color=c, label=lab,
-               edgecolor="white", lw=.6, zorder=2)
-        for j in range(len(TRACKS)):
-            ax.scatter(np.full(M.shape[0], xs[j] + off), M[:, j], s=11,
-                       color=INK, alpha=.7, zorder=3, linewidths=0)
-    ax.set_xticks(xs); ax.set_xticklabels(TRACKS)
+def figB_arenas(out, evaldir=Path("runs/eval"), pat="all_e1p_s*.json"):
+    """Rendimiento del sistema POR ARENA, entrenadas y retenidas en la misma
+    figura y con la MISMA medicion (evaluador offline, 50 episodios, criterio de
+    exito identico al del entrenamiento).
+
+    No compara con/sin flippers: que un robot oruga necesite flippers para subir
+    escalones no es una pregunta de este paper, y organizar la figura principal
+    alrededor de esa comparacion le da el protagonismo a lo unico obvio que hay
+    medido. La condicion sin flippers aparece solo donde es un argumento -- la
+    transferencia -- y alli basta con los numeros."""
+    import json
+    files = sorted(evaldir.glob(pat))
+    if not files:
+        print(f"  (figura de arenas omitida: no hay {pat} en {evaldir})")
+        return
+    data = [json.load(open(f))["tracks"] for f in files]
+    TRAIN = ["flat", "ramps", "steps1m", "pallets"]
+    HELD = ["steps", "steps2"]
+    order = [t for t in TRAIN + HELD if any(t in d for d in data)]
+    M = np.array([[d[t]["success"] if t in d else np.nan for t in order] for d in data])
+
+    fig, ax = plt.subplots(figsize=(5.8, 3.2))
+    xs = np.arange(len(order))
+    cols = [CAT[0] if t in TRAIN else CAT[2] for t in order]
+    ax.bar(xs, np.nanmean(M, 0), .58, color=cols, edgecolor="white", lw=.6, zorder=2)
+    for j in range(len(order)):
+        ax.scatter(np.full(M.shape[0], xs[j]), M[:, j], s=13, color=INK,
+                   alpha=.75, zorder=4, linewidths=0)
+    n_tr = sum(t in TRAIN for t in order)
+    if 0 < n_tr < len(order):
+        ax.axvline(n_tr - .5, color=INK3, lw=.9, ls=(0, (4, 3)))
+        ax.text(n_tr - .42, .96, "held out", transform=ax.get_xaxis_transform(),
+                fontsize=7.5, color=INK2, style="italic", va="top")
+    ax.set_xticks(xs); ax.set_xticklabels(order)
     ax.set_ylabel("Success rate")
-    ax.set_title(f"Per-track success, iterations {WIN[0]}–{WIN[1]-1}", loc="left")
-    ax.legend(loc="upper right"); style(ax)
-    save(fig, out, "v2_fig2_per_track")
+    ax.set_title(f"System performance per arena ({M.shape[0]} converged seeds, "
+                 f"50 episodes each)", loc="left")
+    style(ax)
+    save(fig, out, "v2_fig2_arenas")
 
 
-# ── fig C: steps1m, el efecto mas nitido ─────────────────────────────────────
-def figC(E1, E4, out):
-    fig, ax = plt.subplots(figsize=(5.4, 3.0))
-    for R, c, lab in [(E1, CAT[0], "Flipper control"), (E4, CAT[1], "Flippers parked")]:
-        for i, (_, its, sr, ret, per) in enumerate(R):
-            if "steps1m" not in per:
-                continue
-            y = np.nan_to_num(per["steps1m"])
-            ax.plot(its[14:], smooth(y), color=c, lw=1.6,
-                    alpha=.9, label=lab if i == 0 else None)
-    ax.set_xlabel("PPO iteration"); ax.set_ylabel("Success rate — steps1m")
-    ax.set_title("Discrete steps: where the flippers pay for themselves", loc="left")
-    ax.legend(loc="upper left"); style(ax)
-    save(fig, out, "v2_fig3_steps1m")
-
-
-# ── fig D: entropia vs exito, paneles separados ──────────────────────────────
 def figD(runs, E1, out):
     """C3: la entropia colapsa ANTES de que el exito deje de subir.
     Sin ejes duales -- dos paneles compartiendo x."""
@@ -166,6 +181,38 @@ def figD(runs, E1, out):
     a2.set_ylabel("Policy entropy"); a2.set_xlabel("PPO iteration"); style(a2, pct=False)
     a1.set_title("Entropy collapses while success is still climbing", loc="left")
     save(fig, out, "v2_fig4_entropy_vs_success")
+
+
+
+# ── fig 3: curvas de aprendizaje POR ARENA ───────────────────────────────────
+def figC_per_arena(E1, out):
+    """Una curva por arena, media +- 1 desv sobre las semillas CONVERGIDAS.
+
+    Solo convergidas: incluir las dos que nunca despegaron ensancharia las bandas
+    hasta ocultar la forma de cada curva, y la bimodalidad ya es el asunto de la
+    fig. 1. Aqui la pregunta es otra -- a que ritmo y hasta donde aprende cada
+    arena -- y para eso la mezcla de dos modos solo estorba.
+
+    Etiquetado directo sobre la curva: la identidad de la arena no debe depender
+    de cruzar la vista al recuadro de leyenda."""
+    conv = [r for r in E1 if win_mean(r[1], r[2]) >= DEAD_T]
+    n = min(len(r[1]) for r in conv)
+    x = conv[0][1][:n][14:]
+    fig, ax = plt.subplots(figsize=(5.8, 3.3))
+    for t, c in zip(TRACKS, CAT):
+        M = np.stack([smooth(np.nan_to_num(r[4][t][:n])) for r in conv if t in r[4]])
+        m, sd = M.mean(0), M.std(0)
+        ax.fill_between(x, m - sd, m + sd, color=c, alpha=.15, lw=0)
+        ax.plot(x, m, color=c, lw=1.8, solid_capstyle="round")
+        ax.annotate(t, (x[-1], m[-1]), xytext=(5, 0), textcoords="offset points",
+                    color=c, fontsize=8, va="center", fontweight="bold")
+    ax.axvspan(WIN[0], WIN[1] - 1, color=INK3, alpha=.07, lw=0)
+    ax.set_xlabel("PPO iteration"); ax.set_ylabel("Success rate")
+    ax.set_xlim(x[0], x[-1] * 1.13); ax.set_ylim(0, 1.02)
+    ax.set_title(f"Per-arena learning ({len(conv)} converged seeds, "
+                 f"shaded $\\pm$1 s.d.)", loc="left")
+    style(ax)
+    save(fig, out, "v2_fig3_per_arena_curves")
 
 
 # ── fig E: el gate, sobre la tanda historica ─────────────────────────────────
@@ -199,12 +246,10 @@ def main():
     a = ap.parse_args()
 
     E1 = load(a.runs, "e1p_seed?.log")
-    E4 = load(a.runs, "e4p_seed?.log")
-    print(f"E1' -> {[r[0] for r in E1]}")
-    print(f"E4' -> {[r[0] for r in E4]}")
-    figA(E1, E4, a.out)
-    figB(E1, E4, a.out)
-    figC(E1, E4, a.out)
+    print(f"semillas -> {[r[0] for r in E1]}")
+    figA(E1, a.out)
+    figB_arenas(a.out)
+    figC_per_arena(E1, a.out)
     figD(a.runs, E1, a.out)
     try:
         figE(a.old, a.out)

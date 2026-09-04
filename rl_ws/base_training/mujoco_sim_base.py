@@ -109,13 +109,10 @@ class BaseMujocoEnv:
         self._arm_qadr  = [int(m.jnt_qposadr[jid(n)]) for n in C.ARM_JOINTS]
         self._arm_vadr  = [int(m.jnt_dofadr[jid(n)])  for n in C.ARM_JOINTS]
 
-        # Geoms para deteccion de contacto robot<->piso (igual que el bridge).
-        # "maze_floor" es el piso caminable de la pista maze (a diferencia del
-        # resto de pistas, donde el unico plane es el piso fatal debajo de la
-        # plataforma/pallets) 
+        _walk = C.track_get(self.track, "walkable_floor", None)
         self._floor_gids = {g for g in range(m.ngeom)
                             if int(m.geom_type[g]) == mujoco.mjtGeom.mjGEOM_PLANE
-                            and (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "") != "maze_floor"}
+                            and (mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or "") != _walk}
         root = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "footprint_link")
         self._robot_gids = {g for g in range(m.ngeom)
                             if int(m.body_rootid[m.geom_bodyid[g]]) == root}
@@ -246,9 +243,11 @@ class BaseMujocoEnv:
             spawn_xy = np.array(C.track_get(self.track, "spawn_xy", C.START_XY), dtype=float)
             spawn_yaw = float(C.track_get(self.track, "spawn_yaw", 0.0))
         else:
-            # Plataforma: spawn random en ±SPAWN_XY_RANGE con yaw random.
-            spawn_xy = np.random.uniform(-C.SPAWN_XY_RANGE, C.SPAWN_XY_RANGE, 2)
-            spawn_yaw = np.random.uniform(-np.pi, np.pi)
+            _sp = self.track.get("spawn_xy")
+            spawn_xy = (np.random.uniform(-C.SPAWN_XY_RANGE, C.SPAWN_XY_RANGE, 2)
+                        if _sp is None else np.asarray(_sp, dtype=float))
+            _yaw = self.track.get("spawn_yaw")
+            spawn_yaw = (np.random.uniform(-np.pi, np.pi) if _yaw is None else float(_yaw))
         self.data.qpos[a + 0] = spawn_xy[0]
         self.data.qpos[a + 1] = spawn_xy[1]
         self.data.qpos[a + 2] = self._spawn_z          # altura segun el techo de la pista
@@ -268,9 +267,9 @@ class BaseMujocoEnv:
         fb = self._feedback()
 
         if self._kind == "platform":
-            # Nueva mision cada episodio: goal random + ruta que RODEA el
-            # obstaculo virtual (fisico, reposicionado abajo).
-            goal_xy = np.random.uniform(-C.GOAL_XY_RANGE, C.GOAL_XY_RANGE, 2)
+            _g = self.track.get("goal_xy")
+            goal_xy = (np.random.uniform(-C.GOAL_XY_RANGE, C.GOAL_XY_RANGE, 2)
+                       if _g is None else np.asarray(_g, dtype=float))
             self.goal_xy = np.asarray(goal_xy, dtype=np.float64)
             if C.USE_VIRTUAL_OBSTACLE:
                 # El obstaculo se coloca primero (random sobre el paso directo) y
