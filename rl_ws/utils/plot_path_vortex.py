@@ -152,7 +152,7 @@ def draw_map(ax, data, track=None):
         ax.add_patch(MPolygon(corners, closed=True, **STYLE_REAL_PALLET))
         pallets_poly.append(ShapelyPolygon(corners))
         name = p["name"].split()[-1]
-        ax.annotate(f"P{name}", xy=p["center_xy"], fontsize=7, ha="center", va="center",
+        ax.annotate(f"P{name}", xy=p["center_xy"], fontsize=13, ha="center", va="center",
                     color="#ffffff", alpha=0.3, zorder=5)
 
     merged = unary_union(pallets_poly)
@@ -344,10 +344,10 @@ def main():
     ax.set_aspect("equal")               # (si no, la colorbar sale ilegible)
     ax.set_facecolor("#1e222b")
     ax.grid(True, linestyle=":", alpha=0.2, color="#ffffff", zorder=0)
-    ax.set_xlabel("X [m]", fontsize=11, color="#ffffff")
-    ax.set_ylabel("Y [m]", fontsize=11, color="#ffffff")
-    ax.set_title("Vortex APF Path — A* reference vs. real vortex-followed trajectory",
-                 fontsize=13, fontweight="bold", color="#ffffff", pad=14)
+    ax.set_xlabel("X [m]", fontsize=20, color="#ffffff")
+    ax.set_ylabel("Y [m]", fontsize=20, color="#ffffff")
+    ax.set_title("Vortex APF Path — searched reference vs. vortex-followed trajectory",
+                 fontsize=24, fontweight="bold", color="#ffffff", pad=14)
     ax.tick_params(colors="#ffffff")
 
     draw_map(ax, data, track)
@@ -386,16 +386,16 @@ def main():
         sm = ScalarMappable(norm=_FIELD_NORM, cmap=_FIELD_CMAP)
         cbar = fig.colorbar(sm, ax=ax, fraction=0.035, pad=0.02)
         cbar.set_label("|vector de guia|  (claro = empuje fuerte cerca de obstaculo)",
-                       color="#ffffff", fontsize=9)
+                       color="#ffffff", fontsize=16)
         cbar.ax.yaxis.set_tick_params(color="#ffffff")
         plt.setp(plt.getp(cbar.ax.axes, "yticklabels"), color="#ffffff")
 
     # Ruta A* de referencia (punteada)
     ax.plot(wps_arr[:, 0], wps_arr[:, 1], color="#ffffff", linewidth=1.4,
-            linestyle="--", alpha=0.45, zorder=4, label="A* reference path")
+            linestyle="--", alpha=0.45, zorder=4, label="Searched reference path")
     for idx, (x, y) in enumerate(waypoints):
         ax.plot(x, y, marker="o", color="#ff9f43", markersize=9, zorder=6, linestyle="None")
-        ax.annotate(str(idx), xy=(x, y), fontsize=6, ha="center", va="center",
+        ax.annotate(str(idx), xy=(x, y), fontsize=11, ha="center", va="center",
                     color="#000000", fontweight="bold", zorder=7)
 
     # Trayectoria REAL con vortex (solida)
@@ -412,9 +412,10 @@ def main():
                 markersize=16, mew=2, mec="#d63031", zorder=9,
                 linestyle="None", label="Vortex stuck (local min)")
 
+    ax.tick_params(labelsize=16, colors="#ffffff")
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
-    ax.legend(loc="upper right", fontsize=9, framealpha=0.9,
+    ax.legend(loc="upper right", fontsize=20, framealpha=0.9,
               facecolor="#1e222b", edgecolor="#a4b0be", labelcolor="#ffffff")
 
     plt.tight_layout()
