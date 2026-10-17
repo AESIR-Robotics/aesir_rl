@@ -198,7 +198,7 @@ class MujocoHardwareBridge(Node):
             if int(self.model.body_rootid[self.model.geom_bodyid[gid]]) == robot_root
         }
 
-        # Geom del obstaculo virtual FISICO (plataform.xml), lo teletransporta y
+        # Geom del obstaculo virtual FISICO (tracks/flat/terrain.xml), lo teletransporta y
         # redimensiona _obstacle_cb en cada episodio -- MISMO geom que reposiciona
         # BaseMujocoEnv.reset() en el entrenamiento rapido.
         self._obstacle_gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "virtual_obstacle")

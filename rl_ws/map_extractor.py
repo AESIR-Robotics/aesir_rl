@@ -14,7 +14,7 @@ import mujoco
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _FULL = os.path.join(_HERE, "../models/aesir_complete.xml")
-_PALLETS = os.path.join(_HERE, "../models/aesir_pallets.xml")
+_PALLETS = os.path.join(_HERE, "../tracks/pallets/pallets.xml")
 _ROBOT = os.path.join(_HERE, "../models/aesir_mujoco_robot.xml")
 DEFAULT_XML = (_FULL if os.path.exists(_FULL) else
                _PALLETS if os.path.exists(_PALLETS) else _ROBOT)

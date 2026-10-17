@@ -40,9 +40,11 @@ import mujoco
 import pyoctomap
 from scipy.ndimage import binary_dilation
 
+from base_training.config import TRACK_DEFS
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _PROJECT_ROOT = os.path.abspath(os.path.join(_HERE, ".."))
-_DEFAULT_XML = os.path.join(_PROJECT_ROOT, "models", "plataform.xml")
+_DEFAULT_XML = os.path.join(_PROJECT_ROOT, "tracks", "flat", "terrain.xml")
 _DEFAULT_RAW_OUT = os.path.join(_HERE, "occupied_map.bt")
 _DEFAULT_INFLATED_OUT = os.path.join(_HERE, "inflated_map.bt")
 
@@ -274,17 +276,10 @@ def inflate_grid(grid, resolution, inflate_radius_m):
 # ----------------------------------------------------------------------
 # MAIN
 # ----------------------------------------------------------------------
-# XML de pista SIN robot para cada pista del registro (los rayos del raster de
-# meshes no deben chocar con el chasis). Las salidas van a rl_ws/tracks/<pista>/.
-_TRACK_XMLS = {
-    "flat":    os.path.join(_PROJECT_ROOT, "models", "plataform.xml"),
-    "steps":   os.path.join(_PROJECT_ROOT, "models", "track_steps.xml"),
-    "ramps":   os.path.join(_PROJECT_ROOT, "models", "track_ramps.xml"),
-    "pallets": os.path.join(_PROJECT_ROOT, "models", "track_pallets.xml"),
-    "maze":    os.path.join(_PROJECT_ROOT, "models", "maze.xml"),
-    "steps1m": os.path.join(_PROJECT_ROOT, "models", "track_steps1m.xml"),
-    "steps2":  os.path.join(_PROJECT_ROOT, "models", "steps2.xml"),
-}
+# Modo --track: el XML SIN robot (los rayos del raster de meshes no deben chocar
+# con el chasis) y la carpeta de salida salen de config.TRACK_DEFS -- la misma
+# tabla que usa el entrenamiento, asi no hay dos listas de rutas que mantener.
+# Las salidas van a tracks/<pista>/.
 
 
 def main():
@@ -294,9 +289,9 @@ def main():
     )
     parser.add_argument("xml_path", nargs="?", default=_DEFAULT_XML,
                         help="Ruta al XML de MuJoCo. Por defecto usa el modelo de este proyecto.")
-    parser.add_argument("--track", choices=sorted(_TRACK_XMLS), default=None,
+    parser.add_argument("--track", choices=sorted(TRACK_DEFS), default=None,
                         help="Modo pista: usa el XML de la pista (sin robot) y guarda los .bt "
-                             "en rl_ws/tracks/<pista>/ (lo que espera config.TRACK_DEFS).")
+                             "en tracks/<pista>/ (lo que espera config.TRACK_DEFS).")
     parser.add_argument("--resolution", type=float, default=0.05,
                         help="Tamaño de voxel en metros (default 0.05 = 5cm)")
     parser.add_argument("--margin", type=float, default=0.5,
@@ -310,8 +305,8 @@ def main():
     args = parser.parse_args()
 
     if args.track:
-        args.xml_path = _TRACK_XMLS[args.track]
-        track_dir = os.path.join(_HERE, "tracks", args.track)
+        args.xml_path = TRACK_DEFS[args.track]["terrain"]
+        track_dir = os.path.dirname(TRACK_DEFS[args.track]["bt"])
         os.makedirs(track_dir, exist_ok=True)
         args.out_raw = os.path.join(track_dir, "occupied_map.bt")
         args.out_inflated = os.path.join(track_dir, "inflated_map.bt")

@@ -202,9 +202,9 @@ class LiveTrajectoryPlot:
     Dibuja el fondo del MUNDO ACTIVO una sola vez y, por episodio, la escena
     (ruta + meta + obstaculo virtual) que puede cambiar cada reset:
 
-      - Plataforma (env.use_platform=True, mapa NUEVO plataform.xml): borde de
+      - Plataforma (env.use_platform=True, mapa NUEVO tracks/flat/terrain.xml): borde de
         la plataforma + zona segura erosionada (env.platform_zone) + ruta directa
-        + obstaculo virtual. Igual look que tests/plot_path_platform.py.
+        + obstaculo virtual. Igual look que tools/plot_path_vortex.py.
       - Pallets (env.use_platform=False, mapa VIEJO): pista via
         plot_path_vortex.draw_map(obstacles.json) + ruta A*.
 

@@ -117,16 +117,16 @@ class BaseMujocoEnv:
         self._robot_gids = {g for g in range(m.ngeom)
                             if int(m.body_rootid[m.geom_bodyid[g]]) == root}
 
-        # Geom del obstaculo virtual FISICO (plataform.xml)
+        # Geom del obstaculo virtual FISICO (tracks/flat/terrain.xml)
         self._obstacle_gid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "virtual_obstacle")
         self._obstacle_gids = {self._obstacle_gid} if self._obstacle_gid >= 0 else set()
         # + los postes "fatal_stick N" de la pista de pallets (18 cajas finas de
         # 4.8x10x90 cm que hay que esquivar). ANTES no estaban aqui: como
-        # `virtual_obstacle` solo existe en plataform.xml, en pallets el set
+        # `virtual_obstacle` solo existe en tracks/flat/terrain.xml, en pallets el set
         # quedaba VACIO y chocar con un poste costaba CERO -- ni penalizacion ni
         # terminacion, solo el atasco indirecto a los 300 pasos. Con WP_BONUS=200
         # y GOAL_BONUS=1000 en juego, eso hacia rentable rozarlos en vez de
-        # rodearlos. Solo existen en aesir_pallets.xml, asi que no hace falta
+        # rodearlos. Solo existen en tracks/pallets/pallets.xml, asi que no hace falta
         # condicionar por pista: en las demas el conjunto sale vacio igual.
         self._obstacle_gids |= {
             g for g in range(m.ngeom)

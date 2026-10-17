@@ -33,26 +33,34 @@ import numpy as np
 _HERE    = os.path.dirname(os.path.abspath(__file__))            # .../rl_ws/base_training
 ROOT     = os.path.dirname(os.path.dirname(_HERE))               # .../aesir_rl
 RL_WS    = os.path.abspath(os.path.join(_HERE, ".."))            # .../rl_ws
-_MODELS  = os.path.join(ROOT, "models")
 CHECKPOINT_DIR = Path(ROOT) / "checkpoints_base"
 
 # ── PISTAS (registro multi-pista) ────────────────────────────────────────────
-# Cada pista define: su XML completo (robot + terreno), sus octomaps (.bt, para
-# el heatmap) en rl_ws/tracks/<pista>/, la altura de spawn (el terreno cambia
-# de techo) y su tipo de navegacion:
+# Todo lo de una pista vive en tracks/<pista>/ (raiz del repo): scene.xml
+# (robot + terreno), terrain.xml (solo terreno), meshes/, octomaps (.bt, para el
+# heatmap) y source/ (CAD original y generadores). models/ queda solo con el
+# robot. Cada pista define ademas la altura de spawn (el terreno cambia de
+# techo) y su tipo de navegacion:
 #   kind="platform" -> mision procedural (spawn/meta random, ruta directa +
 #                      obstaculo virtual, zona segura = cuadrado erosionado)
 #   kind="pallets"  -> mision clasica del JSON (A* sobre pallets/sticks,
 #                      spawn/meta fijos) — la implementacion original, intacta.
 # Los .bt se regeneran con: python3 rl_ws/octomap_from_mujoco.py --track <pista>
-TRACKS_DIR = os.path.join(RL_WS, "tracks")
+TRACKS_DIR = os.path.join(ROOT, "tracks")
+
+
+def _track_file(track: str, name: str) -> str:
+    """Ruta de un archivo dentro de tracks/<pista>/."""
+    return os.path.join(TRACKS_DIR, track, name)
 # TABLA DE PISTAS. Cada fila declara las MISMAS claves, aunque alguna repita el
 # default: añadir una pista es rellenar una fila, no adivinar que hereda de donde.
 # Nada se deriva a proposito -- derivar es implicito y falla en silencio (p.ej.
 # sacar fall_z_min del octomap romperia el maze, cuyo piso no esta en el .bt).
 #
 #   kind          platform | pallets | maze  (elige extractor y tipo de mision)
-#   xml           modelo completo (robot + terreno)
+#   xml           modelo completo (robot + terreno): lo que carga el simulador
+#   terrain       solo el terreno, SIN robot: de aqui sale el octomap (los rayos
+#                 del raster de meshes no deben chocar con el chasis)
 #   bt            octomap para el heatmap; se regenera con
 #                 python3 rl_ws/octomap_from_mujoco.py --track <pista>
 #   nav_json      solo kind="pallets": describe tarimas y postes
@@ -77,8 +85,9 @@ TRACKS_DIR = os.path.join(RL_WS, "tracks")
 TRACK_DEFS = {
     "flat": dict(
         kind="platform",
-        xml=os.path.join(_MODELS, "aesir_complete_flat.xml"),
-        bt=os.path.join(TRACKS_DIR, "flat", "occupied_map.bt"),
+        xml=_track_file("flat", "scene.xml"),
+        terrain=_track_file("flat", "terrain.xml"),
+        bt=_track_file("flat", "occupied_map.bt"),
         nav_json=None,
         spawn_xy=None, spawn_yaw=None,           # procedural
         spawn_z=0.20, settle_steps=50,           # techo terreno z=0.12
@@ -86,8 +95,9 @@ TRACK_DEFS = {
         fall_z_min=0.10, finish_dist=0.20, grid_res=0.15),
     "steps": dict(
         kind="platform",
-        xml=os.path.join(_MODELS, "aesir_complete_steps.xml"),
-        bt=os.path.join(TRACKS_DIR, "steps", "occupied_map.bt"),
+        xml=_track_file("steps", "scene.xml"),
+        terrain=_track_file("steps", "terrain.xml"),
+        bt=_track_file("steps", "occupied_map.bt"),
         nav_json=None,
         spawn_xy=None, spawn_yaw=None,
         spawn_z=0.55, settle_steps=150,          # escalones hasta z=0.42
@@ -95,8 +105,9 @@ TRACK_DEFS = {
         fall_z_min=0.10, finish_dist=0.20, grid_res=0.15),
     "steps1m": dict(
         kind="platform",
-        xml=os.path.join(_MODELS, "aesir_complete_steps1m.xml"),
-        bt=os.path.join(TRACKS_DIR, "steps1m", "occupied_map.bt"),
+        xml=_track_file("steps1m", "scene.xml"),
+        terrain=_track_file("steps1m", "terrain.xml"),
+        bt=_track_file("steps1m", "occupied_map.bt"),
         nav_json=None,
         spawn_xy=None, spawn_yaw=None,
         spawn_z=0.55, settle_steps=150,          # escalones de 1x1 m hasta z=0.42
@@ -104,8 +115,9 @@ TRACK_DEFS = {
         fall_z_min=0.10, finish_dist=0.20, grid_res=0.15),
     "ramps": dict(
         kind="platform",
-        xml=os.path.join(_MODELS, "aesir_complete_ramps.xml"),
-        bt=os.path.join(TRACKS_DIR, "ramps", "occupied_map.bt"),
+        xml=_track_file("ramps", "scene.xml"),
+        terrain=_track_file("ramps", "terrain.xml"),
+        bt=_track_file("ramps", "occupied_map.bt"),
         nav_json=None,
         spawn_xy=None, spawn_yaw=None,
         spawn_z=0.45, settle_steps=150,          # rampas hasta z=0.28
@@ -113,8 +125,9 @@ TRACK_DEFS = {
         fall_z_min=0.10, finish_dist=0.20, grid_res=0.15),
     "steps2": dict(
         kind="maze",
-        xml=os.path.join(_MODELS, "aesir_complete_steps2.xml"),
-        bt=os.path.join(TRACKS_DIR, "steps2", "occupied_map.bt"),
+        xml=_track_file("steps2", "scene.xml"),
+        terrain=_track_file("steps2", "terrain.xml"),
+        bt=_track_file("steps2", "occupied_map.bt"),
         nav_json=None,
         spawn_xy=(0.60, -0.15), spawn_yaw=1.5708,    # frente a la entrada, mirando a +y
         spawn_z=0.80, settle_steps=150,
@@ -123,17 +136,19 @@ TRACK_DEFS = {
         grid_res=0.05),
     "pallets": dict(
         kind="pallets",
-        xml=os.path.join(_MODELS, "aesir_complete_pallets.xml"),
-        bt=os.path.join(TRACKS_DIR, "pallets", "occupied_map.bt"),
-        nav_json=os.path.join(TRACKS_DIR, "pallets", "obstacles.json"),
+        xml=_track_file("pallets", "scene.xml"),
+        terrain=_track_file("pallets", "terrain.xml"),
+        bt=_track_file("pallets", "occupied_map.bt"),
+        nav_json=_track_file("pallets", "obstacles.json"),
         spawn_xy=(-1.5, 3.5), spawn_yaw=0.0,
         spawn_z=0.20, settle_steps=50,
         goal_xy=(7.8, 1.01),
         fall_z_min=0.10, finish_dist=0.20, grid_res=0.05),
     "maze": dict(
         kind="maze",
-        xml=os.path.join(_MODELS, "aesir_complete_maze.xml"),
-        bt=os.path.join(TRACKS_DIR, "maze", "occupied_map.bt"),
+        xml=_track_file("maze", "scene.xml"),
+        terrain=_track_file("maze", "terrain.xml"),
+        bt=_track_file("maze", "occupied_map.bt"),
         nav_json=None,
         spawn_xy=(0.5, -0.4), spawn_yaw=0.0,
         spawn_z=0.12, settle_steps=100,
