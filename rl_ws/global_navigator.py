@@ -7,7 +7,6 @@ Lo usan los DOS backends (mujoco_sim_base.py directo y base_ros_env.py sobre el
 bridge ROS2) y los scripts de visualizacion/tests. Todos los parametros
 ajustables viven en base_training/config.py.
 """
-import json
 import math
 import numpy as np
 from shapely.geometry import Polygon as ShapelyPolygon
@@ -64,13 +63,6 @@ class Obstacle2D:
         
     def bounds(self) -> tuple[float, float, float, float]:
         return (self.x - self.hx, self.y - self.hy, self.x + self.hx, self.y + self.hy)
-
-    @classmethod
-    def from_entry(cls, e: dict):
-        cx, cy = e["center_xy"]
-        s = e["size"]
-        g = e["gtype"]
-        return cls(e["name"], cx, cy, s[0], s[1] if g == "box" else s[0])
 
 def _aabb_dist(b1: tuple, b2: tuple) -> float:
     dx = max(0., max(b1[0], b2[0]) - min(b1[2], b2[2]))
@@ -241,7 +233,7 @@ def plan_platform_route(start_xy: tuple, goal_xy: tuple,
 # ── Planeacion comun a todas las pistas ─────────────────────────────────────
 # UN solo planificador (TrackMap) para todas: A* consciente de la huella sobre
 # (x, y, rumbo). Lo que cambia por pista es solo de donde salen las cajas, y de
-# eso se encargan los EXTRACTORES (obstacles_from_mujoco, boxes_from_pallets_json)
+# eso se encargan los EXTRACTORES (obstacles_from_mujoco, drivable_from_mujoco)
 # mas abajo -- la capa intermedia. Añadir una pista es escribir su extractor.
 _TRACK_MAPS: dict = {}
 
@@ -962,20 +954,27 @@ class TrackMap:
 # de un XML de MuJoCo, de un JSON o de donde sea; solo recibe AABB. Añadir una
 # pista nueva es escribir su extractor, no otro planificador.
 
-def obstacles_from_mujoco(xml_path: str, robot_top: float = ROBOT_TOP_M,
-                          name_filter: str = None):
-    """Cajas de colision de un XML de MuJoCo que NO son del robot -> AABB (N,4).
+def _name_matches(name: str, name_filter) -> bool:
+    """name_filter: None (todo pasa), un trozo de nombre, o una tupla de trozos
+    (pasa si contiene CUALQUIERA)."""
+    if name_filter is None:
+        return True
+    if isinstance(name_filter, str):
+        name_filter = (name_filter,)
+    return any(f in name for f in name_filter)
 
-    Descarta las que empiezan por encima de `robot_top`: son dinteles de puerta
-    y el robot pasa por debajo (68 de 159 en el maze). Tratarlas como pared
-    taparia pasillos que si son transitables."""
+
+def _collision_boxes(xml_path: str, name_filter=None):
+    """Cajas de colision de un XML de MuJoCo que NO son del robot ->
+    lista de (AABB (x0,y0,x1,y1), z_inferior). Lo comparten los extractores de
+    pared y de zona transitable, asi ambos leen la geometria de la misma forma."""
     # Import local a proposito: este modulo lo usan tambien scripts sin MuJoCo.
     import mujoco
     model = mujoco.MjModel.from_xml_path(xml_path)
     data = mujoco.MjData(model)
     mujoco.mj_forward(model, data)              # geom_xpos/xmat en frame mundo
     robot_root = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "footprint_link")
-    boxes = []
+    out = []
     for g in range(model.ngeom):
         if int(model.geom_type[g]) != mujoco.mjtGeom.mjGEOM_BOX:
             continue
@@ -983,54 +982,55 @@ def obstacles_from_mujoco(xml_path: str, robot_top: float = ROBOT_TOP_M,
             continue                            # geom puramente visual
         if int(model.body_rootid[model.geom_bodyid[g]]) == robot_root:
             continue                            # el robot no es pared
-        # Pistas donde solo ALGUNAS cajas son pared: en steps2 los 407 geoms
-        # "steps2_col_*" son escalones que SE PISAN, y solo los 9 "steps2_wall_*"
-        # delimitan el circuito. Sin este filtro el planificador daria el campo
-        # entero por intransitable. Las pistas sin `wall_prefix` no lo usan.
-        if name_filter is not None:
-            nm = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
-            if name_filter not in nm:
-                continue
+        nm = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
+        if not _name_matches(nm, name_filter):
+            continue
         pos = np.asarray(data.geom_xpos[g], dtype=float)
         rot = np.asarray(data.geom_xmat[g], dtype=float).reshape(3, 3)
         # AABB de la caja (posiblemente rotada) = |R| @ half, conservador.
         ext = np.abs(rot) @ np.asarray(model.geom_size[g], dtype=float)
-        if pos[2] - ext[2] >= robot_top:
-            continue                            # dintel: se pasa por debajo
-        boxes.append((pos[0] - ext[0], pos[1] - ext[1],
-                      pos[0] + ext[0], pos[1] + ext[1]))
+        out.append(((pos[0] - ext[0], pos[1] - ext[1], pos[0] + ext[0], pos[1] + ext[1]),
+                    pos[2] - ext[2]))
+    return out
+
+
+def obstacles_from_mujoco(xml_path: str, robot_top: float = ROBOT_TOP_M,
+                          name_filter=None):
+    """Cajas de PARED de un XML de MuJoCo -> AABB (N,4).
+
+    Descarta las que empiezan por encima de `robot_top`: son dinteles de puerta
+    y el robot pasa por debajo (68 de 159 en el maze). Tratarlas como pared
+    taparia pasillos que si son transitables.
+
+    `name_filter` (columna wall_prefix) es para pistas donde solo ALGUNAS cajas
+    son pared: en steps2 los 407 geoms "steps2_col_*" son escalones que SE PISAN
+    y solo los 9 "steps2_wall_*" delimitan el circuito; en pallets las tarimas se
+    pisan y la pared son los postes y la puerta. Sin filtro el planificador daria
+    el campo entero por intransitable."""
+    boxes = [b for b, z0 in _collision_boxes(xml_path, name_filter) if z0 < robot_top]
     if not boxes:
         raise RuntimeError(f"{xml_path}: no se encontro ninguna pared de colision")
     return np.asarray(boxes, dtype=float)
 
 
-def boxes_from_pallets_json(json_path: str):
-    """JSON de pallets -> (drivable, obstacles), ambos AABB (N,4).
+def drivable_from_mujoco(xml_path: str, name_filter) -> np.ndarray:
+    """Cajas TRANSITABLES de un XML de MuJoCo -> AABB (N,4) (columna
+    drivable_prefix). Para pistas donde se conduce ENCIMA de ciertas piezas y
+    fuera de ellas se cae al vacio (pallets): esas piezas son la zona
+    transitable, no obstaculos."""
+    boxes = [b for b, _ in _collision_boxes(xml_path, name_filter)]
+    if not boxes:
+        raise RuntimeError(f"{xml_path}: ninguna caja coincide con {name_filter!r}")
+    return np.asarray(boxes, dtype=float)
 
-    En esta pista la logica esta INVERTIDA respecto al maze: se conduce ENCIMA
-    de las tarimas (`pallets`) y fuera de ellas se cae al vacio, asi que las
-    tarimas son la zona transitable y no obstaculos. Los `sticks` (postes
-    fatales) y los `obstacles` del JSON si son obstaculos."""
-    with open(json_path, "r") as f:
-        data = json.load(f)
 
-    def _aabb(entries, skip=()):
-        out = []
-        for e in entries:
-            if e.get("name") in skip:
-                continue
-            c = np.asarray(e["center_xy"], dtype=float)
-            s = np.asarray(e["size"], dtype=float)
-            hx, hy = (s[0], s[1]) if e.get("gtype") == "box" else (s[0], s[0])
-            R = np.asarray(e.get("rot_mat", np.eye(3)), dtype=float).reshape(3, 3)
-            ext = np.abs(R[:2, :2]) @ np.array([hx, hy])
-            out.append((c[0] - ext[0], c[1] - ext[1], c[0] + ext[0], c[1] + ext[1]))
-        return np.asarray(out, dtype=float).reshape(-1, 4)
-
-    drivable = _aabb(data["pallets"])
-    obstacles = np.vstack([_aabb(data.get("sticks", [])),
-                           _aabb(data.get("obstacles", []), skip=("col_manija",))])
-    return drivable, obstacles
+def drivable_zone(drivable_boxes: np.ndarray):
+    """Contorno de la zona transitable (shapely) a partir de sus cajas: las une
+    cerrando las juntas menores que GAP_BRIDGE_DISTANCE. Es lo que el vortex usa
+    para repeler hacia adentro de las tarimas."""
+    polys = [ShapelyPolygon([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+             for x0, y0, x1, y1 in drivable_boxes]
+    return unary_union(polys).buffer(GAP_BRIDGE_DISTANCE).buffer(-GAP_BRIDGE_DISTANCE)
 
 
 def get_track_map(track: dict = None) -> TrackMap:
@@ -1055,20 +1055,19 @@ def get_track_map(track: dict = None) -> TrackMap:
         tm = TrackMap(np.zeros((0, 4)), drivable=[(-he, -he, he, he)],
                       spawn_xy=(0.0, 0.0), res=track_get(track, "grid_res", GRID_RESOLUTION),
                       compute_reach=False, name=track.get("name", "platform"))
-    elif kind == "pallets":
-        drivable, obstacles = boxes_from_pallets_json(track["nav_json"])
-        tm = TrackMap(obstacles, drivable=drivable,
-                      spawn_xy=track_get(track, "spawn_xy", START_XY),
-                      spawn_yaw=float(track_get(track, "spawn_yaw", 0.0)),
-                      res=track_get(track, "grid_res", GRID_RESOLUTION),
-                      gap_bridge=GAP_BRIDGE_DISTANCE, name=track.get("name", "pallets"))
     else:
+        # Paredes y (si la pista la declara) zona transitable salen del XML de
+        # MuJoCo. Con zona transitable, se cierran las juntas entre sus piezas.
+        drv_filter = track.get("drivable_prefix")
+        drivable = drivable_from_mujoco(track["xml"], drv_filter) if drv_filter else None
         tm = TrackMap(obstacles_from_mujoco(track["xml"],
                                             name_filter=track.get("wall_prefix")),
+                      drivable=drivable,
                       spawn_xy=track_get(track, "spawn_xy", (0.0, 0.0)),
                       spawn_yaw=float(track_get(track, "spawn_yaw", 0.0)),
                       res=track_get(track, "grid_res", GRID_RESOLUTION),
-                      name=track.get("name", "maze"))
+                      gap_bridge=GAP_BRIDGE_DISTANCE if drivable is not None else 0.0,
+                      name=track.get("name", kind))
     _TRACK_MAPS[key] = tm
     return tm
 
@@ -1083,26 +1082,25 @@ def make_navigator(track: dict, waypoints: list, extra_obstacles=None,
     habian divergido -- pallets acababa con 42 obstaculos en ROS y 84 en
     entrenamiento (los mismos, contados dos veces).
 
-    De donde salen los obstaculos del vortex, en UNA sola via:
-      - la pista trae nav_json (pallets) -> el JSON ya aporta sticks/puerta y los
-        bordes de tarima. NO se añade vortex_obstacles() ademas: el TrackMap de
-        pallets se construye de ese MISMO json, asi que se duplicaria la repulsion.
-      - sin nav_json (maze, platform) -> las cajas salen del XML de MuJoCo via
-        TrackMap.obstacle_boxes, la misma geometria que rasteriza el planificador.
-        En platform esa lista es vacia (no hay paredes), que es lo correcto.
+    De donde salen los obstaculos del vortex, en UNA sola via para todas las
+    pistas: las cajas de pared del XML de MuJoCo (TrackMap.obstacle_boxes), la
+    misma geometria que rasteriza el planificador. En platform esa lista es vacia
+    (no hay paredes), que es lo correcto. Si la pista tiene zona transitable
+    (pallets), su contorno repele hacia adentro como los bordes de la plataforma.
 
     `extra_obstacles` es para lo DINAMICO (el obstaculo virtual del episodio);
-    `edges_zone` para la zona que repele hacia adentro (plataforma). Si no se
-    pasa y la pista es platform, se deriva sola.
+    `edges_zone` para la zona que repele hacia adentro. Si no se pasa, se deriva
+    sola: la zona segura en platform, el contorno transitable si lo hay.
     """
-    nav_json = track.get("nav_json")
-    obstacles = list(extra_obstacles or [])
-    if not nav_json:
-        obstacles += get_track_map(track).vortex_obstacles()
-    if edges_zone is None and track.get("kind") == "platform":
-        edges_zone = build_platform_zone()
-    return GlobalNavigator(nav_json, waypoints=waypoints,
-                           obstacles=obstacles or None, edges_zone=edges_zone, **kw)
+    tm = get_track_map(track)
+    obstacles = list(extra_obstacles or []) + tm.vortex_obstacles()
+    if edges_zone is None:
+        if track.get("kind") == "platform":
+            edges_zone = build_platform_zone()
+        elif tm.drivable_boxes is not None:
+            edges_zone = drivable_zone(tm.drivable_boxes)
+    return GlobalNavigator(waypoints=waypoints, obstacles=obstacles or None,
+                           edges_zone=edges_zone, **kw)
 
 
 def plan_track_route(start_xy: tuple, goal_xy: tuple = None,
@@ -1250,17 +1248,17 @@ def plan_platform_route_with_obstacle(
     return _resample_polyline(path, max_wp_dist), obstacle
 
 class GlobalNavigator:
-    def __init__(self, json_path, waypoints: list,
+    def __init__(self, waypoints: list,
                  att_gain: float = ATT_GAIN, att_range: float = ATT_RANGE,
                  rep_gain: float = REP_GAIN, rep_range: float = REP_RANGE,
                  rh: float = ROBOT_HALF_WIDTH, swirl: float = SWIRL,
                  min_progress: float = MIN_PROGRESS,
-                 pallet_edges: bool = True,
                  n_lookahead: int = N_LOOKAHEAD,
                  lookahead_step: float = LOOKAHEAD_STEP,
                  obstacles: list = None,
                  edges_zone=None):
-        """json_path=None -> modo plataforma plana (sin pallets/sticks fisicos)"""
+        """obstacles: geometria ESTATICA de la pista (Obstacle2D); edges_zone:
+        contorno (shapely) que repele hacia adentro (plataforma, tarimas)."""
         self._wps = [np.array(w) for w in waypoints]
 
         # Obstaculos del vortex en DOS grupos: los ESTATICOS son la geometria de
@@ -1268,26 +1266,8 @@ class GlobalNavigator:
         # episodio; los DINAMICOS son el obstaculo virtual, que replan() cambia
         # en cada reset. Antes habia una sola lista y replan(obstacles=[]) --
         # que se llama en varios sitios -- borraba tambien la geometria fija.
-        if json_path is None:
-            self._vo_static = list(obstacles) if obstacles is not None else []
-            self._edges = edges_zone
-        else:
-            with open(json_path, "r") as f:
-                data = json.load(f)
-            self._vo_static = [Obstacle2D.from_entry(o) for o in data["obstacles"]
-                               if o["name"] != "col_manija"]
-            self._vo_static += [Obstacle2D.from_entry(s) for s in data["sticks"]]
-            if obstacles is not None:
-                self._vo_static += list(obstacles)
-
-            self._edges = edges_zone
-            if pallet_edges and self._edges is None:
-                polys = [ShapelyPolygon(box_corners_2d(np.array(p["center_xy"]),
-                                                       np.array(p["size"]),
-                                                       np.array(p["rot_mat"])))
-                         for p in data["pallets"]]
-                merged = unary_union(polys)
-                self._edges = merged.buffer(GAP_BRIDGE_DISTANCE).buffer(-GAP_BRIDGE_DISTANCE)
+        self._vo_static = list(obstacles) if obstacles is not None else []
+        self._edges = edges_zone
 
         self._att_gain, self._att_range = att_gain, att_range
         self._rep_gain, self._rep_range = rep_gain, rep_range

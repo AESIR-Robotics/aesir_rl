@@ -17,7 +17,7 @@ Con --deterministic se usa la media de cada distribucion (Normal: loc;
 Beta: a/(a+b)), que es lo que se desplegaria en el robot.
 
 Uso:
-    python3 rl_ws/utils/evaluate.py \
+    python3 rl_ws/tools/evaluate.py \
         --ckpt runs/paper_archive/e1p_seed1/fast_iter00300.pt \
         --tracks steps1m steps --episodes 100 --n-envs 12
 """

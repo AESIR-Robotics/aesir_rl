@@ -13,8 +13,8 @@ valor seria reportar DONDE CAYO la orbita, no lo que aprendio el metodo.
 Promediar una ventana final es robusto a eso y es practica estandar.
 
 Uso:
-    python3 rl_ws/utils/analyze_seeds.py runs/seed1.log runs/seed2.log runs/seed3.log
-    python3 rl_ws/utils/analyze_seeds.py runs/*.log --last 50 --csv out.csv --fig curva.png
+    python3 rl_ws/tools/analyze_seeds.py runs/seed1.log runs/seed2.log runs/seed3.log
+    python3 rl_ws/tools/analyze_seeds.py runs/*.log --last 50 --csv out.csv --fig curva.png
 """
 from __future__ import annotations
 

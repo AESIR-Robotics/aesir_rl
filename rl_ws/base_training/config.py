@@ -43,8 +43,9 @@ CHECKPOINT_DIR = Path(ROOT) / "checkpoints_base"
 # techo) y su tipo de navegacion:
 #   kind="platform" -> mision procedural (spawn/meta random, ruta directa +
 #                      obstaculo virtual, zona segura = cuadrado erosionado)
-#   kind="pallets"  -> mision clasica del JSON (A* sobre pallets/sticks,
-#                      spawn/meta fijos) — la implementacion original, intacta.
+#   kind="pallets"  -> mision fija (spawn/meta fijos). Se conduce ENCIMA de
+#                      las tarimas: su zona transitable y su pared salen del XML
+#                      (columnas drivable_prefix / wall_prefix), como el maze.
 # Los .bt se regeneran con: python3 rl_ws/octomap_from_mujoco.py --track <pista>
 TRACKS_DIR = os.path.join(ROOT, "tracks")
 
@@ -63,7 +64,6 @@ def _track_file(track: str, name: str) -> str:
 #                 del raster de meshes no deben chocar con el chasis)
 #   bt            octomap para el heatmap; se regenera con
 #                 python3 rl_ws/octomap_from_mujoco.py --track <pista>
-#   nav_json      solo kind="pallets": describe tarimas y postes
 #   spawn_xy      donde nace. None = procedural (kind="platform" lo sortea)
 #   spawn_yaw     rumbo inicial. None = random (solo con spawn_xy=None)
 #   spawn_z       altura de SUELTA; el robot cae y se asienta
@@ -76,9 +76,14 @@ def _track_file(track: str, name: str) -> str:
 #                 MISMA mision -- que es lo que quieres en pallets y similares
 #   finish_dist   a que distancia de la meta cuenta como alcanzada
 #   wall_prefix   SOLO para pistas donde una parte de las cajas del XML no son
-#                 pared sino terreno que se pisa (steps2). Es el trozo de nombre
-#                 que identifica a las que SI son pared; el extractor ignora el
-#                 resto. None (lo normal) = toda caja de colision es pared.
+#                 pared sino terreno que se pisa (steps2, pallets). Es el trozo
+#                 de nombre (o tupla de trozos) que identifica a las que SI son
+#                 pared; el extractor ignora el resto. None (lo normal) = toda
+#                 caja de colision es pared.
+#   drivable_prefix  SOLO para pistas donde se conduce ENCIMA de ciertas cajas y
+#                 fuera de ellas se cae (pallets): trozo de nombre de esas cajas,
+#                 que pasan a ser la zona transitable del planificador y el
+#                 contorno que repele el vortex. None (lo normal) = sin zona.
 #   grid_res      celda (m) de la rejilla del planificador. Las platform son
 #                 20x20 m con UN obstaculo de 60 cm: a 0.05 serian 401x401
 #                 celdas para una precision que ahi no compra nada
@@ -88,7 +93,7 @@ TRACK_DEFS = {
         xml=_track_file("flat", "scene.xml"),
         terrain=_track_file("flat", "terrain.xml"),
         bt=_track_file("flat", "occupied_map.bt"),
-        nav_json=None,
+        drivable_prefix=None,
         spawn_xy=None, spawn_yaw=None,           # procedural
         spawn_z=0.20, settle_steps=50,           # techo terreno z=0.12
         goal_xy=None,
@@ -98,7 +103,7 @@ TRACK_DEFS = {
         xml=_track_file("steps", "scene.xml"),
         terrain=_track_file("steps", "terrain.xml"),
         bt=_track_file("steps", "occupied_map.bt"),
-        nav_json=None,
+        drivable_prefix=None,
         spawn_xy=None, spawn_yaw=None,
         spawn_z=0.55, settle_steps=150,          # escalones hasta z=0.42
         goal_xy=None,
@@ -108,7 +113,7 @@ TRACK_DEFS = {
         xml=_track_file("steps1m", "scene.xml"),
         terrain=_track_file("steps1m", "terrain.xml"),
         bt=_track_file("steps1m", "occupied_map.bt"),
-        nav_json=None,
+        drivable_prefix=None,
         spawn_xy=None, spawn_yaw=None,
         spawn_z=0.55, settle_steps=150,          # escalones de 1x1 m hasta z=0.42
         goal_xy=None,
@@ -118,7 +123,7 @@ TRACK_DEFS = {
         xml=_track_file("ramps", "scene.xml"),
         terrain=_track_file("ramps", "terrain.xml"),
         bt=_track_file("ramps", "occupied_map.bt"),
-        nav_json=None,
+        drivable_prefix=None,
         spawn_xy=None, spawn_yaw=None,
         spawn_z=0.45, settle_steps=150,          # rampas hasta z=0.28
         goal_xy=None,
@@ -128,7 +133,7 @@ TRACK_DEFS = {
         xml=_track_file("steps2", "scene.xml"),
         terrain=_track_file("steps2", "terrain.xml"),
         bt=_track_file("steps2", "occupied_map.bt"),
-        nav_json=None,
+        drivable_prefix=None,
         spawn_xy=(0.60, -0.15), spawn_yaw=1.5708,    # frente a la entrada, mirando a +y
         spawn_z=0.80, settle_steps=150,
         goal_xy=(1.80, 4.95),                        # ya fuera, pasada la salida
@@ -139,7 +144,8 @@ TRACK_DEFS = {
         xml=_track_file("pallets", "scene.xml"),
         terrain=_track_file("pallets", "terrain.xml"),
         bt=_track_file("pallets", "occupied_map.bt"),
-        nav_json=_track_file("pallets", "obstacles.json"),
+        drivable_prefix="fatal_pallet",
+        wall_prefix=("fatal_stick", "door_frame", "door_leaf"),
         spawn_xy=(-1.5, 3.5), spawn_yaw=0.0,
         spawn_z=0.20, settle_steps=50,
         goal_xy=(7.8, 1.01),
@@ -149,7 +155,7 @@ TRACK_DEFS = {
         xml=_track_file("maze", "scene.xml"),
         terrain=_track_file("maze", "terrain.xml"),
         bt=_track_file("maze", "occupied_map.bt"),
-        nav_json=None,
+        drivable_prefix=None,
         spawn_xy=(0.5, -0.4), spawn_yaw=0.0,
         spawn_z=0.12, settle_steps=100,
         goal_xy=None,
@@ -162,7 +168,7 @@ def track_get(track: dict, key: str, default):
     que añadir una pista sea rellenar una fila): una fila con spawn_xy=None dice
     "procedural", no "sin definir". Con dict.get(k, default) el default NO se
     aplica -- la clave existe -- y el que lee recibe None. Ya rompio dos veces:
-    el bridge al hacer float(None) y el env al quedarse sin nav_json."""
+    el bridge al hacer float(None) y el env al quedarse sin su fichero de mapa."""
     v = track.get(key, default)
     return default if v is None else v
 
@@ -175,7 +181,6 @@ ACTIVE_TRACKS = ["steps2", "ramps", "steps1m", "steps2"]
 # la PRIMERA pista activa. Para probar otra pista por ROS, cambia el orden.
 XML_PATH        = TRACK_DEFS[ACTIVE_TRACKS[0]]["xml"]
 OCTOMAP_BT_PATH = TRACK_DEFS[ACTIVE_TRACKS[0]]["bt"]
-NAV_JSON        = TRACK_DEFS["pallets"]["nav_json"]   # mapa de navegacion pallets
 
 # ── Parametros Heat_Map ──────────────────────────────────────
 USE_HEATMAP = True
@@ -227,9 +232,9 @@ FLIPPER_MIN_RAD = -1.1
 FLIPPER_MAX_RAD = 2.64159
 CONTROL_FLIPPERS = True
 
-# ── Mision (frame de aesir_complete.xml == frame de obstacles.json) ──────────
+# ── Mision (defaults globales; cada pista los pisa en su fila de TRACK_DEFS) ─
 START_XY: Tuple[float, float] = (0.5, -0.4)
-GOAL_XY:  Optional[Tuple[float, float]] = None   # None -> ultimo pallet del JSON
+GOAL_XY:  Optional[Tuple[float, float]] = None   # None -> la goal_xy de la pista
 SPAWN_Z   = 0.40          # (feat/maze)
 FINISH_DIST       = 0.20  # (base) default global; cada pista puede pisarlo con
                           # TRACK_DEFS[...]["finish_dist"] -> fb["finish_dist"]

@@ -18,7 +18,6 @@ Uso:
     python3 tests/plot_path_vortex.py --field         # + campo vectorial
     python3 tests/plot_path_vortex.py --save vortex.png
 """
-import json
 import os
 import sys
 import argparse
@@ -27,8 +26,6 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Polygon as MPolygon
 from matplotlib.colors import Normalize
 from matplotlib.cm import ScalarMappable
-from shapely.geometry import Polygon as ShapelyPolygon
-from shapely.ops import unary_union
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _RL_WS_ROOT = os.path.dirname(_THIS_DIR)
@@ -36,17 +33,16 @@ if _RL_WS_ROOT not in sys.path:
     sys.path.insert(0, _RL_WS_ROOT)
 
 from global_navigator import (
-    plan_track_route, box_corners_2d, GlobalNavigator, vortex_apf,
-    get_track_map,
+    plan_track_route, GlobalNavigator, vortex_apf, get_track_map,
+    make_navigator, drivable_zone,
 )
 # TODOS los parametros compartidos (inicio/meta de la mision, escalas de
 # comando, geometria de la zona segura) salen de base_training/config.py — la
 # misma fuente que usan los dos backends de entrenamiento. Sin arrastrar
 # ROS/mujoco/torch, asi este script sigue corriendo sin sourcear el workspace.
 from base_training.config import (
-    NAV_JSON as _WB_NAV,
     V_MAX_MPS, W_MAX_RADPS, FINISH_DIST,
-    ROBOT_RADIUS, GAP_BRIDGE_DISTANCE, TRACK_DEFS, track_get,
+    ROBOT_RADIUS, TRACK_DEFS, track_get,
 )
 
 def track_spawn_goal(track: dict):
@@ -57,9 +53,6 @@ def track_spawn_goal(track: dict):
     desde un spawn de otro frame y el planificador respondia "sin ruta"."""
     spawn = tuple(track_get(track, "spawn_xy", (0.0, 0.0)))
     goal = track.get("goal_xy")
-    if goal is None and track.get("nav_json"):     # pallets: ultima tarima del JSON
-        with open(track["nav_json"], "r") as f:
-            goal = json.load(f)["pallets"][-1]["center_xy"]
     return spawn, (tuple(goal) if goal is not None else None)
 
 STYLE_OBSTACLE    = dict(fc="#2f3542", ec="#000000", alpha=0.90, zorder=2, lw=0.8)
@@ -126,35 +119,27 @@ def simulate_vortex_path(nav: GlobalNavigator, start_xy, goal_xy):
     return np.array(path), "maxiter"
 
 
-def draw_map(ax, data, track=None):
-    """Dibuja la pista. Con `data` (JSON de pallets) pinta tarimas/sticks/zona
-    segura; sin el (maze, platform) pinta las cajas de pared que saca del XML de
-    MuJoCo -- LA MISMA geometria que rasteriza el planificador, asi que la figura
-    no puede discrepar de lo que el A* considera pared."""
-    if data is None:
-        for x0, y0, x1, y1 in get_track_map(track).obstacle_boxes:
-            ax.add_patch(MPolygon([[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
-                                  closed=True, **STYLE_OBSTACLE))
+def draw_map(ax, track):
+    """Dibuja la pista desde su TrackMap -- LA MISMA geometria que rasteriza el
+    planificador y repele el vortex, asi que la figura no puede discrepar de lo
+    que el A* considera pared. Si la pista tiene zona transitable (pallets),
+    pinta sus piezas y la zona segura (contorno erosionado por el radio del
+    robot)."""
+    tm = get_track_map(track)
+    has_zone = tm.drivable_boxes is not None and track.get("kind") != "platform"
+    wall_style = STYLE_STICK if has_zone else STYLE_OBSTACLE   # pallets: postes/puerta
+    for x0, y0, x1, y1 in tm.obstacle_boxes:
+        ax.add_patch(MPolygon([[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+                              closed=True, **wall_style))
+    if not has_zone:
         return
-    for o in data["obstacles"]:
-        corners = box_corners_2d(np.array(o["center_xy"]), np.array(o["size"]), np.array(o["rot_mat"]))
-        ax.add_patch(MPolygon(corners, closed=True, **STYLE_OBSTACLE))
+    for k, (x0, y0, x1, y1) in enumerate(tm.drivable_boxes, start=1):
+        ax.add_patch(MPolygon([[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+                              closed=True, **STYLE_REAL_PALLET))
+        ax.annotate(f"P{k}", xy=((x0 + x1) / 2, (y0 + y1) / 2), fontsize=13,
+                    ha="center", va="center", color="#ffffff", alpha=0.3, zorder=5)
 
-    for s in data["sticks"]:
-        corners = box_corners_2d(np.array(s["center_xy"]), np.array(s["size"]), np.array(s["rot_mat"]))
-        ax.add_patch(MPolygon(corners, closed=True, **STYLE_STICK))
-
-    pallets_poly = []
-    for p in data["pallets"]:
-        corners = box_corners_2d(np.array(p["center_xy"]), np.array(p["size"]), np.array(p["rot_mat"]))
-        ax.add_patch(MPolygon(corners, closed=True, **STYLE_REAL_PALLET))
-        pallets_poly.append(ShapelyPolygon(corners))
-        name = p["name"].split()[-1]
-        ax.annotate(f"P{name}", xy=p["center_xy"], fontsize=13, ha="center", va="center",
-                    color="#ffffff", alpha=0.3, zorder=5)
-
-    merged = unary_union(pallets_poly)
-    safe_zone = merged.buffer(GAP_BRIDGE_DISTANCE).buffer(-GAP_BRIDGE_DISTANCE).buffer(-ROBOT_RADIUS)
+    safe_zone = drivable_zone(tm.drivable_boxes).buffer(-ROBOT_RADIUS)
     geoms = [safe_zone] if safe_zone.geom_type == "Polygon" else list(safe_zone.geoms)
     labeled = False
     for poly in geoms:
@@ -268,8 +253,6 @@ def draw_vortex_field_route(ax, nav: GlobalNavigator, waypoints, density=10.0,
 
 def main():
     parser = argparse.ArgumentParser(description="Vortex APF path visualizer")
-    parser.add_argument("--json", default=_WB_NAV,
-                        help="mapa de obstaculos (default: el de config, no depende del CWD)")
     parser.add_argument("--save", default=None)
     parser.add_argument("--field", action="store_true", help="dibujar campo vectorial vortex")
     parser.add_argument("--field-mode", choices=["route", "global"], default="route",
@@ -308,26 +291,14 @@ def main():
     start_xy = tuple(args.start) if args.start else spawn
     goal_xy  = tuple(args.goal) if args.goal else goal
 
-    # Solo pallets trae JSON; el resto (maze, platform) saca su geometria del XML
-    # de MuJoCo, asi que `data` queda en None y draw_map pinta las cajas de pared.
-    nav_json = track.get("nav_json")
-    data = None
-    if nav_json:
-        if not os.path.exists(nav_json):
-            print(f"Error: {nav_json} not found. Generate the JSON map first.")
-            return
-        with open(nav_json, "r") as f:
-            data = json.load(f)
-
     print(f"Planeando ruta en '{args.track}' (TrackMap, el mismo del pipeline) ...")
     waypoints, goal_xy = plan_track_route(start_xy, goal_xy, track=track,
                                           start_yaw=float(track_get(track, "spawn_yaw", 0.0)))
     wps_arr = np.array(waypoints)
 
-    # MISMOS obstaculos que ve el vortex en el entrenamiento: los del JSON si la
-    # pista lo tiene, y ademas las paredes de la pista (ver mujoco_sim_base).
-    nav = GlobalNavigator(nav_json, waypoints=waypoints,
-                          obstacles=get_track_map(track).vortex_obstacles())
+    # El MISMO navegador que construye el entrenamiento (make_navigator): paredes
+    # de la pista y, si las hay, bordes de la zona transitable / plataforma.
+    nav = make_navigator(track, waypoints)
     print("Simulando seguimiento con correccion vortex ...")
     vortex_path, status = simulate_vortex_path(nav, start_xy, goal_xy)
     _status_txt = {"goal": "llego a meta",
@@ -348,7 +319,7 @@ def main():
                  fontsize=24, fontweight="bold", color="#ffffff", pad=14)
     ax.tick_params(colors="#ffffff")
 
-    draw_map(ax, data, track)
+    draw_map(ax, track)
 
     all_pts = wps_arr.tolist() + vortex_path.tolist() + [list(start_xy), list(goal_xy)]
     xs = [p[0] for p in all_pts]

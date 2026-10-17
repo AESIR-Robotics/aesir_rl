@@ -30,7 +30,6 @@ REQUIERE, en OTRA terminal, el bridge corriendo:
 """
 from __future__ import annotations
 
-import json
 import math
 import threading
 import time
@@ -69,7 +68,6 @@ from rl_ws.base_training.base_env import (
 # identica tarea aqui que en train_fast. Los PESOS del reward ya no se importan
 # aqui: los consume base_env.compute_reward, que es quien calcula el reward.
 from rl_ws.base_training.config import (
-    NAV_JSON,
     V_MAX_MPS, W_MAX_RADPS,
     FLIPPER_MIN_RAD, FLIPPER_MAX_RAD, FLIPPER_HOME_RAD,
     START_XY, GOAL_XY, EPISODE_MAX_STEPS,
@@ -258,7 +256,6 @@ class BaseRosEnv:
     """
 
     def __init__(self,
-                 nav_json: str = NAV_JSON,
                  start_xy: Tuple[float, float] = START_XY,
                  goal_xy: Optional[Tuple[float, float]] = GOAL_XY,
                  control_hz: float = CONTROL_HZ,
@@ -267,19 +264,15 @@ class BaseRosEnv:
         # Modo del env = kind de la pista activa (ACTIVE_TRACKS[0]), para que el
         # env ROS vea el MISMO mundo que el bridge y que el entrenamiento rapido:
         #   "platform" -> ruta directa + obstaculo virtual + zona segura.
-        #   "pallets"  -> A* sobre los pallets/sticks del JSON (mision fija).
+        #   "pallets"  -> A* sobre las tarimas/postes del XML (mision fija).
         #   "maze"     -> A* sobre el mapa de ocupacion del laberinto, con la meta
         #                 sorteada en pasillo libre (ver global_navigator.MazeMap).
         # OJO: antes solo existia el booleano use_platform, asi que el maze caia
-        # en la rama de pallets y acababa planeando sobre obstacles.json — otra
+        # en la rama de pallets y acababa planeando sobre el mapa de pallets — otra
         # pista, otro frame: waypoints y meta quedaban fuera del laberinto.
         self.kind = _KIND
         if use_platform is None:
             use_platform = (self.kind == "platform")
-        # nav_json y octomap de la pista activa (config ya los resolvio arriba,
-        # pero en modo pallets usamos el JSON de esa pista explicitamente).
-        if self.kind == "pallets":
-            nav_json = track_get(_ACTIVE_TRACK, "nav_json", nav_json)
         if self.kind == "maze":
             # El spawn del maze es el suyo (la entrada del laberinto), no el
             # START_XY global, que es la mision de pallets en otro frame.
@@ -290,7 +283,6 @@ class BaseRosEnv:
         self.dt = 1.0 / control_hz
         self.max_steps = max_steps
         self.use_platform = use_platform
-        self.nav_json = nav_json
         self.start_xy = np.array(start_xy, dtype=np.float64)
 
         if self.kind == "maze":
@@ -303,9 +295,11 @@ class BaseRosEnv:
             self._fixed_goal = None if goal_xy is None else np.array(goal_xy, dtype=np.float64)
             self.platform_zone = build_platform_zone()   # zona segura (estatica), para el plot
         else:
-            # Mundo viejo: goal None -> ultimo pallet del JSON; ruta A* fija.
+            # Mision fija (pallets): la meta es la de la fila de la pista.
             if goal_xy is None:
-                goal_xy = tuple(json.load(open(nav_json))["pallets"][-1]["center_xy"])
+                goal_xy = track_get(_ACTIVE_TRACK, "goal_xy", None)
+            if goal_xy is None:
+                raise ValueError(f"la pista '{_KIND}' no declara goal_xy en TRACK_DEFS")
             self._fixed_goal = np.array(goal_xy, dtype=np.float64)
             self.platform_zone = None
 

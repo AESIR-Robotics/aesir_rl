@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import os
 import sys
-import json
 import argparse
 from collections import defaultdict
 
@@ -31,7 +30,7 @@ for _p in (_ROOT, _HERE):                            # _HERE: para importar plot
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from rl_ws.base_training.base_ros_env import BaseRosEnv, NAV_JSON      # noqa: E402
+from rl_ws.base_training.base_ros_env import BaseRosEnv                # noqa: E402
 import rl_ws.base_training.config as C                                 # noqa: E402
 from rl_ws.base_training.ppo_cnn_extractor import CNNActorCritic       # noqa: E402
 from rl_ws.base_training.ppo import MLPActorCritic                     # noqa: E402
@@ -205,14 +204,14 @@ class LiveTrajectoryPlot:
       - Plataforma (env.use_platform=True, mapa NUEVO tracks/flat/terrain.xml): borde de
         la plataforma + zona segura erosionada (env.platform_zone) + ruta directa
         + obstaculo virtual. Igual look que tools/plot_path_vortex.py.
-      - Pallets (env.use_platform=False, mapa VIEJO): pista via
-        plot_path_vortex.draw_map(obstacles.json) + ruta A*.
+      - Pistas con mapa fijo (pallets, maze, steps2): pista via
+        plot_path_vortex.draw_map (la geometria del TrackMap) + ruta A*.
 
     A cada paso traza el camino REAL del robot y el punto-guia del vortex.
     Guarda un PNG al terminar cada episodio. `every` = cada cuantos pasos
     refresca el lienzo."""
 
-    def __init__(self, env, map_data=None, every: int = 2):
+    def __init__(self, env, every: int = 2):
         import matplotlib
         import matplotlib.pyplot as plt
         from matplotlib.patches import Polygon as MPolygon, Rectangle
@@ -263,10 +262,11 @@ class LiveTrajectoryPlot:
                                       lw=0.8, zorder=1, label="Safe zone"))
             ax.set_xlim(-he - 1, he + 1); ax.set_ylim(-he - 1, he + 1)
         else:
-            from rl_ws.utils.plot_path_vortex import draw_map          # pista de pallets (fondo)
-            draw_map(ax, map_data)
+            from rl_ws.tools.plot_path_vortex import draw_map          # fondo de la pista activa
             from rl_ws.global_navigator import get_track_map
-            tm = get_track_map(C.TRACK_DEFS[C.ACTIVE_TRACKS[0]])
+            track = C.TRACK_DEFS[C.ACTIVE_TRACKS[0]]
+            draw_map(ax, track)
+            tm = get_track_map(track)
             lo = tm.origin
             hi = lo + (tm.dims - 1) * tm.res
             ax.set_xlim(lo[0] - 0.5, hi[0] + 0.5); ax.set_ylim(lo[1] - 0.5, hi[1] + 0.5)
@@ -379,12 +379,7 @@ def main():
 
     live = None
     if args.plot:
-        # Fondo del mapa viejo (pallets) solo si el env NO usa la plataforma nueva.
-        map_data = None
-        if getattr(env, "kind", "pallets") == "pallets":   # el fondo de pallets
-            with open(NAV_JSON, "r") as f:                 # solo aplica a ESA pista
-                map_data = json.load(f)
-        live = LiveTrajectoryPlot(env, map_data=map_data)
+        live = LiveTrajectoryPlot(env)
 
     global_terms = defaultdict(float)   # acumulado de todos los episodios
     global_steps = 0

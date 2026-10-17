@@ -17,8 +17,8 @@ Misma paleta y mismo estilo que tenia make_figures.py para que las figuras del p
 se lean como una sola familia.
 
 Uso:
-    python3 rl_ws/utils/make_figures_v2.py
-    python3 rl_ws/utils/make_figures_v2.py --runs runs/paper_archive --out figs
+    python3 rl_ws/tools/make_figures_v2.py
+    python3 rl_ws/tools/make_figures_v2.py --runs runs/paper_archive --out figs
 """
 from __future__ import annotations
 

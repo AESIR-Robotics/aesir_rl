@@ -56,10 +56,9 @@ def _quat_upright(q) -> float:
 class BaseMujocoEnv:
     """Un env MuJoCo directo. Misma tarea/obs/reward/accion que BaseRosEnv.
 
-    `track` = entrada de C.TRACK_DEFS (kind/xml/bt/spawn_z/settle_steps[/nav_json]).
+    `track` = entrada de C.TRACK_DEFS (kind/xml/bt/spawn_z/settle_steps/...).
       kind="platform": mision procedural (spawn/meta random + obstaculo virtual).
-      kind="pallets":  mision clasica del JSON (A* sobre pallets, spawn/meta fijos)
-                       — la implementacion original de la pista de pallets."""
+      kind="pallets":  mision fija (A* sobre las tarimas del XML, spawn/meta fijos)."""
 
     def __init__(self, waypoints, model: mujoco.MjModel = None,
                  goal_xy=None, control_decimation: int = C.CONTROL_DECIMATION,

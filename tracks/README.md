@@ -15,7 +15,9 @@ tracks/<pista>/
   preview.png         captura de referencia (si existe)
 ```
 
-`pallets` además tiene `pallets.xml`, `door.xml` y `obstacles.json` (misión del JSON).
+`pallets` además tiene `pallets.xml` y `door.xml`. Como en `steps2`, su mapa de navegación
+sale del XML: las tarimas (`fatal_pallet*`) son la zona transitable (columna `drivable_prefix`)
+y los postes y la puerta son pared (columna `wall_prefix`).
 `_archive/` guarda modelos que ningún código usa (la versión vieja de `steps` como losa sólida).
 
 ## Añadir una pista
