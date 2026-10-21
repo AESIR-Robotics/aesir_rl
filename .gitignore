@@ -47,6 +47,7 @@ mlruns/
 runs/
 outputs/
 checkpoints/
+checkpoints_fsm/
 *.mp4
 *.gif
 *.npz
