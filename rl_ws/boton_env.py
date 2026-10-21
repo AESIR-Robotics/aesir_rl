@@ -518,10 +518,18 @@ class BotonArmEnv:
                  seed: Optional[int] = None,
                  model: Optional["mujoco.MjModel"] = None,
                  disable_sensors: bool = True,
-                 cortes: Optional[set] = None):
+                 cortes: Optional[set] = None,
+                 force_mode: Optional[str] = None,
+                 data: Optional["mujoco.MjData"] = None):
         """model: MjModel ya compilado (una copia POR env). Compilar el XML es
         caro; el vec env lo hace una vez y reparte copias, igual que
-        mujoco_sim_base.VecMujocoEnv."""
+        mujoco_sim_base.VecMujocoEnv.
+
+        force_mode: None (random episode mode), "torre" or "sueltos".
+        data: MjData SHARED with another env on the same `model` (see
+        fsm_training/mission_env.py: base and arm in a single physics world).
+        Episodes then start with reset_from_current_state(), not reset(),
+        which resets the whole world."""
 
         self.model = model if model is not None else mujoco.MjModel.from_xml_path(xml_path)
 
@@ -535,7 +543,7 @@ class BotonArmEnv:
         # respecto a la que ya esta validada.
         if disable_sensors:
             self.model.opt.disableflags |= mujoco.mjtDisableBit.mjDSBL_SENSOR
-        self.data  = mujoco.MjData(self.model)
+        self.data  = data if data is not None else mujoco.MjData(self.model)
 
         self.max_steps          = max_steps
         self.control_decimation = control_decimation
@@ -549,6 +557,9 @@ class BotonArmEnv:
         self.cortes = ({"ajeno", "no_garra", "auto"} if cortes is None
                        else set(cortes))
         self.randomize_torre    = randomize_torre
+        if force_mode not in (None, "torre", "sueltos"):
+            raise ValueError("force_mode must be None, 'torre' or 'sueltos'")
+        self.force_mode          = force_mode
         self.fixed_target       = fixed_target
         # Subconjunto de botones sobre el que entrenar. La torre es una cupula:
         # desde una sola posicion del robot no todos son alcanzables (ver
@@ -957,7 +968,8 @@ class BotonArmEnv:
         p_ab, R_ab = self.arm_base_frame()
         p_sh = p_ab + R_ab @ SHOULDER_OFF
 
-        self.modo = "torre" if self.rng.random() < P_MODO_TORRE else "sueltos"
+        self.modo = (self.force_mode if self.force_mode is not None
+                 else "torre" if self.rng.random() < P_MODO_TORRE else "sueltos")
 
         if self.modo == "torre":
             for k, b in enumerate(self._b_libre):
@@ -1366,6 +1378,31 @@ class BotonArmEnv:
         self._base_qpos_frozen = d.qpos[self._base_qadr:self._base_qadr + 7].copy()
         if self.freeze_base and self._eq_freeze >= 0:
             self._anclar_weld(self._base_qpos_frozen)
+
+        return self._start_episode()
+
+    def reset_from_current_state(self) -> np.ndarray:
+        """Start a button episode WITHOUT resetting the physics.
+
+        For an MjData shared with the base (fsm_training/mission_env.py): the
+        robot already drove up to the tower, so there is no mj_resetData and no
+        chassis settling -- the chassis is welded where it is and the arm starts
+        from the pose the base left it in (rest, held by its position
+        actuators)."""
+        d = self.data
+        self._joint_pos = d.qpos[self._q_arm].copy()
+        self._qvel_cmd_prev = np.zeros(6)
+        d.ctrl[self._a_arm] = self._joint_pos
+        d.ctrl[self._a_fing] = FINGER_CLOSED
+        self._base_qpos_frozen = d.qpos[self._base_qadr:self._base_qadr + 7].copy()
+        if self.freeze_base and self._eq_freeze >= 0:
+            self._anclar_weld(self._base_qpos_frozen)
+        return self._start_episode()
+
+    def _start_episode(self) -> np.ndarray:
+        """Shared tail of reset() and reset_from_current_state(): with the
+        chassis in place, place the buttons and reset the episode state."""
+        m, d = self.model, self.data
 
         # Ya hay pose de chasis fiable -> se puede sortear donde van los botones.
         self._colocar_botones()
