@@ -51,7 +51,7 @@ except ImportError:
     _HAS_WANDB = False
 
 CHECKPOINT_DIR = C.CHECKPOINT_DIR   # absoluto (no depende del CWD)
-CHECKPOINT_DIR.mkdir(exist_ok=True)
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ──────────────────────────── Buffer (obs vectorial) ───────────────────────
@@ -207,7 +207,7 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="Entrena la base con PPO sobre el bridge ROS2.")
     ap.add_argument("--resume", default="",
                     help="Checkpoint del que reanudar. Vacio (default) = desde cero. "
-                         "Ej: --resume ../checkpoints_base/base_best.pt")
+                         "Ej: --resume ../runs/checkpoints/base_best.pt")
     ap.add_argument("--iters", type=int, default=C.ROS_ITERS)
     ap.add_argument("--wandb", action="store_true",
                     help="logea metricas a Weights & Biases (requiere `wandb login`)")

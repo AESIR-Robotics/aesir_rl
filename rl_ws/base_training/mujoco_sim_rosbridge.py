@@ -112,17 +112,6 @@ def ros_to_hw(rad: float) -> float:
 
 
 
-def duty_to_omega(duty: float, omega_max: float) -> float:
-    """Traduce una señal de potencia normalizada (-1..1, tipo PWM/duty de un
-    driver de motor) a velocidad angular (rad/s) para un actuador de
-    velocidad de MuJoCo. omega_max = velocidad sin carga nominal del motor,
-    en rad/s (RPM_datasheet * 2*pi/60, dividido por la relacion de reduccion
-    si el motor tiene caja reductora). No hace falta modelar la caida de
-    velocidad bajo carga a mano — el limite de fuerza del actuador
-    (forcerange/actuatorfrcrange) + kv ya reproduce ese efecto."""
-    return duty * omega_max
-
-
 def points_to_pointcloud2(points: np.ndarray, frame_id: str, stamp) -> PointCloud2:
     """Arma un PointCloud2 (XYZ float32) a mano, sin depender de sensor_msgs_py
     (no siempre disponible segun la distro/instalacion)."""

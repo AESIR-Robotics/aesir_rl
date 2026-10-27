@@ -32,8 +32,7 @@ import numpy as np
 # ── Rutas (absolutas, no dependen del CWD) ───────────────────────────────────
 _HERE    = os.path.dirname(os.path.abspath(__file__))            # .../rl_ws/base_training
 ROOT     = os.path.dirname(os.path.dirname(_HERE))               # .../aesir_rl
-RL_WS    = os.path.abspath(os.path.join(_HERE, ".."))            # .../rl_ws
-CHECKPOINT_DIR = Path(ROOT) / "checkpoints_base"
+CHECKPOINT_DIR = Path(ROOT) / "runs" / "checkpoints"
 
 # ── PISTAS (registro multi-pista) ────────────────────────────────────────────
 # Todo lo de una pista vive en tracks/<pista>/ (raiz del repo): scene.xml
@@ -75,15 +74,17 @@ def _track_file(track: str, name: str) -> str:
 #                 bootstrapear). Con valor fijo, todos los episodios corren la
 #                 MISMA mision -- que es lo que quieres en pallets y similares
 #   finish_dist   a que distancia de la meta cuenta como alcanzada
-#   wall_prefix   SOLO para pistas donde una parte de las cajas del XML no son
+#   wall_prefix   solo para pistas donde una parte de las cajas del XML no son
 #                 pared sino terreno que se pisa (steps2, pallets). Es el trozo
-#                 de nombre (o tupla de trozos) que identifica a las que SI son
+#                 de nombre (o tupla de trozos) que identifica a las que si son
 #                 pared; el extractor ignora el resto. None (lo normal) = toda
 #                 caja de colision es pared.
-#   drivable_prefix  SOLO para pistas donde se conduce ENCIMA de ciertas cajas y
+#   drivable_prefix  SOLO para pistas donde se conduce encima de ciertas cajas y
 #                 fuera de ellas se cae (pallets): trozo de nombre de esas cajas,
 #                 que pasan a ser la zona transitable del planificador y el
 #                 contorno que repele el vortex. None (lo normal) = sin zona.
+#   walkable_floor  nombre del plano que SE PISA (maze). Todo otro plano es
+#                 piso fatal: tocarlo termina el episodio. None = ninguno.
 #   grid_res      celda (m) de la rejilla del planificador. Las platform son
 #                 20x20 m con UN obstaculo de 60 cm: a 0.05 serian 401x401
 #                 celdas para una precision que ahi no compra nada
@@ -156,6 +157,7 @@ TRACK_DEFS = {
         terrain=_track_file("maze", "terrain.xml"),
         bt=_track_file("maze", "occupied_map.bt"),
         drivable_prefix=None,
+        walkable_floor="maze_floor",
         spawn_xy=(0.5, -0.4), spawn_yaw=0.0,
         spawn_z=0.12, settle_steps=100,
         goal_xy=None,
@@ -175,7 +177,7 @@ def track_get(track: dict, key: str, default):
 
 # Pistas ACTIVAS para entrenar: una o varias — VecMujocoEnv las reparte entre
 # los envs (round-robin). Ej: ["flat"], ["steps"], ["flat","steps","ramps"].
-ACTIVE_TRACKS = ["steps2", "ramps", "steps1m", "steps2"]
+ACTIVE_TRACKS = ["maze", "flat", "ramps", "steps1m"]
 
 # Compatibilidad: el "mundo por default" (bridge ROS, scripts single-track) es
 # la PRIMERA pista activa. Para probar otra pista por ROS, cambia el orden.

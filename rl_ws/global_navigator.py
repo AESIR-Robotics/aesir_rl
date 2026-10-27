@@ -24,7 +24,7 @@ try:
         ATT_GAIN, ATT_RANGE, REP_GAIN, REP_RANGE, SWIRL, MIN_PROGRESS,
         PLATFORM_HALF_EXTENT, VIRTUAL_OBSTACLE_HALF_SIZE,
         VIRTUAL_OBSTACLE_MIN_HALF_SIZE, VIRTUAL_OBSTACLE_OFFSET_FRAC,
-        ROBOT_TOP_M, GOAL_MIN_DIST_M, TRACK_DEFS, START_XY, track_get,
+        ROBOT_TOP_M, GOAL_MIN_DIST_M, TRACK_DEFS, track_get,
         ROBOT_HALF_WIDTH, ROBOT_HALF_LENGTH, PLAN_N_HEADINGS, PLAN_TURN_COST,
         PLAN_REVERSE_COST, PLAN_ARC_RADII, TURN_SUBSAMPLE,
     )
@@ -36,22 +36,10 @@ except ModuleNotFoundError:
         ATT_GAIN, ATT_RANGE, REP_GAIN, REP_RANGE, SWIRL, MIN_PROGRESS,
         PLATFORM_HALF_EXTENT, VIRTUAL_OBSTACLE_HALF_SIZE,
         VIRTUAL_OBSTACLE_MIN_HALF_SIZE, VIRTUAL_OBSTACLE_OFFSET_FRAC,
-        ROBOT_TOP_M, GOAL_MIN_DIST_M, TRACK_DEFS, START_XY, track_get,
+        ROBOT_TOP_M, GOAL_MIN_DIST_M, TRACK_DEFS, track_get,
         ROBOT_HALF_WIDTH, ROBOT_HALF_LENGTH, PLAN_N_HEADINGS, PLAN_TURN_COST,
         PLAN_REVERSE_COST, PLAN_ARC_RADII, TURN_SUBSAMPLE,
     )
-
-def box_corners_2d(center_xy: np.ndarray, half_sizes: np.ndarray, rot_mat: np.ndarray) -> np.ndarray:
-    hx, hy = half_sizes[0], half_sizes[1]
-    R2 = np.array(rot_mat)[:2, :2]
-    ax = R2 @ np.array([hx, 0.0])
-    ay = R2 @ np.array([0.0, hy])
-    return np.array([
-        center_xy + ax + ay,
-        center_xy - ax + ay,
-        center_xy - ax - ay,
-        center_xy + ax - ay,
-    ])
 
 class Obstacle2D:
     def __init__(self, name: str, cx: float, cy: float, hx: float, hy: float):
@@ -712,9 +700,6 @@ class TrackMap:
     def _world(self, cell) -> np.ndarray:
         return self.origin + np.asarray(cell, dtype=float) * self.res
 
-    def is_navigable(self, xy) -> bool:
-        return bool(self.navigable[self._cell(xy)])
-
     def _nearest_navigable(self, xy) -> tuple:
         """Celda navegable mas cercana a xy. Necesario porque el robot REAL
         puede estar dentro de la banda inflada (rozando una pared) y desde ahi
@@ -918,10 +903,6 @@ class TrackMap:
             cur_h = chosen
             i = j
         return out
-
-    def _segment_ok(self, a: tuple, b: tuple) -> bool:
-        """Compat: ¿tramo recto viable llegando con el rumbo guardado en `a`?"""
-        return self._segment_head(a[0], b[0], a[1]) is not None
 
     def _segment_head(self, ca: tuple, cb: tuple, h_in: int,
                       blocked=None):

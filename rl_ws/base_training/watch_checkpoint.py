@@ -7,7 +7,7 @@ ThreadPoolExecutor de train_fast.py en esta maquina (Wayland/XWayland+amdgpu).
 Uso:
     cd rl_ws
     PYGLFW_LIBRARY_VARIANT=x11 python3 base_training/watch_checkpoint.py \
-        --ckpt ../checkpoints_base/fast_best.pt
+        --ckpt ../runs/checkpoints/fast_best.pt
 """
 from __future__ import annotations
 import argparse, os, sys, time

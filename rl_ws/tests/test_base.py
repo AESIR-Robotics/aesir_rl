@@ -9,7 +9,7 @@ REQUIERE, en OTRA terminal, el bridge corriendo:
 Uso:
     cd rl_ws
     python3 tests/test_base.py                                   # base_best.pt, deterministico
-    python3 tests/test_base.py --checkpoint checkpoints_base/base_iter00100.pt
+    python3 tests/test_base.py --checkpoint runs/checkpoints/base_iter00100.pt
     python3 tests/test_base.py --episodes 5 --stochastic
 """
 from __future__ import annotations
@@ -36,7 +36,7 @@ from rl_ws.base_training.ppo_cnn_extractor import CNNActorCritic       # noqa: E
 from rl_ws.base_training.ppo import MLPActorCritic                     # noqa: E402
 from rl_ws.base_training.sac import Actor as SacActor, to_env_action   # noqa: E402
 
-DEFAULT_CKPT = os.path.join(_ROOT, "checkpoints_base", "fast_best.pt")
+DEFAULT_CKPT = str(C.CHECKPOINT_DIR / "fast_best.pt")
 
 
 def load_policy(path: str, obs_dim: int, act_dim: int, device, algo: str = "ppo"):
@@ -357,18 +357,18 @@ def main():
     args = ap.parse_args()
 
     # Resuelve el checkpoint sin importar el CWD: prueba tal cual, luego relativo
-    # a la raiz del proyecto y a checkpoints_base/ (asi vale pasar la ruta corta).
+    # a la raiz del proyecto y a C.CHECKPOINT_DIR (asi vale pasar la ruta corta).
     ckpt = args.checkpoint
     if not os.path.isfile(ckpt):
         for cand in (os.path.join(_ROOT, ckpt),
-                     os.path.join(_ROOT, "checkpoints_base", os.path.basename(ckpt))):
+                     os.path.join(str(C.CHECKPOINT_DIR), os.path.basename(ckpt))):
             if os.path.isfile(cand):
                 ckpt = cand
                 break
     if not os.path.isfile(ckpt):
         raise SystemExit(
             f"No existe el checkpoint: {args.checkpoint}\n"
-            f"  (buscado tambien en {_ROOT}/ y {_ROOT}/checkpoints_base/)")
+            f"  (buscado tambien en {_ROOT}/ y {C.CHECKPOINT_DIR}/)")
     args.checkpoint = ckpt
 
     device = _pick_device(args.device)

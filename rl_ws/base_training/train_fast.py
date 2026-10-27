@@ -46,7 +46,7 @@ try:
 except ImportError:
     _HAS_WANDB = False
 
-C.CHECKPOINT_DIR.mkdir(exist_ok=True)
+C.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 from rl_ws.base_training.ppo import (ppo_update, compute_gae,  # sin MLPActorCritic
                                      RunningMeanStd)

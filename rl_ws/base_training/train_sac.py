@@ -39,7 +39,7 @@ try:
 except ImportError:
     _HAS_WANDB = False
 
-C.CHECKPOINT_DIR.mkdir(exist_ok=True)
+C.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
