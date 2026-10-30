@@ -430,6 +430,10 @@ LOG_STD_INIT  = -0.5     # log-std inicial de la gaussiana de la politica
 LOG_STD_MIN   = -5.0     # clamp del log-std aprendible
 LOG_STD_MAX   = 0.0
 MAX_GRAD_NORM = 0.5      # clip de norma de gradiente en el update
+# Critico asimetrico: su cabeza recibe ademas contactos con el terreno que el
+# robot real no mide (oruga izq/der, flipper 1-4, chasis; 0/1). Ver train_fast --priv-critic.
+PRIV_CRITIC = False
+PRIV_DIM    = 7
 
 # ── Hiperparametros PPO / entrenamiento ──────────────────────────────────────
 N_ENVS        = 14       # envs MuJoCo en paralelo (threads)

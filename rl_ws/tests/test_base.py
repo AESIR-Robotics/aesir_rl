@@ -98,8 +98,8 @@ def load_policy(path: str, obs_dim: int, act_dim: int, device, algo: str = "ppo"
                 f"'{os.path.basename(path)}' tiene sigma dependiente del estado "
                 f"(actor_logstd), variante rechazada; esta red usa sigma global. "
                 f"Ver docs/sigma_estado.md.")
-        policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS,
-                                hidden=ckpt_hidden).to(device)
+        policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS, hidden=ckpt_hidden,
+                                priv_dim=CNNActorCritic.priv_dim_of(saved, ckpt_hidden)).to(device)
     policy.load_state_dict(saved)
     policy.eval()
     extra = (f"success={ckpt['success_rate']:.1%}" if "success_rate" in ckpt

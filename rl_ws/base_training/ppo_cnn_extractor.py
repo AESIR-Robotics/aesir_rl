@@ -69,7 +69,7 @@ class CNNActorCritic(nn.Module):
     def __init__(self, obs_dim: int, act_dim: int,
                  map_pixels: int = 64, map_feat_dim: int = 128,
                  state_feat_dim: int = 64, hidden: int = C.HIDDEN,
-                 log_std_init: float = C.LOG_STD_INIT):
+                 log_std_init: float = C.LOG_STD_INIT, priv_dim: int = 0):
         super().__init__()
 
         self.map_pixels = map_pixels
@@ -99,7 +99,9 @@ class CNNActorCritic(nn.Module):
         self.actor_vw = nn.Linear(hidden, 2)               # mu de [v, ω]
         self.log_std_vw = nn.Parameter(torch.full((2,), log_std_init))
         self.actor_flip = nn.Linear(hidden, 8)              # (alpha_raw,beta_raw) x 4 flippers
-        self.critic = nn.Linear(hidden, 1)
+        # priv_dim > 0: critico asimetrico; la cabeza ve z + senales privilegiadas.
+        self.priv_dim = priv_dim
+        self.critic = nn.Linear(hidden + priv_dim, 1)
 
     def _split(self, obs: torch.Tensor):
         """obs: (batch, obs_dim) -> (state (batch,state_dim), map_img (batch,1,H,W))"""
@@ -107,7 +109,7 @@ class CNNActorCritic(nn.Module):
         map_img = obs[:, self.state_dim:].view(-1, 1, self.map_pixels, self.map_pixels)
         return state, map_img
 
-    def forward(self, obs):
+    def forward(self, obs, priv=None):
         """(batch, obs_dim) -> (params: dict, value (batch,1)).
         params = {mu_vw, std_vw, alpha, beta} -- ver _dists()."""
         state, map_img = self._split(obs)
@@ -122,21 +124,33 @@ class CNNActorCritic(nn.Module):
         alpha = F.softplus(raw_flip[:, 0::2]) + 1.0                     # (batch,4)
         beta_ = F.softplus(raw_flip[:, 1::2]) + 1.0                     # (batch,4)
 
-        value = self.critic(z)                                          # (batch,1)
+        if self.priv_dim:
+            if priv is None:            # despliegue/visor: el valor no se usa
+                priv = z.new_zeros(z.shape[0], self.priv_dim)
+            z_c = torch.cat([z, priv], dim=1)
+        else:
+            z_c = z
+        value = self.critic(z_c)                                        # (batch,1)
 
         return dict(mu_vw=mu_vw, std_vw=std_vw, alpha=alpha, beta=beta_), value
 
-    def _dists(self, obs):
-        params, value = self(obs)
+    @staticmethod
+    def priv_dim_of(state_dict, hidden: int = C.HIDDEN) -> int:
+        """priv_dim de un checkpoint (0 = critico normal)."""
+        return int(state_dict["critic.weight"].shape[1]) - hidden
+
+    def _dists(self, obs, priv=None):
+        params, value = self(obs, priv)
         d_vw = Normal(params["mu_vw"], params["std_vw"])
         d_flip = Beta(params["alpha"], params["beta"])
         return d_vw, d_flip, value
 
     @torch.no_grad()
-    def act_batch(self, obs_np: np.ndarray, device):
+    def act_batch(self, obs_np: np.ndarray, device, priv_np: np.ndarray = None):
         """Rollout vectorizado (VecMujocoEnv, N envs)."""
         obs = torch.as_tensor(obs_np, dtype=torch.float32, device=device)
-        d_vw, d_flip, value = self._dists(obs)
+        priv = None if priv_np is None else torch.as_tensor(priv_np, dtype=torch.float32, device=device)
+        d_vw, d_flip, value = self._dists(obs, priv)
 
         raw_vw = d_vw.sample()                                          # (batch,2)
         raw_flip = d_flip.sample().clamp(_BETA_EPS, 1.0 - _BETA_EPS)     # (batch,4)
@@ -164,13 +178,13 @@ class CNNActorCritic(nn.Module):
         return (action.squeeze(0).cpu().numpy(), raw.squeeze(0).cpu().numpy(),
                 float(logp.item()), float(value.item()))
 
-    def evaluate(self, obs, actions):
+    def evaluate(self, obs, actions, priv=None):
         """(logp, value, entropy) -- MISMAS formas que antes, ver ppo_update():
             logp    (batch,1)
             value   (batch,1)
             entropy escalar (mean ya aplicado, suma de las 2 distribuciones)
         `actions` = el tensor `raw` guardado por act_batch/act (6 columnas)."""
-        d_vw, d_flip, value = self._dists(obs)
+        d_vw, d_flip, value = self._dists(obs, priv)
 
         raw_vw = actions[:, 0:2]
         raw_flip = actions[:, 2:6].clamp(_BETA_EPS, 1.0 - _BETA_EPS)

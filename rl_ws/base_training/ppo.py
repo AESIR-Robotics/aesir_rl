@@ -105,19 +105,21 @@ class MLPActorCritic(nn.Module):
 
 # ── PPO update (batch plano) ────────────────────────────────────────────────
 def ppo_update(policy, opt, obs, actions, old_logp, adv, ret,
-               epochs, batch, clip, vf_c, ent_c, device):
+               epochs, batch, clip, vf_c, ent_c, device, priv=None):
     obs     = torch.as_tensor(obs,     dtype=torch.float32, device=device)
     actions = torch.as_tensor(actions, dtype=torch.float32, device=device)
     old_logp = torch.as_tensor(old_logp, dtype=torch.float32, device=device).unsqueeze(-1)
     adv_t   = torch.as_tensor(adv, dtype=torch.float32, device=device).unsqueeze(-1)
     ret_t   = torch.as_tensor(ret, dtype=torch.float32, device=device).unsqueeze(-1)
+    priv_t  = None if priv is None else torch.as_tensor(priv, dtype=torch.float32, device=device)
     n = obs.shape[0]
 
     m = {"pi": 0.0, "v": 0.0, "ent": 0.0}
     n_updates = 0
     for _ in range(epochs):
         for idx in BatchSampler(SubsetRandomSampler(range(n)), batch, False):
-            lp, val, ent = policy.evaluate(obs[idx], actions[idx])
+            lp, val, ent = (policy.evaluate(obs[idx], actions[idx]) if priv_t is None
+                            else policy.evaluate(obs[idx], actions[idx], priv_t[idx]))
             r  = torch.exp(lp - old_logp[idx])
             pl = -torch.min(r * adv_t[idx],
                             torch.clamp(r, 1 - clip, 1 + clip) * adv_t[idx]).mean()

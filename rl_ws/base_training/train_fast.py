@@ -59,7 +59,7 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
           vf_coef=C.VF_COEF, ent_coef=C.ENT_COEF, lr=C.LR,
           save_every=C.SAVE_EVERY, use_wandb=False, resume_from=None,
           device_str=C.DEVICE, seed=None, ckpt_dir=None, run_name=None,
-          show_viewer=False):
+          show_viewer=False, priv_critic=C.PRIV_CRITIC):
 
     device = torch.device("cuda" if (device_str == "auto" and torch.cuda.is_available())
                           else device_str if device_str != "auto" else "cpu")
@@ -93,7 +93,10 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
             print(f"[viewer] no se pudo abrir: {exc}")
             viewer = None
 
-    policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS).to(device)
+    priv_dim = C.PRIV_DIM if priv_critic else 0
+    policy = CNNActorCritic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS,
+                            priv_dim=priv_dim).to(device)
+    print(f"Critico: {'asimetrico (+%d senales privilegiadas)' % priv_dim if priv_dim else 'normal'}")
     opt = torch.optim.Adam(policy.parameters(), lr=lr)
     # El critico predice en espacio NORMALIZADO (ver RunningMeanStd en ppo.py).
     ret_rms = RunningMeanStd()
@@ -130,7 +133,7 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
     use_wandb = use_wandb and _HAS_WANDB
     if use_wandb:
         wandb.init(project=C.WANDB_PROJECT, name=run_name, config=dict(
-            seed=seed, tracks=list(C.ACTIVE_TRACKS),
+            seed=seed, tracks=list(C.ACTIVE_TRACKS), priv_dim=priv_dim,
             n_envs=n_envs, steps_per_env=steps_per_env, ppo_epochs=ppo_epochs,
             batch_size=batch_size, gamma=gamma, gae_lambda=gae_lambda, clip=clip,
             vf_coef=vf_coef, ent_coef=ent_coef, lr=lr, obs_dim=obs_dim, act_dim=act_dim))
@@ -142,8 +145,10 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
     b_rew  = np.zeros((T, N), dtype=np.float32)
     b_val  = np.zeros((T, N), dtype=np.float32)
     b_done = np.zeros((T, N), dtype=np.float32)
+    b_priv = np.zeros((T, N, max(priv_dim, 1)), dtype=np.float32)
 
     obs = venv.reset()
+    priv = venv.privileged() if priv_dim else None
     if viewer is not None and getattr(viewer, "is_running", lambda: False)():
         viewer.sync()
     try:
@@ -151,12 +156,15 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
             t0 = time.time()
             n_done = n_ok = 0
             for t in range(T):
-                act, raw, logp, val = policy.act_batch(obs, device)
+                act, raw, logp, val = policy.act_batch(obs, device, priv)
                 nobs, rew, done, infos = venv.step(act)
                 if viewer is not None and getattr(viewer, "is_running", lambda: False)():
                     viewer.sync()
                 b_obs[t], b_act[t], b_logp[t] = obs, act, logp
                 b_rew[t], b_val[t], b_done[t] = rew, val, done
+                if priv_dim:
+                    b_priv[t] = priv
+                    priv = venv.privileged()
                 obs = nobs
 
                 for d, inf in zip(done, infos):
@@ -169,7 +177,8 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
             sr_track = venv.success_rate_by_track()   # movil, por pista
 
             with torch.no_grad():
-                _, lv = policy(torch.as_tensor(obs, dtype=torch.float32, device=device))
+                _, lv = policy(torch.as_tensor(obs, dtype=torch.float32, device=device),
+                               None if priv is None else torch.as_tensor(priv, device=device))
             last_val = lv.squeeze(-1).cpu().numpy()
 
             # El critico predice normalizado; GAE trabaja en la escala real del
@@ -184,8 +193,9 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
             flogp = b_logp.reshape(T * N)
             fadv = adv.reshape(T * N); fadv = (fadv - fadv.mean()) / (fadv.std() + 1e-8)
             fret = ret_rms.normalize(ret).reshape(T * N).astype(np.float32)
+            fpriv = b_priv.reshape(T * N, -1) if priv_dim else None
             m = ppo_update(policy, opt, fobs, fact, flogp, fadv, fret,
-                           ppo_epochs, batch_size, clip, vf_coef, ent_coef, device)
+                           ppo_epochs, batch_size, clip, vf_coef, ent_coef, device, fpriv)
 
             avg = venv.avg_return()
             dt = time.time() - t0
@@ -213,7 +223,7 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
             def _ckpt():
                 return {"iter": it + 1, "policy": policy.state_dict(),
                         "optimizer": opt.state_dict(), "avg_ep_r": avg,
-                        "ret_rms": ret_rms.state_dict()}
+                        "ret_rms": ret_rms.state_dict(), "priv_dim": priv_dim}
 
             if (it + 1) % save_every == 0:
                 p = ckpt_dir / f"fast_iter{it+1:05d}.pt"
@@ -251,8 +261,11 @@ if __name__ == "__main__":
     ap.add_argument("--ckpt-dir", default=None,
                     help="Directorio de checkpoints propio de esta corrida. ")
     ap.add_argument("--name", default=None, help="Nombre de la corrida en wandb.")
+    ap.add_argument("--priv-critic", action="store_true", default=C.PRIV_CRITIC,
+                    help="Critico asimetrico: su cabeza recibe senales del simulador que la politica no ve.")
     args = ap.parse_args()
     train(n_envs=args.n_envs, steps_per_env=args.steps, iters=args.iters,
           batch_size=args.batch, lr=args.lr, use_wandb=args.wandb,
           resume_from=args.resume, seed=args.seed, ckpt_dir=args.ckpt_dir,
-          run_name=args.name, show_viewer=args.viewer)
+          run_name=args.name, show_viewer=args.viewer,
+          priv_critic=args.priv_critic)

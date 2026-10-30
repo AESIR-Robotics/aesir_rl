@@ -48,9 +48,11 @@ def main():
     obs = env.reset()
 
     device = torch.device("cpu")
-    policy = CNNActorCritic(C.OBS_DIM, C.ACT_DIM, map_pixels=C.HEATMAP_PIXELS).to(device)
-    if args.ckpt and os.path.isfile(args.ckpt):
-        ckpt = torch.load(args.ckpt, map_location=device)
+    ckpt = torch.load(args.ckpt, map_location=device) if args.ckpt and os.path.isfile(args.ckpt) else None
+    priv_dim = CNNActorCritic.priv_dim_of(ckpt["policy"]) if ckpt else 0
+    policy = CNNActorCritic(C.OBS_DIM, C.ACT_DIM, map_pixels=C.HEATMAP_PIXELS,
+                            priv_dim=priv_dim).to(device)
+    if ckpt:
         policy.load_state_dict(ckpt["policy"])
         print(f"[watch] checkpoint cargado: {args.ckpt} (iter={ckpt.get('iter', '?')})")
     else:

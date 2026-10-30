@@ -48,8 +48,9 @@ def load_policy(ckpt_path: Path, device) -> CNNActorCritic:
     solo transfiere tensores cuyo nombre Y forma coinciden. Si el checkpoint es
     de otra arquitectura hay que enterarse aqui, no por un numero raro al final,
     asi que lo que no encaja se reporta en voz alta."""
-    policy = CNNActorCritic(C.OBS_DIM, C.ACT_DIM, map_pixels=C.HEATMAP_PIXELS).to(device)
     ckpt = torch.load(ckpt_path, map_location=device)
+    policy = CNNActorCritic(C.OBS_DIM, C.ACT_DIM, map_pixels=C.HEATMAP_PIXELS,
+                            priv_dim=CNNActorCritic.priv_dim_of(ckpt["policy"])).to(device)
     saved, msd = ckpt["policy"], policy.state_dict()
     compat = {k: v for k, v in saved.items() if k in msd and v.shape == msd[k].shape}
     missing = [k for k in msd if k not in compat]

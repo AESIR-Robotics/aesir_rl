@@ -115,6 +115,18 @@ class BaseMujocoEnv:
         root = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "footprint_link")
         self._robot_gids = {g for g in range(m.ngeom)
                             if int(m.body_rootid[m.geom_bodyid[g]]) == root}
+        # Grupo de contacto de cada geom del robot (critico asimetrico):
+        # 0 oruga izq, 1 oruga der, 2-5 flipper 1-4, 6 chasis/sensores/brazo.
+        def _contact_group(g):
+            b = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, int(m.geom_bodyid[g])) or ""
+            if b.startswith("wheel_l_"):
+                return 0
+            if b.startswith("wheel_r_"):
+                return 1
+            if b.startswith("wheel_flipper") and b[13:14] in "1234":
+                return 1 + int(b[13])
+            return 6
+        self._contact_group = {g: _contact_group(g) for g in self._robot_gids}
 
         # Geom del obstaculo virtual FISICO (tracks/flat/terrain.xml)
         self._obstacle_gid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "virtual_obstacle")
@@ -374,6 +386,17 @@ class BaseMujocoEnv:
         plt.close(fig)
         self._append_heatmap_to_video(heatmap)
 
+    def privileged(self) -> np.ndarray:
+        """Contacto con el terreno (0/1) de oruga izq/der, flipper 1-4 y chasis.
+        El robot real no lo mide; solo para el critico."""
+        out = np.zeros(C.PRIV_DIM, dtype=np.float32)
+        for i in range(self.data.ncon):
+            g1, g2 = int(self.data.contact[i].geom1), int(self.data.contact[i].geom2)
+            for a, b in ((g1, g2), (g2, g1)):
+                if a in self._robot_gids and b not in self._robot_gids:
+                    out[self._contact_group[a]] = 1.0
+        return out
+
     # ── Step ─────────────────────────────────────────────────────────────────
     def step(self, action: np.ndarray):
         a_exec = np.clip(action, -1.0, 1.0)
@@ -513,6 +536,10 @@ class VecMujocoEnv:
             dones[i] = float(d)
             infos.append(inf)
         return obs, rews, dones, infos
+
+    def privileged(self) -> np.ndarray:
+        """(N, PRIV_DIM) del estado actual de cada env (tras el auto-reset)."""
+        return np.stack([e.privileged() for e in self.envs])
 
     def avg_return(self) -> float:
         return float(np.mean(self._ep_history)) if self._ep_history else float("nan")
