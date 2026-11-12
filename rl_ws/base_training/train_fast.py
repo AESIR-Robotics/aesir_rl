@@ -46,6 +46,12 @@ try:
 except ImportError:
     _HAS_WANDB = False
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    _HAS_TB = True
+except ImportError:
+    _HAS_TB = False
+
 C.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 from rl_ws.base_training.ppo import (ppo_update, compute_gae,  # sin MLPActorCritic
@@ -57,7 +63,7 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
           ppo_epochs=C.PPO_EPOCHS, batch_size=C.BATCH_SIZE,
           gamma=C.GAMMA, gae_lambda=C.GAE_LAMBDA, clip=C.CLIP,
           vf_coef=C.VF_COEF, ent_coef=C.ENT_COEF, lr=C.LR,
-          save_every=C.SAVE_EVERY, use_wandb=False, resume_from=None,
+          save_every=C.SAVE_EVERY, use_wandb=False, use_tb=C.TENSORBOARD, resume_from=None,
           device_str=C.DEVICE, seed=None, ckpt_dir=None, run_name=None,
           show_viewer=False, priv_critic=C.PRIV_CRITIC):
 
@@ -137,6 +143,12 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
             n_envs=n_envs, steps_per_env=steps_per_env, ppo_epochs=ppo_epochs,
             batch_size=batch_size, gamma=gamma, gae_lambda=gae_lambda, clip=clip,
             vf_coef=vf_coef, ent_coef=ent_coef, lr=lr, obs_dim=obs_dim, act_dim=act_dim))
+    tb = None
+    if use_tb and _HAS_TB:
+        tb = SummaryWriter(C.TB_DIR / (run_name or ckpt_dir.name))
+        print(f"TensorBoard: {tb.log_dir}")
+    elif use_tb:
+        print("TensorBoard no instalado (pip install tensorboard): sin registro.")
 
     T, N = steps_per_env, n_envs
     b_obs  = np.zeros((T, N, obs_dim), dtype=np.float32)
@@ -208,15 +220,20 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
                 print("           por pista: " + "  ".join(
                     f"{t}={r:.0%}" if r == r else f"{t}=--" for t, r in sr_track.items()))
 
-            if use_wandb:
-                log = {"iter": it, "avg_ep_r": avg, "n_reached": venv.n_reached,
+            if use_wandb or tb is not None:
+                log = {"avg_ep_r": avg, "n_reached": venv.n_reached,
                        "policy_loss": m["pi"], "value_loss": m["v"],
                        "entropy": m["ent"], "steps_per_s": sps,
                        "success_rate": sr_100, "success_rate_iter": sr_iter}
                 # nan = esa pista aun no termina ningun episodio; no lo mandamos
-                # para no ensuciar la grafica de wandb con huecos.
+                # para no ensuciar la grafica con huecos.
                 log.update({f"success_rate/{t}": r for t, r in sr_track.items() if r == r})
-                wandb.log(log)
+                if use_wandb:
+                    wandb.log({"iter": it, **log})
+                if tb is not None:
+                    for k, v in log.items():
+                        tb.add_scalar(k, v, it)
+                    tb.flush()
 
             # ret_rms va SIEMPRE con el checkpoint: sin el, el critico guardado
             # (que predice normalizado) se leeria en la escala equivocada.
@@ -238,6 +255,8 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
         venv.close()
         if use_wandb:
             wandb.finish()
+        if tb is not None:
+            tb.close()
 
 
 if __name__ == "__main__":
@@ -248,6 +267,7 @@ if __name__ == "__main__":
     ap.add_argument("--batch", type=int, default=C.BATCH_SIZE)
     ap.add_argument("--lr", type=float, default=C.LR)
     ap.add_argument("--wandb", action="store_true")
+    ap.add_argument("--no-tb", action="store_true", help="no registrar en TensorBoard")
     ap.add_argument("--viewer", action="store_true", help="abrir el visualizador de MuJoCo")
     ap.add_argument("--resume", default="",
                     help='Checkpoint del que reanudar; por default DESDE CERO. '
@@ -260,12 +280,13 @@ if __name__ == "__main__":
                          "reproducibilidad bit a bit (envs en threads).")
     ap.add_argument("--ckpt-dir", default=None,
                     help="Directorio de checkpoints propio de esta corrida. ")
-    ap.add_argument("--name", default=None, help="Nombre de la corrida en wandb.")
+    ap.add_argument("--name", default=None, help="Nombre de la corrida en wandb y TensorBoard.")
     ap.add_argument("--priv-critic", action="store_true", default=C.PRIV_CRITIC,
                     help="Critico asimetrico: su cabeza recibe senales del simulador que la politica no ve.")
     args = ap.parse_args()
     train(n_envs=args.n_envs, steps_per_env=args.steps, iters=args.iters,
           batch_size=args.batch, lr=args.lr, use_wandb=args.wandb,
+          use_tb=C.TENSORBOARD and not args.no_tb,
           resume_from=args.resume, seed=args.seed, ckpt_dir=args.ckpt_dir,
           run_name=args.name, show_viewer=args.viewer,
           priv_critic=args.priv_critic)

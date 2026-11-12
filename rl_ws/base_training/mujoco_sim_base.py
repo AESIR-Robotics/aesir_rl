@@ -115,18 +115,15 @@ class BaseMujocoEnv:
         root = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, "footprint_link")
         self._robot_gids = {g for g in range(m.ngeom)
                             if int(m.body_rootid[m.geom_bodyid[g]]) == root}
-        # Grupo de contacto de cada geom del robot (critico asimetrico):
-        # 0 oruga izq, 1 oruga der, 2-5 flipper 1-4, 6 chasis/sensores/brazo.
-        def _contact_group(g):
-            b = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, int(m.geom_bodyid[g])) or ""
-            if b.startswith("wheel_l_"):
-                return 0
-            if b.startswith("wheel_r_"):
-                return 1
-            if b.startswith("wheel_flipper") and b[13:14] in "1234":
-                return 1 + int(b[13])
-            return 6
-        self._contact_group = {g: _contact_group(g) for g in self._robot_gids}
+        # Indice de contacto de cada geom del robot (critico asimetrico): una
+        # senal por rueda (wheel_*, orden por nombre) y la ultima para el
+        # chasis/sensores/brazo.
+        _body = lambda g: mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, int(m.geom_bodyid[g])) or ""
+        wheels = sorted({_body(g) for g in self._robot_gids if _body(g).startswith("wheel_")})
+        if len(wheels) + 1 != C.PRIV_DIM:
+            raise ValueError(f"{len(wheels)} ruedas + chasis != PRIV_DIM={C.PRIV_DIM}")
+        self._contact_group = {g: wheels.index(_body(g)) if _body(g) in wheels else len(wheels)
+                               for g in self._robot_gids}
 
         # Geom del obstaculo virtual FISICO (tracks/flat/terrain.xml)
         self._obstacle_gid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, "virtual_obstacle")
@@ -320,6 +317,7 @@ class BaseMujocoEnv:
 
         self.nav.reset(fb["xy"])
         guidance = self.nav.step(fb["xy"], fb["yaw"])
+        self._guid = guidance
         self._rs.reset(fb["xy"], float(np.linalg.norm(fb["xy"] - np.asarray(guidance["target"]))), fb["yaw"])
         heatmap = self._get_heatmap(fb)
         return W.build_obs(guidance, fb, heatmap)
@@ -387,7 +385,7 @@ class BaseMujocoEnv:
         self._append_heatmap_to_video(heatmap)
 
     def privileged(self) -> np.ndarray:
-        """Contacto con el terreno (0/1) de oruga izq/der, flipper 1-4 y chasis.
+        """Contacto con el terreno (0/1) de cada rueda y del chasis.
         El robot real no lo mide; solo para el critico."""
         out = np.zeros(C.PRIV_DIM, dtype=np.float32)
         for i in range(self.data.ncon):
@@ -400,6 +398,8 @@ class BaseMujocoEnv:
     # ── Step ─────────────────────────────────────────────────────────────────
     def step(self, action: np.ndarray):
         a_exec = np.clip(action, -1.0, 1.0)
+        if C.NAV_CTRL:                                   # v,ω del controlador, no de la politica
+            a_exec[0:2] = W.nav_ctrl(self._guid["target_obs"])
         self._apply_action(a_exec)
         # grav-comp del brazo una vez por control-step (qfrc_applied persiste).
         self._grav_comp_arm()
@@ -412,6 +412,7 @@ class BaseMujocoEnv:
         fb = self._feedback()
         fb["flipper_edge"] = W.flipper_edge(self.map_ctx, fb)
         guidance = self.nav.step(fb["xy"], fb["yaw"])
+        self._guid = guidance
         reward = W.compute_reward(fb, guidance, a_exec, self._rs, self.goal_xy)
         done, reached, reason = W.terminated(fb, self.goal_xy, self._ep_steps, self.max_steps, self._rs)
         heatmap = self._get_heatmap(fb)
@@ -528,6 +529,7 @@ class VecMujocoEnv:
                           f"ret={self._ep_return[i]:.1f}  wp={inf.get('wp')}")
                 self._ep_return[i] = 0.0
                 inf["terminal_obs"] = o
+                inf["terminal_priv"] = self.envs[i].privileged()   # antes del reset (critico asimetrico SAC)
                 reason = inf.get("reason") or ""
                 inf["truncated"] = reason.startswith("limite") or reason.startswith("atascado")
                 o = self.envs[i].reset()      # auto-reset

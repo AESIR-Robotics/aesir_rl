@@ -323,6 +323,12 @@ OBS_DIM = 19 + 3*N_LOOKAHEAD + HEATMAP_PIXELS**2
 # Los flippers se comandan SIEMPRE desde [2:6]. Hubo una 7a dimension (un gate
 # Bernoulli que los mandaba a reposo ignorando [2:6]), se elimino. Ver docs/gate_flippers.md.
 ACT_DIM = 6
+# v,ω por controlador clasico: el entorno ignora action[0:2] y aplica un P hacia
+# el waypoint objetivo (base_env.nav_ctrl). La politica solo aprende flippers;
+# PPO y SAC excluyen v,ω del log-prob. Con el vortex el maze falla (0-5%); con
+# el waypoint y flippers fijos llega al 100% (20 episodios).
+NAV_CTRL = True
+NAV_CTRL_W_SAT_RAD = 0.785   # error de rumbo (rad) a partir del cual ω=1 (π/4)
 FLIPPER_HOME_RAD = 0.0   # pose de reposo de los flippers (fase 1 / referencia del reward de terreno)
 
 # ── Navegacion global ────────────────────────────────────────────────────────
@@ -431,9 +437,10 @@ LOG_STD_MIN   = -5.0     # clamp del log-std aprendible
 LOG_STD_MAX   = 0.0
 MAX_GRAD_NORM = 0.5      # clip de norma de gradiente en el update
 # Critico asimetrico: su cabeza recibe ademas contactos con el terreno que el
-# robot real no mide (oruga izq/der, flipper 1-4, chasis; 0/1). Ver train_fast --priv-critic.
+# robot real no mide: una senal 0/1 por rueda (6+6 orugas, 4x4 flippers) y una
+# del chasis. Ver train_fast --priv-critic.
 PRIV_CRITIC = False
-PRIV_DIM    = 7
+PRIV_DIM    = 29
 
 # ── Hiperparametros PPO / entrenamiento ──────────────────────────────────────
 N_ENVS        = 14       # envs MuJoCo en paralelo (threads)
@@ -450,6 +457,10 @@ LR            = 3e-4     # learning rate (Adam)
 SAVE_EVERY    = 50       # iters entre checkpoints numerados
 DEVICE        = "auto"   # "auto" -> cuda si hay, si no cpu
 WANDB_PROJECT = "AIDL-PPO-AESIR-BASE-FAST"
+# TensorBoard local (train_fast/train_sac): un subdirectorio por corrida
+# (--name o, si falta, el nombre de --ckpt-dir). Ver: tensorboard --logdir runs/tb
+TENSORBOARD   = True
+TB_DIR        = Path(ROOT) / "runs" / "tb"
 
 # ── SAC (train_sac.py) — pipeline PARALELO a PPO, mismo env y mismo config ──
 SAC_BUFFER_SIZE   = 1_000_000 
@@ -465,6 +476,10 @@ SAC_LOG_STD_MIN   = -5.0
 SAC_LOG_STD_MAX   = 2.0
 
 SAC_ACT_DIM = 6
+SAC_HIDDEN  = 512        # neuronas por capa de actor y criticos SAC (PPO usa HIDDEN)
+# Guardar el replay buffer con cada checkpoint (una sola copia, la ultima;
+# ~8.5 GB en disco) para que --resume no arranque con el buffer vacio.
+SAC_SAVE_BUFFER = True
 SAC_REWARD_SCALE = 0.01
 SAC_TARGET_ENTROPY = -2.0
 WANDB_PROJECT_SAC = "AIDL-SAC-AESIR-BASE-FAST"

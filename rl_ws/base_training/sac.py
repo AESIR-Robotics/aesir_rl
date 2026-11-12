@@ -27,6 +27,10 @@ ACCION -- la diferencia importante con ppo_cnn_extractor.py:
 """
 from __future__ import annotations
 
+import json
+import shutil
+from pathlib import Path
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -81,7 +85,7 @@ class _Encoder(nn.Module):
 class Actor(nn.Module):
     """Gaussiana aplastada con tanh. Devuelve (accion en [-1,1], log_prob)."""
 
-    def __init__(self, obs_dim, act_dim, map_pixels=64, hidden=C.HIDDEN):
+    def __init__(self, obs_dim, act_dim, map_pixels=64, hidden=C.SAC_HIDDEN):
         super().__init__()
         self.enc = _Encoder(obs_dim, map_pixels, hidden)
         self.trunk = nn.Sequential(nn.Linear(self.enc.out_dim, hidden), nn.ReLU(inplace=True))
@@ -101,31 +105,36 @@ class Actor(nn.Module):
         if not with_logp:
             return a, None
         # correccion de cambio de variable por el tanh (apendice C del paper)
-        logp = dist.log_prob(u).sum(-1, keepdim=True)
-        logp = logp - torch.log(1.0 - a.pow(2) + _EPS).sum(-1, keepdim=True)
-        return a, logp
+        lp = dist.log_prob(u) - torch.log(1.0 - a.pow(2) + _EPS)
+        if C.NAV_CTRL:                           # v,ω no se ejecutan: solo flippers
+            lp = lp[:, 2:]
+        return a, lp.sum(-1, keepdim=True)
 
 
 class Critic(nn.Module):
-    """Dos Q independientes (clipped double-Q). Cada una con su propio encoder."""
+    """Dos Q independientes (clipped double-Q). Cada una con su propio encoder.
+    priv_dim > 0: critico asimetrico, cada cabeza recibe ademas los contactos
+    del simulador (BaseMujocoEnv.privileged) que el actor no ve."""
 
-    def __init__(self, obs_dim, act_dim, map_pixels=64, hidden=C.HIDDEN):
+    def __init__(self, obs_dim, act_dim, map_pixels=64, hidden=C.SAC_HIDDEN, priv_dim=0):
         super().__init__()
+        self.priv_dim = priv_dim
         def _q():
             enc = _Encoder(obs_dim, map_pixels, hidden)
             head = nn.Sequential(
-                nn.Linear(enc.out_dim + act_dim, hidden), nn.ReLU(inplace=True),
+                nn.Linear(enc.out_dim + act_dim + priv_dim, hidden), nn.ReLU(inplace=True),
                 nn.Linear(hidden, hidden), nn.ReLU(inplace=True),
                 nn.Linear(hidden, 1))
             return nn.ModuleDict(dict(enc=enc, head=head))
         self.q1, self.q2 = _q(), _q()
 
     @staticmethod
-    def _eval(q, obs, act):
-        return q["head"](torch.cat([q["enc"](obs), act], dim=1))
+    def _eval(q, obs, act, priv):
+        x = [q["enc"](obs), act] + ([] if priv is None else [priv])
+        return q["head"](torch.cat(x, dim=1))
 
-    def forward(self, obs, act):
-        return self._eval(self.q1, obs, act), self._eval(self.q2, obs, act)
+    def forward(self, obs, act, priv=None):
+        return self._eval(self.q1, obs, act, priv), self._eval(self.q2, obs, act, priv)
 
 
 # ── Replay buffer EN GPU ────────────────────────────────────────────────────
@@ -136,8 +145,8 @@ class ReplayBuffer:
     en GPU -- en float32 serian 6.6 GB para 200k y en esta maquina solo hay
     ~3 GB de RAM libre."""
 
-    def __init__(self, capacity, obs_dim, act_dim, state_dim, device):
-        self.cap, self.device = capacity, device
+    def __init__(self, capacity, obs_dim, act_dim, state_dim, device, priv_dim=0):
+        self.cap, self.device, self.priv_dim = capacity, device, priv_dim
         self.state_dim, self.map_len = state_dim, obs_dim - state_dim
         z = lambda *s, dt: torch.zeros(*s, dtype=dt, device=device)
         self.s_state = z(capacity, state_dim, dt=torch.float32)
@@ -147,12 +156,15 @@ class ReplayBuffer:
         self.act = z(capacity, act_dim, dt=torch.float32)
         self.rew = z(capacity, 1, dt=torch.float32)
         self.done = z(capacity, 1, dt=torch.float32)   # 1 solo si es terminal REAL
+        if priv_dim:                                    # contactos 0/1 de s y s'
+            self.priv = z(capacity, priv_dim, dt=torch.uint8)
+            self.npriv = z(capacity, priv_dim, dt=torch.uint8)
         self.ptr, self.full = 0, False
 
     def _split(self, obs_t):
         return obs_t[:, :self.state_dim], (obs_t[:, self.state_dim:] * 255.0).round().clamp(0, 255).to(torch.uint8)
 
-    def add(self, obs, act, rew, nobs, done):
+    def add(self, obs, act, rew, nobs, done, priv=None, npriv=None):
         """Arrays numpy (B, ...). `done` ya debe venir SIN las truncaciones."""
         b = obs.shape[0]
         idx = (torch.arange(b, device=self.device) + self.ptr) % self.cap
@@ -163,31 +175,77 @@ class ReplayBuffer:
         self.act[idx] = torch.as_tensor(act, dtype=torch.float32, device=self.device)
         self.rew[idx] = torch.as_tensor(rew, dtype=torch.float32, device=self.device).view(-1, 1)
         self.done[idx] = torch.as_tensor(done, dtype=torch.float32, device=self.device).view(-1, 1)
+        if self.priv_dim:
+            self.priv[idx] = torch.as_tensor(priv, device=self.device).to(torch.uint8)
+            self.npriv[idx] = torch.as_tensor(npriv, device=self.device).to(torch.uint8)
         self.ptr = (self.ptr + b) % self.cap
         self.full = self.full or self.ptr < b
 
     def __len__(self):
         return self.cap if self.full else self.ptr
 
+    # ── Guardar / cargar (reanudar sin perder el buffer) ────────────────────
+    # Un .npy por tensor, copiado por bloques GPU->disco: el buffer (~8.5 GB)
+    # no cabe entero en la RAM libre. Se escribe en <dir>.tmp y se renombra al
+    # final, asi un corte a mitad de escritura no deja un buffer a medias.
+    def _fields(self):
+        return ["s_state", "s_map", "n_state", "n_map", "act", "rew", "done"] + \
+               (["priv", "npriv"] if self.priv_dim else [])
+
+    def save(self, path, it, chunk=50_000):
+        path = Path(path); tmp = path.with_name(path.name + ".tmp")
+        shutil.rmtree(tmp, ignore_errors=True); tmp.mkdir(parents=True)
+        n = len(self)
+        for f in self._fields():
+            t = getattr(self, f)
+            arr = np.lib.format.open_memmap(tmp / f"{f}.npy", mode="w+",
+                                            dtype=t[:1].cpu().numpy().dtype, shape=(n,) + tuple(t.shape[1:]))
+            for s in range(0, n, chunk):
+                e = min(s + chunk, n)              # el tensor mide cap, no n
+                arr[s:e] = t[s:e].cpu().numpy()
+            arr.flush(); del arr
+        (tmp / "meta.json").write_text(json.dumps(
+            dict(iter=it, ptr=self.ptr, full=self.full, cap=self.cap, priv_dim=self.priv_dim)))
+        shutil.rmtree(path, ignore_errors=True); tmp.rename(path)
+
+    def load(self, path, chunk=50_000) -> dict:
+        path = Path(path)
+        meta = json.loads((path / "meta.json").read_text())
+        if (meta["cap"], meta["priv_dim"]) != (self.cap, self.priv_dim):
+            raise ValueError(f"buffer guardado cap={meta['cap']} priv_dim={meta['priv_dim']} "
+                             f"!= actual cap={self.cap} priv_dim={self.priv_dim}")
+        for f in self._fields():
+            arr = np.load(path / f"{f}.npy", mmap_mode="r"); t = getattr(self, f)
+            if tuple(arr.shape[1:]) != tuple(t.shape[1:]):
+                raise ValueError(f"{f}: forma guardada {arr.shape[1:]} != {tuple(t.shape[1:])}")
+            n = arr.shape[0]
+            for s in range(0, n, chunk):
+                e = min(s + chunk, n)
+                t[s:e] = torch.as_tensor(np.array(arr[s:e]), device=self.device)
+        self.ptr, self.full = meta["ptr"], meta["full"]
+        return meta
+
     def sample(self, batch):
         i = torch.randint(0, len(self), (batch,), device=self.device)
         obs = torch.cat([self.s_state[i], self.s_map[i].float() / 255.0], dim=1)
         nobs = torch.cat([self.n_state[i], self.n_map[i].float() / 255.0], dim=1)
-        return obs, self.act[i], self.rew[i], nobs, self.done[i]
+        priv = self.priv[i].float() if self.priv_dim else None
+        npriv = self.npriv[i].float() if self.priv_dim else None
+        return obs, self.act[i], self.rew[i], nobs, self.done[i], priv, npriv
 
 
 # ── Update ──────────────────────────────────────────────────────────────────
 def sac_update(actor, critic, critic_targ, log_alpha,
                opt_a, opt_c, opt_alpha, buf, batch, gamma, tau, target_entropy):
-    obs, act, rew, nobs, done = buf.sample(batch)
+    obs, act, rew, nobs, done, priv, npriv = buf.sample(batch)
     alpha = log_alpha.exp().detach()
 
     # critico: target = r + gamma*(1-done)*(min Q_targ(s',a') - alpha*logp(a'|s'))
     with torch.no_grad():
         na, nlogp = actor(nobs)
-        tq1, tq2 = critic_targ(nobs, na)
+        tq1, tq2 = critic_targ(nobs, na, npriv)
         target = rew + gamma * (1.0 - done) * (torch.min(tq1, tq2) - alpha * nlogp)
-    q1, q2 = critic(obs, act)
+    q1, q2 = critic(obs, act, priv)
     loss_c = F.mse_loss(q1, target) + F.mse_loss(q2, target)
     opt_c.zero_grad(set_to_none=True); loss_c.backward()
     nn.utils.clip_grad_norm_(critic.parameters(), C.MAX_GRAD_NORM)
@@ -197,7 +255,7 @@ def sac_update(actor, critic, critic_targ, log_alpha,
     for p in critic.parameters():
         p.requires_grad_(False)
     a_pi, logp = actor(obs)
-    qa1, qa2 = critic(obs, a_pi)
+    qa1, qa2 = critic(obs, a_pi, priv)
     loss_a = (alpha * logp - torch.min(qa1, qa2)).mean()
     opt_a.zero_grad(set_to_none=True); loss_a.backward()
     nn.utils.clip_grad_norm_(actor.parameters(), C.MAX_GRAD_NORM)

@@ -37,6 +37,7 @@ from torch.distributions import Normal, Beta
 from . import config as C
 
 _BETA_EPS = 1e-6   # margen numerico lejos de 0/1 (soporte abierto de Beta)
+_K_VW = 0.0 if C.NAV_CTRL else 1.0   # NAV_CTRL: v,ω no se ejecutan -> fuera de logp/entropia
 
 
 # ----------------------------------------------------------------------
@@ -155,7 +156,7 @@ class CNNActorCritic(nn.Module):
         raw_vw = d_vw.sample()                                          # (batch,2)
         raw_flip = d_flip.sample().clamp(_BETA_EPS, 1.0 - _BETA_EPS)     # (batch,4)
 
-        logp = d_vw.log_prob(raw_vw).sum(-1) + d_flip.log_prob(raw_flip).sum(-1)
+        logp = _K_VW * d_vw.log_prob(raw_vw).sum(-1) + d_flip.log_prob(raw_flip).sum(-1)
         raw = torch.cat([raw_vw, raw_flip], dim=-1)
         action = torch.cat([raw_vw.clamp(-1.0, 1.0), raw_flip], dim=-1)
 
@@ -171,7 +172,7 @@ class CNNActorCritic(nn.Module):
         raw_vw = d_vw.sample()
         raw_flip = d_flip.sample().clamp(_BETA_EPS, 1.0 - _BETA_EPS)
 
-        logp = d_vw.log_prob(raw_vw).sum(-1) + d_flip.log_prob(raw_flip).sum(-1)
+        logp = _K_VW * d_vw.log_prob(raw_vw).sum(-1) + d_flip.log_prob(raw_flip).sum(-1)
         raw = torch.cat([raw_vw, raw_flip], dim=-1)
         action = torch.cat([raw_vw.clamp(-1.0, 1.0), raw_flip], dim=-1)
 
@@ -189,8 +190,8 @@ class CNNActorCritic(nn.Module):
         raw_vw = actions[:, 0:2]
         raw_flip = actions[:, 2:6].clamp(_BETA_EPS, 1.0 - _BETA_EPS)
 
-        logp = (d_vw.log_prob(raw_vw).sum(-1, keepdim=True)
+        logp = (_K_VW * d_vw.log_prob(raw_vw).sum(-1, keepdim=True)
                 + d_flip.log_prob(raw_flip).sum(-1, keepdim=True))
-        entropy = (d_vw.entropy().sum(-1) + d_flip.entropy().sum(-1)).mean()
+        entropy = (_K_VW * d_vw.entropy().sum(-1) + d_flip.entropy().sum(-1)).mean()
 
         return logp, value, entropy

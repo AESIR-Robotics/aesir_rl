@@ -48,8 +48,21 @@ from .config import (
     FLIPPER_TERRAIN_MAX_DESCENT_M, FLIPPER_TERRAIN_SAMPLES,
     ACCEL_W, ACCEL_DEADZONE, GUIDE_SPEED_SCALE, BACKWARD_W,
     FLIPPER_MOUNTS, FLIPPER_AXIS_SIGN, FLIPPER_L, FLIPPER_COLLISION_DIST,
-    OBSTACLE_PENALTY,
+    OBSTACLE_PENALTY, MAX_GUIDE_DIST, NAV_CTRL_W_SAT_RAD,
 )
+
+
+# ── Control clasico de v,ω (NAV_CTRL) ────────────────────────────────────────
+def nav_ctrl(target_obs) -> np.ndarray:
+    """[v, ω] en escala de accion hacia el waypoint objetivo.
+    target_obs = (d/MAX_GUIDE_DIST, sin e, cos e) en el frame del robot.
+    ω proporcional al error de rumbo; v con la misma forma que v_des del
+    reward, anulada si el waypoint queda detras (gira en el sitio)."""
+    dn, s, c = (float(x) for x in target_obs)
+    e = np.arctan2(s, c)
+    w = np.clip(e / NAV_CTRL_W_SAT_RAD, -1.0, 1.0)
+    v = min(dn * MAX_GUIDE_DIST / GUIDE_SPEED_SCALE, 1.0) * max(0.0, c)
+    return np.array([v, w], dtype=np.float32)
 
 
 # ── Comando de flippers (compartido por los dos backends) ────────────────────

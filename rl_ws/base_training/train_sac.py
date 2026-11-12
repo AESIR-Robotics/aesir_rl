@@ -39,13 +39,20 @@ try:
 except ImportError:
     _HAS_WANDB = False
 
+try:
+    from torch.utils.tensorboard import SummaryWriter
+    _HAS_TB = True
+except ImportError:
+    _HAS_TB = False
+
 C.CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
           batch_size=C.SAC_BATCH_SIZE, lr=C.SAC_LR, utd=C.SAC_UTD,
-          save_every=C.SAVE_EVERY, use_wandb=False, resume_from=None,
-          device_str=C.DEVICE, seed=None, ckpt_dir=None, run_name=None):
+          save_every=C.SAVE_EVERY, use_wandb=False, use_tb=C.TENSORBOARD, resume_from=None,
+          device_str=C.DEVICE, seed=None, ckpt_dir=None, run_name=None,
+          priv_critic=C.PRIV_CRITIC):
 
     device = torch.device("cuda" if (device_str == "auto" and torch.cuda.is_available())
                           else device_str if device_str != "auto" else "cpu")
@@ -72,8 +79,11 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
     state_dim = obs_dim - C.HEATMAP_PIXELS ** 2
 
     actor = Actor(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS).to(device)
-    critic = Critic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS).to(device)
-    critic_targ = Critic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS).to(device)
+    priv_dim = C.PRIV_DIM if priv_critic else 0
+    critic = Critic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS, priv_dim=priv_dim).to(device)
+    critic_targ = Critic(obs_dim, act_dim, map_pixels=C.HEATMAP_PIXELS, priv_dim=priv_dim).to(device)
+    print(f"Red: {C.SAC_HIDDEN} neuronas por capa")
+    print(f"Critico: {'asimetrico (+%d senales privilegiadas)' % priv_dim if priv_dim else 'normal'}")
     critic_targ.load_state_dict(critic.state_dict())
     for p in critic_targ.parameters():
         p.requires_grad_(False)
@@ -95,9 +105,26 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
         start_iter = ck.get("iter", 0)
         print(f"Resumiendo desde iter {start_iter}")
 
-    buf = ReplayBuffer(C.SAC_BUFFER_SIZE, obs_dim, act_dim, state_dim, device)
+    buf = ReplayBuffer(C.SAC_BUFFER_SIZE, obs_dim, act_dim, state_dim, device, priv_dim)
     print(f"Replay buffer: {C.SAC_BUFFER_SIZE} transiciones en {device} "
           f"(heatmap uint8, ~{C.SAC_BUFFER_SIZE*(state_dim*4*2 + (obs_dim-state_dim)*2)/1e9:.1f} GB)")
+    # Una sola copia del buffer por corrida (la del ultimo checkpoint); solo se
+    # carga si es de la MISMA iteracion que el checkpoint del que se reanuda.
+    buf_dir = ckpt_dir / "replay_buffer"
+    if resume_from:
+        src = Path(resume_from).parent / "replay_buffer"
+        if (src / "meta.json").is_file():
+            t_load = time.time()
+            meta = buf.load(src)
+            if meta["iter"] == start_iter:
+                print(f"Replay buffer cargado: {len(buf)} transiciones (iter {meta['iter']}, "
+                      f"{time.time() - t_load:.0f}s)")
+            else:
+                buf.ptr, buf.full = 0, False
+                print(f"Replay buffer NO cargado: es de la iter {meta['iter']}, "
+                      f"el checkpoint de la {start_iter}. Buffer vacio.")
+        else:
+            print(f"Replay buffer: no hay copia en {src}. Buffer vacio.")
 
     use_wandb = use_wandb and _HAS_WANDB
     if use_wandb:
@@ -105,10 +132,17 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
             algo="SAC", n_envs=n_envs, batch_size=batch_size, lr=lr, utd=utd,
             buffer=C.SAC_BUFFER_SIZE, tau=C.SAC_TAU, gamma=C.SAC_GAMMA,
             target_entropy=C.SAC_TARGET_ENTROPY, reward_scale=C.SAC_REWARD_SCALE,
-            obs_dim=obs_dim, act_dim=act_dim))
+            obs_dim=obs_dim, act_dim=act_dim, priv_dim=priv_dim))
+    tb = None
+    if use_tb and _HAS_TB:
+        tb = SummaryWriter(C.TB_DIR / (run_name or ckpt_dir.name))
+        print(f"TensorBoard: {tb.log_dir}")
+    elif use_tb:
+        print("TensorBoard no instalado (pip install tensorboard): sin registro.")
 
     T, N = steps_per_env, n_envs
     obs = venv.reset()
+    priv = venv.privileged() if priv_dim else None
     env_steps = start_iter * T * N
     m = {"q": 0.0, "pi": 0.0, "alpha": 1.0, "entropy": 0.0}
     try:
@@ -133,17 +167,21 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
                 # el bootstrap debe seguir, si no se sesga el critico.
                 buf_next = nobs.copy()
                 buf_done = done.copy()
+                npriv = venv.privileged() if priv_dim else None
+                buf_npriv = None if npriv is None else npriv.copy()
                 for i, (d, inf) in enumerate(zip(done, infos)):
                     if d:
                         buf_next[i] = inf["terminal_obs"]
+                        if priv_dim:
+                            buf_npriv[i] = inf["terminal_priv"]
                         if inf.get("truncated"):
                             buf_done[i] = 0.0
                         n_done += 1
                         n_ok += int(bool(inf.get("reached")))
                 # Escala solo para el critico: las metricas y avg_ret que se
                 # reportan siguen en la escala original del env.
-                buf.add(obs, raw, rew * C.SAC_REWARD_SCALE, buf_next, buf_done)
-                obs = nobs
+                buf.add(obs, raw, rew * C.SAC_REWARD_SCALE, buf_next, buf_done, priv, buf_npriv)
+                obs, priv = nobs, npriv
 
                 if len(buf) >= C.SAC_LEARN_STARTS:
                     for _ in range(max(1, int(round(utd * N)))):
@@ -166,14 +204,19 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
                 print("           por pista: " + "  ".join(
                     f"{t}={r:.0%}" if r == r else f"{t}=--" for t, r in sr_track.items()))
 
-            if use_wandb:
-                log = {"iter": it, "avg_ep_r": avg, "n_reached": venv.n_reached,
+            if use_wandb or tb is not None:
+                log = {"avg_ep_r": avg, "n_reached": venv.n_reached,
                        "q_loss": m["q"], "pi_loss": m["pi"], "alpha": m["alpha"],
                        "entropy": m["entropy"], "steps_per_s": sps,
                        "success_rate": sr_100, "success_rate_iter": sr_iter,
                        "buffer": len(buf), "env_steps": env_steps}
                 log.update({f"success_rate/{t}": r for t, r in sr_track.items() if r == r})
-                wandb.log(log)
+                if use_wandb:
+                    wandb.log({"iter": it, **log})
+                if tb is not None:
+                    for k, v in log.items():
+                        tb.add_scalar(k, v, it)
+                    tb.flush()
 
             if (it + 1) % save_every == 0:
                 p = ckpt_dir / f"sac_iter{it+1:05d}.pt"
@@ -183,12 +226,19 @@ def train(n_envs=C.N_ENVS, steps_per_env=C.STEPS_PER_ENV, iters=C.ITERS,
                             "log_alpha": log_alpha.detach().cpu(),
                             "opt_a": opt_a.state_dict(), "opt_c": opt_c.state_dict(),
                             "opt_alpha": opt_alpha.state_dict(),
-                            "success_rate": sr_100}, p)
+                            "success_rate": sr_100, "priv_dim": priv_dim}, p)
                 print(f"  ↳ checkpoint: {p}")
+                if C.SAC_SAVE_BUFFER:
+                    t_save = time.time()
+                    buf.save(buf_dir, it + 1)
+                    print(f"  ↳ replay buffer: {buf_dir} ({len(buf)} transiciones, "
+                          f"{time.time() - t_save:.0f}s)")
     finally:
         venv.close()
         if use_wandb:
             wandb.finish()
+        if tb is not None:
+            tb.close()
 
 
 if __name__ == "__main__":
@@ -200,15 +250,20 @@ if __name__ == "__main__":
     ap.add_argument("--lr", type=float, default=C.SAC_LR)
     ap.add_argument("--utd", type=float, default=C.SAC_UTD)
     ap.add_argument("--wandb", action="store_true")
+    ap.add_argument("--no-tb", action="store_true", help="no registrar en TensorBoard")
     ap.add_argument("--resume", default=None)
     ap.add_argument("--seed", type=int, default=None,
                     help="Semilla de numpy/torch. Separa corridas; no da "
                          "reproducibilidad bit a bit (envs en threads).")
     ap.add_argument("--ckpt-dir", default=None,
                     help="Directorio de checkpoints propio de esta corrida.")
-    ap.add_argument("--name", default=None, help="Nombre de la corrida en wandb.")
+    ap.add_argument("--name", default=None, help="Nombre de la corrida en wandb y TensorBoard.")
+    ap.add_argument("--priv-critic", action="store_true", default=C.PRIV_CRITIC,
+                    help="Critico asimetrico: sus Q reciben senales del simulador que el actor no ve.")
     args = ap.parse_args()
     train(n_envs=args.n_envs, steps_per_env=args.steps, iters=args.iters,
           batch_size=args.batch, lr=args.lr, utd=args.utd,
-          use_wandb=args.wandb, resume_from=args.resume,
-          seed=args.seed, ckpt_dir=args.ckpt_dir, run_name=args.name)
+          use_wandb=args.wandb, use_tb=C.TENSORBOARD and not args.no_tb,
+          resume_from=args.resume,
+          seed=args.seed, ckpt_dir=args.ckpt_dir, run_name=args.name,
+          priv_critic=args.priv_critic)
