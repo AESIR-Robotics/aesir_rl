@@ -5,6 +5,19 @@
     <exclude body1="footprint_link" body2="flipper_2_link"/>
     <exclude body1="footprint_link" body2="flipper_3_link"/>
     <exclude body1="footprint_link" body2="flipper_4_link"/>
+    <!-- Ruedas hermanas del mismo flipper: tangentes (o a 1 mm) por diseño; su contacto mutuo hacia explotar la simulacion -->
+    <exclude body1="wheel_flipper1_1" body2="wheel_flipper1_2"/>
+    <exclude body1="wheel_flipper1_2" body2="wheel_flipper1_3l"/>
+    <exclude body1="wheel_flipper1_2" body2="wheel_flipper1_3r"/>
+    <exclude body1="wheel_flipper2_1" body2="wheel_flipper2_2"/>
+    <exclude body1="wheel_flipper2_2" body2="wheel_flipper2_3l"/>
+    <exclude body1="wheel_flipper2_2" body2="wheel_flipper2_3r"/>
+    <exclude body1="wheel_flipper3_1" body2="wheel_flipper3_2"/>
+    <exclude body1="wheel_flipper3_2" body2="wheel_flipper3_3l"/>
+    <exclude body1="wheel_flipper3_2" body2="wheel_flipper3_3r"/>
+    <exclude body1="wheel_flipper4_1" body2="wheel_flipper4_2"/>
+    <exclude body1="wheel_flipper4_2" body2="wheel_flipper4_3l"/>
+    <exclude body1="wheel_flipper4_2" body2="wheel_flipper4_3r"/>
   </contact>
 
   <asset>
